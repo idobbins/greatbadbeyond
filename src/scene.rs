@@ -5,7 +5,7 @@ use wgpu::util::DeviceExt;
 use crate::camera::CAMERA_START;
 use crate::rng::Pcg32;
 
-pub const RANDOM_SPHERE_COUNT: usize = 512;
+pub const RANDOM_SPHERE_COUNT: usize = 16;
 const STATIC_SPHERE_COUNT: usize = RANDOM_SPHERE_COUNT + 1; // +1 for the ground sphere
 
 pub struct SpheresGpu {

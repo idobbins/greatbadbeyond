@@ -3,7 +3,7 @@
 // --------------------- config ---------------------
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
-const int   MAX_BOUNCES = 2;
+const int   MAX_BOUNCES = 4;
 const float T_MIN       = 1e-3;
 const float T_MAX       = 1e30;
 
@@ -96,16 +96,8 @@ void hit_spheres(vec3 ro, vec3 rd, out float tmin, out vec3 nmin, out vec3 alb)
 }
 
 vec3 sky(vec3 rd) {
-    float t = 0.5 * (rd.y + 1.0);
-    vec3 horizon = vec3(0.82, 0.82, 0.86);
-    vec3 zenith = vec3(0.97, 0.99, 1.02);
-    vec3 base = mix(horizon, zenith, t);
-
-    vec3 sun_dir = normalize(vec3(0.3, 0.6, 0.7));
-    float sun = pow(max(dot(rd, sun_dir), 0.0), 64.0);
-    vec3 sun_color = vec3(1.35, 1.25, 1.05);
-
-    return base + sun_color * sun;     // soft sun highlight for extra light
+    float t = 0.5 * (normalize(rd).y + 1.0);
+    return mix(vec3(1.0), vec3(0.5, 0.7, 1.0), t);
 }
 
 void main() {
@@ -148,19 +140,18 @@ void main() {
 
         throughput *= mix(vec3(1.0), albedo, hit); // only on hit
 
-        // Russian roulette after 2 bounces (branchless)
+        // Russian roulette after 3 bounces (branchless)
         float rrP = 0.9;
-        float rrMask = step(2.0, float(bounce));   // 1 for bounce >= 2
+        float rrMask = step(3.0, float(bounce));   // 1 for bounce >= 3
         float survive = step(rng(seed), rrP);
         float rr = mix(1.0, survive, rrMask);      // if rrMask==1, maybe zero
         throughput *= mix(vec3(1.0), vec3(1.0/rrP), rrMask * survive);
         alive *= rr;                                // if killed, alive=0, path continues but contributes 0
     }
 
-    // simple tonemap + gamma
+    // simple tonemap (linear space)
     radiance += alive * throughput * sky(rd);
     vec3 color = radiance;
-    color = color / (color + 1.0);                 // reinhard
-    color = pow(color, vec3(1.0/2.2));
+    color = color / (color + 1.0);                 // Reinhard (linear). No gamma here.
     imageStore(out_image, gid, vec4(color, 1.0));
 }
