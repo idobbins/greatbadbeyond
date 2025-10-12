@@ -3,12 +3,12 @@ use std::time::Instant;
 
 use bytemuck::{Pod, Zeroable};
 use glam::Vec3A;
-use wgpu::{util::make_spirv, ShaderStages, TextureFormat};
+use wgpu::{ShaderStages, TextureFormat, util::make_spirv};
 use winit::window::Window;
 
 use crate::camera::Camera;
 use crate::input::InputState;
-use crate::scene::{create_spheres, SpheresGpu};
+use crate::scene::{SpheresGpu, create_spheres};
 
 const COMPUTE_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/compute.comp.glsl.spv"));
 const BLIT_VERT_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/blit.vert.glsl.spv"));
@@ -60,7 +60,9 @@ pub struct State {
 impl State {
     pub async fn new(window: Arc<Window>) -> Self {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
-        let surface = instance.create_surface(window.clone()).expect("create surface");
+        let surface = instance
+            .create_surface(window.clone())
+            .expect("create surface");
 
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -79,7 +81,10 @@ impl State {
             memory_hints: wgpu::MemoryHints::Performance,
             trace: wgpu::Trace::default(),
         };
-        let (device, queue) = adapter.request_device(&device_descriptor).await.expect("request device");
+        let (device, queue) = adapter
+            .request_device(&device_descriptor)
+            .await
+            .expect("request device");
 
         let size = window.inner_size();
         let caps = surface.get_capabilities(&adapter);
@@ -92,9 +97,16 @@ impl State {
         let present_mode = if caps.present_modes.contains(&wgpu::PresentMode::Fifo) {
             wgpu::PresentMode::Fifo
         } else {
-            caps.present_modes.first().copied().unwrap_or(wgpu::PresentMode::Fifo)
+            caps.present_modes
+                .first()
+                .copied()
+                .unwrap_or(wgpu::PresentMode::Fifo)
         };
-        let alpha_mode = caps.alpha_modes.first().copied().unwrap_or(wgpu::CompositeAlphaMode::Auto);
+        let alpha_mode = caps
+            .alpha_modes
+            .first()
+            .copied()
+            .unwrap_or(wgpu::CompositeAlphaMode::Auto);
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
@@ -157,13 +169,27 @@ impl State {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                bgl_storage(5),
+                bgl_storage(6),
+                bgl_storage(7),
             ],
         });
-        let compute_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("compute-pipeline-layout"),
-            bind_group_layouts: &[&compute_layout],
-            push_constant_ranges: &[],
-        });
+        let compute_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("compute-pipeline-layout"),
+                bind_group_layouts: &[&compute_layout],
+                push_constant_ranges: &[],
+            });
         let compute_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("compute"),
             layout: Some(&compute_pipeline_layout),
@@ -176,10 +202,23 @@ impl State {
             label: Some("compute-bind"),
             layout: &compute_layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&off_view) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&off_view),
+                },
                 bind_storage(1, &spheres.buf_center_radius),
                 bind_storage(2, &spheres.buf_albedo),
-                wgpu::BindGroupEntry { binding: 3, resource: cam_buf.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: cam_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: spheres.buf_grid_params.as_entire_binding(),
+                },
+                bind_storage(5, &spheres.buf_l0_cells),
+                bind_storage(6, &spheres.buf_l1_cells),
+                bind_storage(7, &spheres.buf_cell_indices),
             ],
         });
 
@@ -214,11 +253,12 @@ impl State {
                 },
             ],
         });
-        let render_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("render-pipeline-layout"),
-            bind_group_layouts: &[&render_layout],
-            push_constant_ranges: &[],
-        });
+        let render_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("render-pipeline-layout"),
+                bind_group_layouts: &[&render_layout],
+                push_constant_ranges: &[],
+            });
         let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("render"),
             layout: Some(&render_pipeline_layout),
@@ -248,8 +288,14 @@ impl State {
             label: Some("render-bind"),
             layout: &render_layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::Sampler(&sampler) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&off_view) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&off_view),
+                },
             ],
         });
 
@@ -313,11 +359,15 @@ impl State {
                 return;
             }
         };
-        let frame_view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let frame_view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
 
         let mut encoder = self
             .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("encoder") });
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("encoder"),
+            });
 
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -362,7 +412,11 @@ impl State {
         }
     }
 
-    fn create_offscreen(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
+    fn create_offscreen(
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
+    ) -> (wgpu::Texture, wgpu::TextureView) {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("offscreen"),
             size: wgpu::Extent3d {
@@ -382,7 +436,8 @@ impl State {
     }
 
     fn recreate_offscreen_bindings(&mut self) {
-        let (off_tex, off_view) = Self::create_offscreen(&self.device, self.config.width, self.config.height);
+        let (off_tex, off_view) =
+            Self::create_offscreen(&self.device, self.config.width, self.config.height);
         self.off_tex = off_tex;
         self.off_view = off_view;
 
@@ -390,18 +445,37 @@ impl State {
             label: Some("compute-bind-resized"),
             layout: &self.compute_layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&self.off_view) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&self.off_view),
+                },
                 bind_storage(1, &self.spheres.buf_center_radius),
                 bind_storage(2, &self.spheres.buf_albedo),
-                wgpu::BindGroupEntry { binding: 3, resource: self.cam_buf.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.cam_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: self.spheres.buf_grid_params.as_entire_binding(),
+                },
+                bind_storage(5, &self.spheres.buf_l0_cells),
+                bind_storage(6, &self.spheres.buf_l1_cells),
+                bind_storage(7, &self.spheres.buf_cell_indices),
             ],
         });
         self.render_bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("render-bind-resized"),
             layout: &self.render_layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::Sampler(&self.sampler) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.off_view) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&self.off_view),
+                },
             ],
         });
     }
@@ -424,7 +498,8 @@ impl State {
             frame_index: self.frame_index,
             sphere_count: self.spheres.count,
         };
-        self.queue.write_buffer(&self.cam_buf, 0, bytemuck::bytes_of(&data));
+        self.queue
+            .write_buffer(&self.cam_buf, 0, bytemuck::bytes_of(&data));
     }
 
     fn update_camera(&mut self, input: &mut InputState, dt: f32) {

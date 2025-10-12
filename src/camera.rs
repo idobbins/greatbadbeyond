@@ -12,7 +12,12 @@ pub struct Camera {
 
 impl Camera {
     pub fn new() -> Self {
-        Self { pos: CAMERA_START, yaw: std::f32::consts::PI, pitch: 0.0, fovy_deg: 60.0 }
+        Self {
+            pos: CAMERA_START,
+            yaw: std::f32::consts::PI,
+            pitch: 0.0,
+            fovy_deg: 60.0,
+        }
     }
 
     pub fn basis(&self) -> (Vec3A, Vec3A, Vec3A) {

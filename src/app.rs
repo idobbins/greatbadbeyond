@@ -33,7 +33,12 @@ impl ApplicationHandler for App {
         self.state = Some(pollster::block_on(State::new(window)));
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: winit::window::WindowId, event: WindowEvent) {
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        _id: winit::window::WindowId,
+        event: WindowEvent,
+    ) {
         let Some(state) = self.state.as_mut() else {
             return;
         };
@@ -41,7 +46,10 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => state.resize(size.width, size.height),
             WindowEvent::RedrawRequested => state.frame(&mut self.input),
-            WindowEvent::MouseInput { state: winit::event::ElementState::Pressed, .. } => {
+            WindowEvent::MouseInput {
+                state: winit::event::ElementState::Pressed,
+                ..
+            } => {
                 if !self.input.mouse_locked {
                     let _ = state
                         .window()
@@ -66,7 +74,12 @@ impl ApplicationHandler for App {
         }
     }
 
-    fn device_event(&mut self, _event_loop: &ActiveEventLoop, _device_id: winit::event::DeviceId, event: DeviceEvent) {
+    fn device_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _device_id: winit::event::DeviceId,
+        event: DeviceEvent,
+    ) {
         if let DeviceEvent::MouseMotion { delta } = event {
             if self.input.mouse_locked {
                 self.input.mouse_dx += delta.0 as f32;
