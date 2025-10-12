@@ -3,7 +3,7 @@
 // --------------------- config ---------------------
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
-const int   MAX_BOUNCES = 4;
+const int   MAX_BOUNCES = 2;
 const float T_MIN       = 1e-3;
 const float T_MAX       = 1e30;
 
@@ -97,7 +97,15 @@ void hit_spheres(vec3 ro, vec3 rd, out float tmin, out vec3 nmin, out vec3 alb)
 
 vec3 sky(vec3 rd) {
     float t = 0.5 * (rd.y + 1.0);
-    return mix(vec3(1.0), vec3(0.5, 0.7, 1.0), t);     // simple gradient
+    vec3 horizon = vec3(0.82, 0.82, 0.86);
+    vec3 zenith = vec3(0.97, 0.99, 1.02);
+    vec3 base = mix(horizon, zenith, t);
+
+    vec3 sun_dir = normalize(vec3(0.3, 0.6, 0.7));
+    float sun = pow(max(dot(rd, sun_dir), 0.0), 64.0);
+    vec3 sun_color = vec3(1.35, 1.25, 1.05);
+
+    return base + sun_color * sun;     // soft sun highlight for extra light
 }
 
 void main() {
@@ -150,6 +158,7 @@ void main() {
     }
 
     // simple tonemap + gamma
+    radiance += alive * throughput * sky(rd);
     vec3 color = radiance;
     color = color / (color + 1.0);                 // reinhard
     color = pow(color, vec3(1.0/2.2));

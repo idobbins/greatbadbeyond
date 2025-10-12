@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use bytemuck::{Pod, Zeroable};
+use glam::Vec3A;
 use wgpu::{util::make_spirv, util::DeviceExt, ShaderStages, TextureFormat};
 use winit::{
     application::ApplicationHandler,
@@ -14,6 +15,10 @@ use winit::{
 const COMPUTE_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/compute.comp.glsl.spv"));
 const BLIT_VERT_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/blit.vert.glsl.spv"));
 const BLIT_FRAG_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/blit.frag.glsl.spv"));
+
+const RANDOM_SPHERE_COUNT: usize = 64;
+const STATIC_SPHERE_COUNT: usize = RANDOM_SPHERE_COUNT + 1; // +1 for the ground sphere
+const CAMERA_START: Vec3A = Vec3A::from_array([0.0, 1.0, 4.0]);
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
@@ -71,7 +76,7 @@ struct State {
 
 #[derive(Clone, Copy)]
 struct Camera {
-    pos: [f32; 3],
+    pos: Vec3A,
     yaw: f32,
     pitch: f32,
     fovy_deg: f32,
@@ -79,17 +84,16 @@ struct Camera {
 
 impl Camera {
     fn new() -> Self {
-        Self { pos: [0.0, 1.0, 4.0], yaw: 3.14159, pitch: 0.0, fovy_deg: 60.0 }
+        Self { pos: CAMERA_START, yaw: 3.14159, pitch: 0.0, fovy_deg: 60.0 }
     }
 
-    fn basis(&self) -> ([f32; 3], [f32; 3], [f32; 3]) {
+    fn basis(&self) -> (Vec3A, Vec3A, Vec3A) {
         let (sy, cy) = self.yaw.sin_cos();
         let (sp, cp) = self.pitch.sin_cos();
-        let fwd = normalize3([cy * cp, sp, -sy * cp]);
-        let up_world = [0.0, 1.0, 0.0];
-        let right = normalize3(cross3(fwd, up_world));
-        let up = normalize3(cross3(right, fwd));
-        (fwd, right, up)
+        let forward = Vec3A::new(cy * cp, sp, -sy * cp).normalize();
+        let right = forward.cross(Vec3A::Y).normalize_or_zero();
+        let up = right.cross(forward).normalize_or_zero();
+        (forward, right, up)
     }
 }
 
@@ -128,6 +132,30 @@ impl InputState {
         self.mouse_dx = 0.0;
         self.mouse_dy = 0.0;
         delta
+    }
+}
+
+struct Pcg32 {
+    state: u32,
+}
+
+impl Pcg32 {
+    fn new(seed: u32) -> Self {
+        Self { state: seed }
+    }
+
+    fn next_u32(&mut self) -> u32 {
+        let mut v = self.state;
+        v = v.wrapping_mul(747_796_405).wrapping_add(2_891_336_453);
+        let word = ((v >> ((v >> 28) + 4)) ^ v).wrapping_mul(277_803_737);
+        let result = (word >> 22) ^ word;
+        self.state = result;
+        result
+    }
+
+    fn next_f32(&mut self) -> f32 {
+        const SCALE: f32 = 1.0 / 4_294_967_296.0;
+        self.next_u32() as f32 * SCALE
     }
 }
 
@@ -196,47 +224,7 @@ impl State {
 
         let (off_tex, off_view) = Self::create_offscreen(&device, config.width, config.height);
 
-        let spheres = {
-            #[derive(Clone, Copy)]
-            struct Sphere {
-                c: [f32; 3],
-                r: f32,
-                color: [f32; 3],
-            }
-
-            let scene: [Sphere; 4] = [
-                Sphere { c: [0.0, 1.0, -3.5], r: 1.0, color: [0.9, 0.2, 0.2] },
-                Sphere { c: [2.0, 1.0, -5.0], r: 1.0, color: [0.2, 0.9, 0.2] },
-                Sphere { c: [-2.0, 1.0, -5.0], r: 1.0, color: [0.2, 0.2, 0.9] },
-                Sphere { c: [0.0, -1000.0, 0.0], r: 999.0, color: [0.9, 0.9, 0.9] },
-            ];
-            let count = scene.len() as u32;
-
-            let cx: Vec<f32> = scene.iter().map(|s| s.c[0]).collect();
-            let cy: Vec<f32> = scene.iter().map(|s| s.c[1]).collect();
-            let cz: Vec<f32> = scene.iter().map(|s| s.c[2]).collect();
-            let rr: Vec<f32> = scene.iter().map(|s| s.r).collect();
-            let cr: Vec<f32> = scene.iter().map(|s| s.color[0]).collect();
-            let cg: Vec<f32> = scene.iter().map(|s| s.color[1]).collect();
-            let cb: Vec<f32> = scene.iter().map(|s| s.color[2]).collect();
-
-            let mk = |label: &str, bytes: &[u8]| device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some(label),
-                contents: bytes,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            });
-
-            SpheresGpu {
-                count,
-                buf_cx: mk("s.cx", bytemuck::cast_slice(&cx)),
-                buf_cy: mk("s.cy", bytemuck::cast_slice(&cy)),
-                buf_cz: mk("s.cz", bytemuck::cast_slice(&cz)),
-                buf_r: mk("s.r", bytemuck::cast_slice(&rr)),
-                buf_cr: mk("s.cr", bytemuck::cast_slice(&cr)),
-                buf_cg: mk("s.cg", bytemuck::cast_slice(&cg)),
-                buf_cb: mk("s.cb", bytemuck::cast_slice(&cb)),
-            }
-        };
+        let spheres = Self::create_spheres(&device);
 
         let cam = Camera::new();
         let cam_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -421,6 +409,89 @@ impl State {
         (texture, view)
     }
 
+    fn create_spheres(device: &wgpu::Device) -> SpheresGpu {
+        let mut rng = Pcg32::new(0x9E37_79B9);
+        let mut centers = Vec::with_capacity(STATIC_SPHERE_COUNT);
+        let mut radii = Vec::with_capacity(STATIC_SPHERE_COUNT);
+        let mut colors = Vec::with_capacity(STATIC_SPHERE_COUNT);
+
+        centers.push(Vec3A::new(0.0, -1000.0, 0.0));
+        radii.push(999.0);
+        colors.push(Vec3A::splat(0.9));
+
+        let mut attempts = 0usize;
+        let max_attempts = RANDOM_SPHERE_COUNT * 32;
+        while centers.len() < STATIC_SPHERE_COUNT && attempts < max_attempts {
+            attempts += 1;
+
+            let radius = 0.3 + rng.next_f32() * 0.7;
+            let pos = Vec3A::new(
+                (rng.next_f32() - 0.5) * 18.0,
+                radius,
+                (rng.next_f32() - 0.5) * 18.0 - 6.0,
+            );
+
+            // Keep spheres clear of the camera start to avoid immediate intersections.
+            if pos.distance(CAMERA_START) < radius + 1.0 {
+                continue;
+            }
+
+            let mut intersects = false;
+            for (other_center, other_radius) in centers.iter().zip(radii.iter()) {
+                let min_dist = other_radius + radius + 0.1;
+                if pos.distance(*other_center) < min_dist {
+                    intersects = true;
+                    break;
+                }
+            }
+            if intersects {
+                continue;
+            }
+
+            let hue = Vec3A::new(rng.next_f32(), rng.next_f32(), rng.next_f32());
+            let albedo = hue.clamp(Vec3A::splat(0.2), Vec3A::splat(0.95));
+
+            centers.push(pos);
+            radii.push(radius);
+            colors.push(albedo);
+        }
+
+        if centers.len() < STATIC_SPHERE_COUNT {
+            eprintln!(
+                "warning: only spawned {} / {} spheres due to overlap constraints",
+                centers.len(),
+                STATIC_SPHERE_COUNT
+            );
+        }
+
+        let count = centers.len() as u32;
+
+        let cx: Vec<f32> = centers.iter().map(|p| p.x).collect();
+        let cy: Vec<f32> = centers.iter().map(|p| p.y).collect();
+        let cz: Vec<f32> = centers.iter().map(|p| p.z).collect();
+        let rr: Vec<f32> = radii.clone();
+        let cr: Vec<f32> = colors.iter().map(|c| c.x).collect();
+        let cg: Vec<f32> = colors.iter().map(|c| c.y).collect();
+        let cb: Vec<f32> = colors.iter().map(|c| c.z).collect();
+
+        let mk = |label: &str, data: &[u8]| device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(label),
+            contents: data,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        });
+
+        SpheresGpu {
+            count,
+            buf_cx: mk("s.cx", bytemuck::cast_slice(&cx)),
+            buf_cy: mk("s.cy", bytemuck::cast_slice(&cy)),
+            buf_cz: mk("s.cz", bytemuck::cast_slice(&cz)),
+            buf_r: mk("s.r", bytemuck::cast_slice(&rr)),
+            buf_cr: mk("s.cr", bytemuck::cast_slice(&cr)),
+            buf_cg: mk("s.cg", bytemuck::cast_slice(&cg)),
+            buf_cb: mk("s.cb", bytemuck::cast_slice(&cb)),
+        }
+    }
+
     fn resize(&mut self, width: u32, height: u32) {
         if width == 0 || height == 0 {
             return;
@@ -466,13 +537,13 @@ impl State {
         let aspect = self.config.width.max(1) as f32 / self.config.height.max(1) as f32;
         let tan_half = (0.5 * self.cam.fovy_deg.to_radians()).tan();
         let data = CameraUbo {
-            cam_pos: self.cam.pos,
+            cam_pos: self.cam.pos.to_array(),
             _pad0: 0.0,
-            cam_fwd: fwd,
+            cam_fwd: fwd.to_array(),
             _pad1: 0.0,
-            cam_right: right,
+            cam_right: right.to_array(),
             _pad2: 0.0,
-            cam_up: up,
+            cam_up: up.to_array(),
             _pad3: 0.0,
             tan_half_fovy: tan_half,
             aspect,
@@ -489,52 +560,44 @@ impl State {
             self.cam.yaw -= dx * sensitivity;
             self.cam.pitch -= dy * sensitivity;
             let limit = std::f32::consts::FRAC_PI_2 - 0.001;
-            if self.cam.pitch > limit {
-                self.cam.pitch = limit;
-            }
-            if self.cam.pitch < -limit {
-                self.cam.pitch = -limit;
-            }
+            self.cam.pitch = self.cam.pitch.clamp(-limit, limit);
         }
 
-        let (fwd, right, _) = self.cam.basis();
-        let mut velocity = [0.0, 0.0, 0.0];
-        let base_speed = 3.0;
-        let speed = if input.shift {
-            base_speed * 3.0
-        } else if input.ctrl {
-            base_speed * 0.4
-        } else {
-            base_speed
-        };
+        let (forward, right, _) = self.cam.basis();
+        let mut velocity = Vec3A::ZERO;
         if input.w {
-            velocity = add3(velocity, fwd);
+            velocity += forward;
         }
         if input.s {
-            velocity = sub3(velocity, fwd);
+            velocity -= forward;
         }
         if input.d {
-            velocity = add3(velocity, right);
+            velocity += right;
         }
         if input.a {
-            velocity = sub3(velocity, right);
+            velocity -= right;
         }
         if input.e {
-            velocity = add3(velocity, [0.0, 1.0, 0.0]);
+            velocity += Vec3A::Y;
         }
         if input.q {
-            velocity = sub3(velocity, [0.0, 1.0, 0.0]);
+            velocity -= Vec3A::Y;
         }
 
-        if length3(velocity) > 0.0 {
-            let v = normalize3(velocity);
-            self.cam.pos = add3(self.cam.pos, mul3f(v, speed * dt));
+        if velocity.length_squared() > 0.0 {
+            let base_speed = 3.0;
+            let speed = if input.shift {
+                base_speed * 3.0
+            } else if input.ctrl {
+                base_speed * 0.4
+            } else {
+                base_speed
+            };
+            self.cam.pos += velocity.normalize() * speed * dt;
         }
     }
 
     fn frame(&mut self, input: &mut InputState) {
-        self.window.request_redraw();
-
         let now = Instant::now();
         let dt = (now - self.last_frame).as_secs_f32().max(1.0 / 600.0);
         self.last_frame = now;
@@ -596,44 +659,13 @@ impl State {
 
         self.queue.submit(Some(encoder.finish()));
         frame.present();
+        self.window.request_redraw();
+
+        if self.frame_index % 60 == 0 {
+            let ms = dt * 1_000.0;
+            println!("frame {:>6} | {:>5.2} ms", self.frame_index, ms);
+        }
     }
-}
-
-fn add3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
-}
-
-fn sub3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-
-fn mul3f(a: [f32; 3], s: f32) -> [f32; 3] {
-    [a[0] * s, a[1] * s, a[2] * s]
-}
-
-fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-
-fn length3(a: [f32; 3]) -> f32 {
-    dot3(a, a).sqrt()
-}
-
-fn normalize3(a: [f32; 3]) -> [f32; 3] {
-    let len = length3(a);
-    if len > 0.0 {
-        mul3f(a, 1.0 / len)
-    } else {
-        a
-    }
-}
-
-fn cross3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
 }
 
 fn bgl_storage(binding: u32) -> wgpu::BindGroupLayoutEntry {
