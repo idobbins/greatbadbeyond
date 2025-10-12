@@ -6,21 +6,22 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 const int   MAX_BOUNCES = 4;
 const float T_MIN       = 1e-3;
 const float T_MAX       = 1e30;
+const uint  MISS_ID     = 0xFFFFFFFFu;
+const uint  TILE        = 64u;
 
 // ------------------ outputs -----------------------
 layout(set = 0, binding = 0, rgba8) writeonly uniform image2D out_image;
 
-// ---------------- SoA sphere buffers --------------
-layout(std430, set = 0, binding = 1) readonly buffer SphereX { float s_cx[]; };
-layout(std430, set = 0, binding = 2) readonly buffer SphereY { float s_cy[]; };
-layout(std430, set = 0, binding = 3) readonly buffer SphereZ { float s_cz[]; };
-layout(std430, set = 0, binding = 4) readonly buffer SphereR { float s_r[];  };
-layout(std430, set = 0, binding = 5) readonly buffer ColR    { float s_cr[]; };
-layout(std430, set = 0, binding = 6) readonly buffer ColG    { float s_cg[]; };
-layout(std430, set = 0, binding = 7) readonly buffer ColB    { float s_cb[]; };
+// --------------- sphere buffers (vec4) -------------
+layout(std430, set = 0, binding = 1) readonly buffer SphereCenterRadius {
+    vec4 sphere_center_radius[];
+};
+layout(std430, set = 0, binding = 2) readonly buffer SphereAlbedo {
+    vec4 sphere_albedo[];
+};
 
 // ---------------- camera & params -----------------
-layout(std140, set = 0, binding = 8) uniform Camera
+layout(std140, set = 0, binding = 3) uniform Camera
 {
     vec3  cam_pos;       float _pad0;
     vec3  cam_fwd;       float _pad1;
@@ -57,41 +58,47 @@ vec3 sample_cos_hemisphere(vec3 N, inout uint seed) {
     return normalize(T * d.x + B * d.y + N * d.z);
 }
 
-// Branchless ray-sphere. Returns (t, normal, albedo) via refs.
-void hit_spheres(vec3 ro, vec3 rd, out float tmin, out vec3 nmin, out vec3 alb)
-{
+shared vec4 tile_center_radius[TILE];
+shared vec4 tile_albedo[TILE];
+
+// Find only tmin and sphere index using shared-memory tiling.
+void hit_spheres_min_only(vec3 ro, vec3 rd, out float tmin, out uint idmin) {
     tmin = T_MAX;
-    nmin = vec3(0);
-    alb  = vec3(0);
+    idmin = MISS_ID;
 
-    for (uint i = 0u; i < u.sphere_count; ++i) {
-        vec3  c  = vec3(s_cx[i], s_cy[i], s_cz[i]);
-        float r  = s_r[i];
+    for (uint base = 0u; base < u.sphere_count; base += TILE) {
+        uint lane = gl_LocalInvocationIndex;
+        uint idx  = base + lane;
+        if (lane < TILE && idx < u.sphere_count) {
+            tile_center_radius[lane] = sphere_center_radius[idx];
+            tile_albedo[lane]        = sphere_albedo[idx];
+        }
 
-        vec3  oc = ro - c;
-        float b  = dot(oc, rd);
-        float c2 = dot(oc, oc) - r * r;
-        float disc = b*b - c2;
-        float hit  = step(0.0, disc);                  // 1 if disc >= 0
-        float sd   = sqrt(max(disc, 0.0));
-        float t0   = -b - sd;
-        float t1   = -b + sd;
+        barrier();
 
-        // choose frontmost positive root; INF otherwise
-        float t    = mix(T_MAX, t0, step(T_MIN, t0));
-        t          = mix(t, t1, (1.0 - step(T_MIN, t0)) * step(T_MIN, t1));
-        t          = mix(T_MAX, t, hit);
+        uint count = min(TILE, u.sphere_count - base);
+        for (uint j = 0u; j < count; ++j) {
+            vec3 center = tile_center_radius[j].xyz;
+            float radius = tile_center_radius[j].w;
+            vec3 oc = ro - center;
+            float b = dot(oc, rd);
+            float c = dot(oc, oc) - radius * radius;
+            float disc = b * b - c;
+            if (disc < 0.0) {
+                continue;
+            }
 
-        float sel  = step(t, tmin);                    // 1 if this t < current best
-        tmin = mix(tmin, t, sel);
+            float sd = sqrt(disc);
+            float t0 = -b - sd;
+            float t1 = -b + sd;
+            float t = (t0 > T_MIN) ? t0 : ((t1 > T_MIN) ? t1 : T_MAX);
+            if (t < tmin) {
+                tmin = t;
+                idmin = base + j;
+            }
+        }
 
-        // Compute normal & albedo for this candidate and branchlessly keep if selected
-        vec3  p    = ro + t * rd;
-        vec3  n    = normalize(p - c);
-        vec3  k    = vec3(s_cr[i], s_cg[i], s_cb[i]);
-
-        nmin = mix(nmin, n, sel);
-        alb  = mix(alb,  k, sel);
+        barrier();
     }
 }
 
@@ -118,39 +125,49 @@ void main() {
 
     vec3 throughput = vec3(1.0);
     vec3 radiance   = vec3(0.0);
-    float alive     = 1.0;
+    bool path_alive = true;
 
     for (int bounce = 0; bounce < MAX_BOUNCES; ++bounce) {
-        float t; vec3 n; vec3 albedo;
-        hit_spheres(ro, rd, t, n, albedo);
+        if (!path_alive) {
+            break;
+        }
 
-        float hit = step(T_MIN, t) * step(t, T_MAX*0.5);  // 1 if valid hit
-        vec3  hitP = ro + t * rd;
+        float t;
+        uint sid;
+        hit_spheres_min_only(ro, rd, t, sid);
 
-        // Miss: add sky and kill path (branchless)
-        vec3 Lsky = sky(rd);
-        radiance += (1.0 - hit) * alive * throughput * Lsky;
-        alive     = alive * hit;
+        if (sid == MISS_ID) {
+            radiance += throughput * sky(rd);
+            break;
+        }
 
-        // Next bounce (Lambert)
-        vec3 new_ro = hitP + n * 1e-3;
-        vec3 new_rd = sample_cos_hemisphere(n, seed);
-        ro = mix(ro, new_ro, hit);
-        rd = normalize(mix(rd, new_rd, hit));
+        vec4 sphere = sphere_center_radius[sid];
+        vec4 alb    = sphere_albedo[sid];
+        vec3 center = sphere.xyz;
+        vec3 hit_pos = ro + t * rd;
+        vec3 normal = normalize(hit_pos - center);
+        vec3 albedo = alb.rgb;
 
-        throughput *= mix(vec3(1.0), albedo, hit); // only on hit
+        throughput *= albedo;
 
-        // Russian roulette after 3 bounces (branchless)
-        float rrP = 0.9;
-        float rrMask = step(3.0, float(bounce));   // 1 for bounce >= 3
-        float survive = step(rng(seed), rrP);
-        float rr = mix(1.0, survive, rrMask);      // if rrMask==1, maybe zero
-        throughput *= mix(vec3(1.0), vec3(1.0/rrP), rrMask * survive);
-        alive *= rr;                                // if killed, alive=0, path continues but contributes 0
+        ro = hit_pos + normal * 1e-3;
+        rd = sample_cos_hemisphere(normal, seed);
+
+        // Russian roulette after 3 bounces
+        if (bounce >= 3) {
+            const float rrP = 0.9;
+            if (rng(seed) > rrP) {
+                path_alive = false;
+            } else {
+                throughput /= rrP;
+            }
+        }
     }
 
     // simple tonemap (linear space)
-    radiance += alive * throughput * sky(rd);
+    if (path_alive) {
+        radiance += throughput * sky(rd);
+    }
     vec3 color = radiance;
     color = color / (color + 1.0);                 // Reinhard (linear). No gamma here.
     imageStore(out_image, gid, vec4(color, 1.0));

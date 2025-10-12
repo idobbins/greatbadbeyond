@@ -5,18 +5,13 @@ use wgpu::util::DeviceExt;
 use crate::camera::CAMERA_START;
 use crate::rng::Pcg32;
 
-pub const RANDOM_SPHERE_COUNT: usize = 16;
+pub const RANDOM_SPHERE_COUNT: usize = 1024;
 const STATIC_SPHERE_COUNT: usize = RANDOM_SPHERE_COUNT + 1; // +1 for the ground sphere
 
 pub struct SpheresGpu {
     pub count: u32,
-    pub buf_cx: wgpu::Buffer,
-    pub buf_cy: wgpu::Buffer,
-    pub buf_cz: wgpu::Buffer,
-    pub buf_r: wgpu::Buffer,
-    pub buf_cr: wgpu::Buffer,
-    pub buf_cg: wgpu::Buffer,
-    pub buf_cb: wgpu::Buffer,
+    pub buf_center_radius: wgpu::Buffer,
+    pub buf_albedo: wgpu::Buffer,
 }
 
 pub fn create_spheres(device: &wgpu::Device) -> SpheresGpu {
@@ -73,13 +68,12 @@ pub fn create_spheres(device: &wgpu::Device) -> SpheresGpu {
         );
     }
 
-    let cx: Vec<f32> = centers.iter().map(|p| p.x).collect();
-    let cy: Vec<f32> = centers.iter().map(|p| p.y).collect();
-    let cz: Vec<f32> = centers.iter().map(|p| p.z).collect();
-    let rr: Vec<f32> = radii.clone();
-    let cr: Vec<f32> = colors.iter().map(|c| c.x).collect();
-    let cg: Vec<f32> = colors.iter().map(|c| c.y).collect();
-    let cb: Vec<f32> = colors.iter().map(|c| c.z).collect();
+    let mut center_radius = Vec::with_capacity(centers.len());
+    let mut albedo = Vec::with_capacity(colors.len());
+    for ((center, radius), color) in centers.iter().zip(radii.iter()).zip(colors.iter()) {
+        center_radius.push([center.x, center.y, center.z, *radius]);
+        albedo.push([color.x, color.y, color.z, 0.0]);
+    }
 
     let mk = |label: &str, data: &[u8]| device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some(label),
@@ -89,12 +83,7 @@ pub fn create_spheres(device: &wgpu::Device) -> SpheresGpu {
 
     SpheresGpu {
         count: centers.len() as u32,
-        buf_cx: mk("s.cx", cast_slice(&cx)),
-        buf_cy: mk("s.cy", cast_slice(&cy)),
-        buf_cz: mk("s.cz", cast_slice(&cz)),
-        buf_r: mk("s.r", cast_slice(&rr)),
-        buf_cr: mk("s.cr", cast_slice(&cr)),
-        buf_cg: mk("s.cg", cast_slice(&cg)),
-        buf_cb: mk("s.cb", cast_slice(&cb)),
+        buf_center_radius: mk("s.center_radius", cast_slice(&center_radius)),
+        buf_albedo: mk("s.albedo", cast_slice(&albedo)),
     }
 }

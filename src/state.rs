@@ -147,13 +147,8 @@ impl State {
                 },
                 bgl_storage(1),
                 bgl_storage(2),
-                bgl_storage(3),
-                bgl_storage(4),
-                bgl_storage(5),
-                bgl_storage(6),
-                bgl_storage(7),
                 wgpu::BindGroupLayoutEntry {
-                    binding: 8,
+                    binding: 3,
                     visibility: ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
@@ -182,14 +177,9 @@ impl State {
             layout: &compute_layout,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&off_view) },
-                bind_storage(1, &spheres.buf_cx),
-                bind_storage(2, &spheres.buf_cy),
-                bind_storage(3, &spheres.buf_cz),
-                bind_storage(4, &spheres.buf_r),
-                bind_storage(5, &spheres.buf_cr),
-                bind_storage(6, &spheres.buf_cg),
-                bind_storage(7, &spheres.buf_cb),
-                wgpu::BindGroupEntry { binding: 8, resource: cam_buf.as_entire_binding() },
+                bind_storage(1, &spheres.buf_center_radius),
+                bind_storage(2, &spheres.buf_albedo),
+                wgpu::BindGroupEntry { binding: 3, resource: cam_buf.as_entire_binding() },
             ],
         });
 
@@ -401,14 +391,9 @@ impl State {
             layout: &self.compute_layout,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&self.off_view) },
-                bind_storage(1, &self.spheres.buf_cx),
-                bind_storage(2, &self.spheres.buf_cy),
-                bind_storage(3, &self.spheres.buf_cz),
-                bind_storage(4, &self.spheres.buf_r),
-                bind_storage(5, &self.spheres.buf_cr),
-                bind_storage(6, &self.spheres.buf_cg),
-                bind_storage(7, &self.spheres.buf_cb),
-                wgpu::BindGroupEntry { binding: 8, resource: self.cam_buf.as_entire_binding() },
+                bind_storage(1, &self.spheres.buf_center_radius),
+                bind_storage(2, &self.spheres.buf_albedo),
+                wgpu::BindGroupEntry { binding: 3, resource: self.cam_buf.as_entire_binding() },
             ],
         });
         self.render_bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
