@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use winit::{
     application::ApplicationHandler,
+    dpi::PhysicalSize,
     event::{DeviceEvent, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
@@ -11,23 +12,50 @@ use winit::{
 use crate::input::InputState;
 use crate::state::State;
 
+const DEFAULT_WINDOW_WIDTH: u32 = 1920;
+const DEFAULT_WINDOW_HEIGHT: u32 = 1080;
+
 pub fn run() {
+    run_with_resolution(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT);
+}
+
+pub fn run_with_resolution(width: u32, height: u32) {
     let event_loop = EventLoop::new().expect("event loop");
-    let mut app = App::default();
+    let mut app = App::new(sanitize_window_size(width, height));
     event_loop.run_app(&mut app).expect("run app");
 }
 
-#[derive(Default)]
 struct App {
     state: Option<State>,
     input: InputState,
+    window_size: PhysicalSize<u32>,
+}
+
+impl App {
+    fn new(window_size: PhysicalSize<u32>) -> Self {
+        Self {
+            state: None,
+            input: InputState::default(),
+            window_size,
+        }
+    }
+}
+
+impl Default for App {
+    fn default() -> Self {
+        Self::new(sanitize_window_size(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT))
+    }
 }
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         let window = Arc::new(
             event_loop
-                .create_window(Window::default_attributes().with_title("callandor - spheres"))
+                .create_window(
+                    Window::default_attributes()
+                        .with_title("callandor")
+                        .with_inner_size(self.window_size),
+                )
                 .expect("create window"),
         );
         self.state = Some(pollster::block_on(State::new(window)));
@@ -87,4 +115,8 @@ impl ApplicationHandler for App {
             }
         }
     }
+}
+
+fn sanitize_window_size(width: u32, height: u32) -> PhysicalSize<u32> {
+    PhysicalSize::new(width.max(1), height.max(1))
 }
