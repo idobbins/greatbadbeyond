@@ -1,4 +1,4 @@
-use std::sync::{Arc, mpsc};
+use std::sync::Arc;
 use std::time::Instant;
 
 use bytemuck::{Pod, Zeroable};
@@ -8,7 +8,7 @@ use winit::window::Window;
 
 use crate::camera::Camera;
 use crate::input::InputState;
-use crate::metrics::{FrameDurations, TimingStats, TimingSummary};
+use crate::metrics::{TimingStats, TimingSummary};
 use crate::scene::{SpheresGpu, create_spheres};
 
 const COMPUTE_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/compute.comp.glsl.spv"));
@@ -18,9 +18,7 @@ const BLIT_FRAG_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/blit.frag
 
 const TIMING_SAMPLE_INTERVAL: u32 = 60;
 const TIMING_HISTORY: usize = 600;
-const TIMING_BUFFER_COUNT: usize = 4;
 const WINDOW_TITLE_BASE: &str = "Callandor";
-const TIMESTAMP_COUNT: u32 = 4;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
@@ -57,7 +55,6 @@ pub struct State {
     frame_index: u32,
     last_frame: Instant,
     timing: TimingStats,
-    gpu_timers: Option<GpuTimers>,
 
     compute_layout: wgpu::BindGroupLayout,
     compute_bind: wgpu::BindGroup,
@@ -89,19 +86,9 @@ impl State {
             .await
             .expect("request adapter");
 
-        let adapter_features = adapter.features();
-        let mut supports_gpu_timers = adapter_features.contains(wgpu::Features::TIMESTAMP_QUERY)
-            && adapter_features.contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS);
-
-        let mut required_features = wgpu::Features::empty();
-        if supports_gpu_timers {
-            required_features |= wgpu::Features::TIMESTAMP_QUERY;
-            required_features |= wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
-        }
-
         let device_descriptor = wgpu::DeviceDescriptor {
             label: Some("Device"),
-            required_features,
+            required_features: wgpu::Features::empty(),
             required_limits: wgpu::Limits::default(),
             experimental_features: wgpu::ExperimentalFeatures::default(),
             memory_hints: wgpu::MemoryHints::Performance,
@@ -113,10 +100,6 @@ impl State {
             .expect("request device");
 
         window.set_title(WINDOW_TITLE_BASE);
-        let device_features = device.features();
-        supports_gpu_timers = supports_gpu_timers
-            && device_features.contains(wgpu::Features::TIMESTAMP_QUERY)
-            && device_features.contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS);
 
         let size = window.inner_size();
         let caps = surface.get_capabilities(&adapter);
@@ -392,11 +375,6 @@ impl State {
         });
 
         let timing = TimingStats::new(TIMING_SAMPLE_INTERVAL, TIMING_HISTORY);
-        let gpu_timers = if supports_gpu_timers {
-            Some(GpuTimers::new(&device, &queue, TIMING_BUFFER_COUNT))
-        } else {
-            None
-        };
 
         let mut state = Self {
             window,
@@ -414,7 +392,6 @@ impl State {
             frame_index: 0,
             last_frame: Instant::now(),
             timing,
-            gpu_timers,
             compute_layout,
             compute_bind,
             compute_pipeline,
@@ -452,7 +429,6 @@ impl State {
         self.update_camera(input, dt);
         self.frame_index = self.frame_index.wrapping_add(1);
         self.write_camera_ubo();
-        self.process_timing_samples();
 
         let frame = match self.surface.get_current_texture() {
             Ok(frame) => frame,
@@ -470,14 +446,7 @@ impl State {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
-        let measure_cpu = self.gpu_timers.is_none();
-        let cpu_frame_start = if measure_cpu {
-            Some(Instant::now())
-        } else {
-            None
-        };
-        let mut cpu_render_ms = 0.0f32;
-        let mut cpu_denoise_ms = 0.0f32;
+        let frame_start = Instant::now();
 
         let mut encoder = self
             .device
@@ -490,19 +459,6 @@ impl State {
         let dispatch_x = gx.max(1);
         let dispatch_y = gy.max(1);
 
-        let mut timer_frame = self
-            .gpu_timers
-            .as_mut()
-            .and_then(|timers| timers.begin_frame());
-        if let Some(frame_timer) = timer_frame.as_mut() {
-            frame_timer.mark(&mut encoder, TimerPoint::FrameBegin);
-        }
-
-        let cpu_render_start = if measure_cpu {
-            Some(Instant::now())
-        } else {
-            None
-        };
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("path-trace"),
@@ -512,19 +468,6 @@ impl State {
             pass.set_bind_group(0, &self.compute_bind, &[]);
             pass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
         }
-        if let Some(start) = cpu_render_start {
-            cpu_render_ms = start.elapsed().as_secs_f32() * 1_000.0;
-        }
-        if let Some(frame_timer) = timer_frame.as_mut() {
-            frame_timer.mark(&mut encoder, TimerPoint::PathEnd);
-            frame_timer.mark(&mut encoder, TimerPoint::DenoiseBegin);
-        }
-
-        let cpu_denoise_start = if measure_cpu {
-            Some(Instant::now())
-        } else {
-            None
-        };
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("denoise"),
@@ -533,13 +476,6 @@ impl State {
             pass.set_pipeline(&self.denoise_pipeline);
             pass.set_bind_group(0, &self.denoise_bind, &[]);
             pass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
-        }
-        if let Some(start) = cpu_denoise_start {
-            cpu_denoise_ms = start.elapsed().as_secs_f32() * 1_000.0;
-        }
-        if let Some(mut frame_timer) = timer_frame {
-            frame_timer.mark(&mut encoder, TimerPoint::FrameEnd);
-            frame_timer.finish(&mut encoder);
         }
 
         {
@@ -567,11 +503,9 @@ impl State {
         frame.present();
         self.window.request_redraw();
 
-        if let Some(frame_start) = cpu_frame_start {
-            let total_ms = frame_start.elapsed().as_secs_f32() * 1_000.0;
-            let sample = FrameDurations::new(cpu_render_ms, cpu_denoise_ms, total_ms);
-            self.consume_timing_sample(sample);
-        }
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+        let total_ms = frame_start.elapsed().as_secs_f32() * 1_000.0;
+        self.consume_timing_sample(total_ms);
     }
 
     fn create_trace_texture(
@@ -684,34 +618,19 @@ impl State {
         });
     }
 
-    fn process_timing_samples(&mut self) {
-        let mut ready = Vec::new();
-        if let Some(timers) = self.gpu_timers.as_mut() {
-            while let Some(sample) = timers.collect_ready(&self.device, &self.queue) {
-                ready.push(sample);
-            }
-        }
-        for sample in ready {
-            self.consume_timing_sample(sample);
-        }
-    }
-
-    fn consume_timing_sample(&mut self, sample: FrameDurations) {
-        if let Some(summary) = self.timing.record(sample) {
+    fn consume_timing_sample(&mut self, total_ms: f32) {
+        if let Some(summary) = self.timing.record(total_ms) {
             self.update_window_title(&summary);
         }
     }
 
     fn update_window_title(&self, summary: &TimingSummary) {
         let title = format!(
-            "{WINDOW_TITLE_BASE} | render {r:.2} ms | denoise {d:.2} ms | total {t:.2} ms | avg {ar:.2}/{ad:.2}/{at:.2} ms | p95 {p:.2} ms | n={n}",
-            r = summary.last.render_ms,
-            d = summary.last.denoise_ms,
-            t = summary.last.total_ms,
-            ar = summary.avg_render,
-            ad = summary.avg_denoise,
+            "{WINDOW_TITLE_BASE} | frame {t:.2} ms | avg {at:.2} ms | p95 {p95:.2} ms | p99 {p99:.2} ms | n={n}",
+            t = summary.last_total,
             at = summary.avg_total,
-            p = summary.p95_total,
+            p95 = summary.p95_total,
+            p99 = summary.p99_total,
             n = summary.sample_count,
         );
         self.window.set_title(&title);
@@ -802,172 +721,4 @@ fn bind_storage(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry {
         binding,
         resource: buffer.as_entire_binding(),
     }
-}
-
-struct GpuTimers {
-    query_set: wgpu::QuerySet,
-    buffers: Vec<wgpu::Buffer>,
-    pending: Vec<bool>,
-    write_index: usize,
-    read_index: usize,
-    period_ms: f32,
-    buffer_size: wgpu::BufferAddress,
-}
-
-impl GpuTimers {
-    fn new(device: &wgpu::Device, queue: &wgpu::Queue, slot_count: usize) -> Self {
-        let query_set = device.create_query_set(&wgpu::QuerySetDescriptor {
-            label: Some("timings-query-set"),
-            ty: wgpu::QueryType::Timestamp,
-            count: TIMESTAMP_COUNT,
-        });
-
-        let buffer_size = TIMESTAMP_COUNT as u64 * std::mem::size_of::<u64>() as u64;
-        let buffers = (0..slot_count)
-            .map(|i| {
-                device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some(&format!("timings-buffer-{i}")),
-                    size: buffer_size,
-                    usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::QUERY_RESOLVE,
-                    mapped_at_creation: false,
-                })
-            })
-            .collect();
-
-        Self {
-            query_set,
-            buffers,
-            pending: vec![false; slot_count],
-            write_index: 0,
-            read_index: 0,
-            period_ms: queue.get_timestamp_period() / 1_000_000.0,
-            buffer_size,
-        }
-    }
-
-    fn begin_frame(&mut self) -> Option<GpuTimerFrame<'_>> {
-        if self.buffers.is_empty() {
-            return None;
-        }
-        let idx = self.write_index;
-        if self.pending[idx] {
-            return None;
-        }
-        self.write_index = (self.write_index + 1) % self.buffers.len();
-        Some(GpuTimerFrame {
-            timers: self,
-            buffer_index: idx,
-        })
-    }
-
-    fn collect_ready(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-    ) -> Option<FrameDurations> {
-        if self.buffers.is_empty() {
-            return None;
-        }
-
-        for _ in 0..self.buffers.len() {
-            let idx = self.read_index;
-            if !self.pending[idx] {
-                self.read_index = (self.read_index + 1) % self.buffers.len();
-                continue;
-            }
-
-            let buffer = &self.buffers[idx];
-            let readback = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("timings-readback"),
-                size: self.buffer_size,
-                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("timings-copy"),
-            });
-            encoder.copy_buffer_to_buffer(buffer, 0, &readback, 0, self.buffer_size);
-            queue.submit(Some(encoder.finish()));
-
-            let read_slice = readback.slice(..);
-            let (sender, receiver) = mpsc::channel();
-            read_slice.map_async(wgpu::MapMode::Read, move |result| {
-                let _ = sender.send(result);
-            });
-            let _ = device.poll(wgpu::PollType::wait_indefinitely());
-
-            let Ok(result) = receiver.recv() else {
-                self.pending[idx] = false;
-                self.read_index = (self.read_index + 1) % self.buffers.len();
-                continue;
-            };
-
-            if result.is_err() {
-                self.pending[idx] = false;
-                self.read_index = (self.read_index + 1) % self.buffers.len();
-                continue;
-            }
-
-            let data = read_slice.get_mapped_range();
-            let timestamps: &[u64] = bytemuck::cast_slice(&data);
-            let render_ticks = timestamps
-                .get(1)
-                .zip(timestamps.get(0))
-                .map(|(end, start)| end.saturating_sub(*start))
-                .unwrap_or(0);
-            let denoise_ticks = timestamps
-                .get(3)
-                .zip(timestamps.get(2))
-                .map(|(end, start)| end.saturating_sub(*start))
-                .unwrap_or(0);
-            let total_ticks = timestamps
-                .get(3)
-                .zip(timestamps.get(0))
-                .map(|(end, start)| end.saturating_sub(*start))
-                .unwrap_or(0);
-            drop(data);
-            readback.unmap();
-
-            self.pending[idx] = false;
-            self.read_index = (self.read_index + 1) % self.buffers.len();
-
-            let render_ms = render_ticks as f32 * self.period_ms;
-            let denoise_ms = denoise_ticks as f32 * self.period_ms;
-            let total_ms = total_ticks as f32 * self.period_ms;
-            return Some(FrameDurations::new(render_ms, denoise_ms, total_ms));
-        }
-
-        None
-    }
-}
-
-struct GpuTimerFrame<'a> {
-    timers: &'a mut GpuTimers,
-    buffer_index: usize,
-}
-
-impl<'a> GpuTimerFrame<'a> {
-    fn mark(&mut self, encoder: &mut wgpu::CommandEncoder, point: TimerPoint) {
-        encoder.write_timestamp(&self.timers.query_set, point as u32);
-    }
-
-    fn finish(self, encoder: &mut wgpu::CommandEncoder) {
-        let idx = self.buffer_index;
-        encoder.resolve_query_set(
-            &self.timers.query_set,
-            0..TIMESTAMP_COUNT,
-            &self.timers.buffers[idx],
-            0,
-        );
-        self.timers.pending[idx] = true;
-    }
-}
-
-#[repr(u32)]
-#[derive(Clone, Copy)]
-enum TimerPoint {
-    FrameBegin = 0,
-    PathEnd = 1,
-    DenoiseBegin = 2,
-    FrameEnd = 3,
 }
