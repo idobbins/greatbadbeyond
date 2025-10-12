@@ -17,6 +17,7 @@ fn main() {
 
     let shaders = [
         ("compute.comp.glsl", shaderc::ShaderKind::Compute),
+        ("denoise.comp.glsl", shaderc::ShaderKind::Compute),
         ("blit.vert.glsl", shaderc::ShaderKind::Vertex),
         ("blit.frag.glsl", shaderc::ShaderKind::Fragment),
     ];

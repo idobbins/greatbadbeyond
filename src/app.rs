@@ -43,7 +43,10 @@ impl App {
 
 impl Default for App {
     fn default() -> Self {
-        Self::new(sanitize_window_size(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT))
+        Self::new(sanitize_window_size(
+            DEFAULT_WINDOW_WIDTH,
+            DEFAULT_WINDOW_HEIGHT,
+        ))
     }
 }
 

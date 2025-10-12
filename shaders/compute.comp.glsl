@@ -8,7 +8,7 @@ const float T_MAX       = 1e30;
 const uint  MISS_ID     = 0xFFFFFFFFu;
 
 // ------------------ outputs -----------------------
-layout(set = 0, binding = 0, rgba8) writeonly uniform image2D out_image;
+layout(set = 0, binding = 0, rgba32f) writeonly uniform image2D out_image;
 
 // --------------- sphere buffers (vec4) -------------
 layout(std430, set = 0, binding = 1) readonly buffer SphereCenterRadius {
@@ -380,7 +380,6 @@ void main() {
     }
 
     if (path_alive) { radiance += throughput * sky(rd); }
-    vec3 color = radiance;
-    color = color / (color + 1.0);
+    vec3 color = max(radiance, vec3(0.0));
     imageStore(out_image, gid, vec4(color, 1.0));
 }
