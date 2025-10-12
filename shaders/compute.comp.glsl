@@ -159,14 +159,20 @@ void hit_grid_min(vec3 ro, vec3 rd, out float tmin, out uint idmin) {
 
         // Leaf: test the list
         if (h.w == 0u) {
+            float best_cell_t = T_MAX;
+            uint best_cell_id = MISS_ID;
             for (uint k = 0u; k < h.y; ++k) {
                 uint sid = cell_indices[h.x + k]; // > 0 (ground excluded when building grid)
                 float th;
-                if (intersect_sphere_id(ro, rd, sid, th) && th <= t_cell_exit) {
-                    tmin = th;
-                    idmin = sid;
-                    return;
+                if (intersect_sphere_id(ro, rd, sid, th) && th <= t_cell_exit && th < best_cell_t) {
+                    best_cell_t = th;
+                    best_cell_id = sid;
                 }
+            }
+            if (best_cell_id != MISS_ID) {
+                tmin = best_cell_t;
+                idmin = best_cell_id;
+                return;
             }
         } else {
             // Child grid inside this macro-cell
@@ -200,14 +206,23 @@ void hit_grid_min(vec3 ro, vec3 rd, out float tmin, out uint idmin) {
                 uint cci = h.z + l1_index(cc, CHILD_DIM);
                 uvec2 h1 = l1_cells[cci];
 
+                float limit = min(t_ch_exit, t_cell_exit);
+                float best_child_t = T_MAX;
+                uint best_child_id = MISS_ID;
+
                 for (uint k = 0u; k < h1.y; ++k) {
                     uint sid = cell_indices[h1.x + k];
                     float th;
-                    if (intersect_sphere_id(ro, rd, sid, th) && th <= min(t_ch_exit, t_cell_exit)) {
-                        tmin = th;
-                        idmin = sid;
-                        return;
+                    if (intersect_sphere_id(ro, rd, sid, th) && th <= limit && th < best_child_t) {
+                        best_child_t = th;
+                        best_child_id = sid;
                     }
+                }
+
+                if (best_child_id != MISS_ID) {
+                    tmin = best_child_t;
+                    idmin = best_child_id;
+                    return;
                 }
 
                 // step inner
