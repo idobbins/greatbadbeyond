@@ -5,9 +5,8 @@ use wgpu::util::DeviceExt;
 use crate::camera::CAMERA_START;
 use crate::rng::Pcg32;
 
-pub const RANDOM_SPHERE_COUNT: usize = 10_000;
-const STATIC_SPHERE_COUNT: usize = RANDOM_SPHERE_COUNT + 1; // +1 for the ground sphere
-const GROUND_IDX: usize = 0;
+pub const RANDOM_SPHERE_COUNT: usize = 100_000;
+const MAX_SPHERE_COUNT: usize = RANDOM_SPHERE_COUNT;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Default, Debug)]
@@ -35,19 +34,15 @@ pub struct SpheresGpu {
 
 pub fn create_spheres(device: &wgpu::Device) -> SpheresGpu {
     let mut rng = Pcg32::new(0x9E37_79B9);
-    let mut centers = Vec::with_capacity(STATIC_SPHERE_COUNT);
-    let mut radii = Vec::with_capacity(STATIC_SPHERE_COUNT);
-    let mut colors = Vec::with_capacity(STATIC_SPHERE_COUNT);
-
-    centers.push(Vec3A::new(0.0, -1000.0, 0.0));
-    radii.push(999.0);
-    colors.push(Vec3A::splat(0.9));
+    let mut centers = Vec::with_capacity(MAX_SPHERE_COUNT);
+    let mut radii = Vec::with_capacity(MAX_SPHERE_COUNT);
+    let mut colors = Vec::with_capacity(MAX_SPHERE_COUNT);
 
     let spawn_extent = (RANDOM_SPHERE_COUNT as f32).sqrt() * 1.2;
 
     let mut attempts = 0usize;
     let max_attempts = RANDOM_SPHERE_COUNT * 64;
-    while centers.len() < STATIC_SPHERE_COUNT && attempts < max_attempts {
+    while centers.len() < MAX_SPHERE_COUNT && attempts < max_attempts {
         attempts += 1;
 
         let radius = 0.3 + rng.next_f32() * 0.7;
@@ -81,11 +76,11 @@ pub fn create_spheres(device: &wgpu::Device) -> SpheresGpu {
         colors.push(albedo);
     }
 
-    if centers.len() < STATIC_SPHERE_COUNT {
+    if centers.len() < MAX_SPHERE_COUNT {
         eprintln!(
             "warning: only spawned {} / {} spheres due to overlap constraints",
             centers.len(),
-            STATIC_SPHERE_COUNT
+            MAX_SPHERE_COUNT
         );
     }
 
@@ -106,16 +101,13 @@ pub fn create_spheres(device: &wgpu::Device) -> SpheresGpu {
         min: Vec3A::splat(f32::INFINITY),
         max: Vec3A::splat(f32::NEG_INFINITY),
     };
-    for (i, (c, r)) in centers.iter().zip(radii.iter()).enumerate() {
-        if i == GROUND_IDX {
-            continue;
-        }
+    for (c, r) in centers.iter().zip(radii.iter()) {
         let r3 = Vec3A::splat(*r);
         scene_aabb.min = scene_aabb.min.min(*c - r3);
         scene_aabb.max = scene_aabb.max.max(*c + r3);
     }
 
-    if centers.len() <= 1 {
+    if centers.is_empty() {
         scene_aabb.min = Vec3A::splat(-1.0);
         scene_aabb.max = Vec3A::splat(1.0);
     }
@@ -127,8 +119,8 @@ pub fn create_spheres(device: &wgpu::Device) -> SpheresGpu {
     let mut ext = scene_aabb.max - scene_aabb.min;
     ext = Vec3A::new(ext.x.max(0.1), ext.y.max(0.1), ext.z.max(0.1));
 
-    let n_non_ground = (centers.len().saturating_sub(1)).max(1) as f32;
-    let total_cells_target = (n_non_ground / 4.0).max(1.0);
+    let sphere_count = centers.len().max(1) as f32;
+    let total_cells_target = (sphere_count / 4.0).max(1.0);
     let base = total_cells_target.cbrt();
     let maxe = ext.max_element();
     let dims_f = [
@@ -177,7 +169,7 @@ pub fn create_spheres(device: &wgpu::Device) -> SpheresGpu {
     };
     let flatten = |x: u32, y: u32, z: u32| -> usize { (x + dims.x * (y + dims.y * z)) as usize };
 
-    for i in 1..centers.len() {
+    for i in 0..centers.len() {
         let c = centers[i];
         let r = radii[i];
         let min = c - Vec3A::splat(r);

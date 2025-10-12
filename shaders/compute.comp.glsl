@@ -79,6 +79,17 @@ vec3 sky(vec3 rd) {
     return mix(vec3(1.0), vec3(0.5, 0.7, 1.0), t);
 }
 
+bool intersect_ground_plane(vec3 ro, vec3 rd, out float t) {
+    const float ground_y = 0.0;
+    if (abs(rd.y) < 1e-5) return false;
+    float hit_t = (ground_y - ro.y) / rd.y;
+    if (hit_t <= T_MIN) return false;
+    vec3 p = ro + hit_t * rd;
+    if (p.x < g_bmin.x || p.x > g_bmax.x || p.z < g_bmin.z || p.z > g_bmax.z) return false;
+    t = hit_t;
+    return true;
+}
+
 // ----------------- intersections -------------------
 bool intersect_sphere_id(vec3 ro, vec3 rd, uint sid, out float t) {
     vec4 s = sphere_center_radius[sid];
@@ -113,7 +124,7 @@ uint l1_index(ivec3 c, int dim) {
     return uint(c.x + dim * (c.y + dim * c.z));
 }
 
-// returns nearest hit (id & t) across grid (excluding sphere 0), with early-out per cell
+// returns nearest hit (id & t) across grid with early-out per cell
 void hit_grid_min(vec3 ro, vec3 rd, out float tmin, out uint idmin) {
     tmin = T_MAX;
     idmin = MISS_ID;
@@ -274,24 +285,36 @@ void main() {
 
         float t = T_MAX;
         uint sid = MISS_ID;
+        bool hit_plane = false;
 
-        // Ground (sphere 0): intersect separately so the grid stays compact
+        // Ground plane: intersect separately so the grid stays compact
         float tg;
-        if (intersect_sphere_id(ro, rd, 0u, tg)) { t = tg; sid = 0u; }
+        if (intersect_ground_plane(ro, rd, tg)) {
+            t = tg;
+            hit_plane = true;
+        }
 
         // Grid for all other spheres
         float t_grid; uint id_grid;
         hit_grid_min(ro, rd, t_grid, id_grid);
-        if (id_grid != MISS_ID && t_grid < t) { t = t_grid; sid = id_grid; }
+        if (id_grid != MISS_ID && t_grid < t) { t = t_grid; sid = id_grid; hit_plane = false; }
 
-        if (sid == MISS_ID) { radiance += throughput * sky(rd); break; }
+        if (!hit_plane && sid == MISS_ID) { radiance += throughput * sky(rd); break; }
 
-        vec4 sphere = sphere_center_radius[sid];
-        vec4 alb    = sphere_albedo[sid];
-        vec3 center = sphere.xyz;
         vec3 hit_pos = ro + t * rd;
-        vec3 normal = normalize(hit_pos - center);
-        vec3 albedo = alb.rgb;
+        vec3 normal;
+        vec3 albedo;
+
+        if (hit_plane) {
+            normal = vec3(0.0, 1.0, 0.0);
+            albedo = vec3(0.9);
+        } else {
+            vec4 sphere = sphere_center_radius[sid];
+            vec4 alb    = sphere_albedo[sid];
+            vec3 center = sphere.xyz;
+            normal = normalize(hit_pos - center);
+            albedo = alb.rgb;
+        }
 
         throughput *= albedo;
 
