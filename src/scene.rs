@@ -37,6 +37,7 @@ pub fn create_spheres(device: &wgpu::Device) -> SpheresGpu {
     let mut centers = Vec::with_capacity(MAX_SPHERE_COUNT);
     let mut radii = Vec::with_capacity(MAX_SPHERE_COUNT);
     let mut colors = Vec::with_capacity(MAX_SPHERE_COUNT);
+    let mut material_params = Vec::with_capacity(MAX_SPHERE_COUNT);
 
     let spawn_extent = (RANDOM_SPHERE_COUNT as f32).sqrt() * 1.2;
 
@@ -68,12 +69,27 @@ pub fn create_spheres(device: &wgpu::Device) -> SpheresGpu {
             continue;
         }
 
-        let hue = Vec3A::new(rng.next_f32(), rng.next_f32(), rng.next_f32());
-        let albedo = hue.clamp(Vec3A::splat(0.2), Vec3A::splat(0.95));
+        let material_roll = rng.next_f32();
+        let (albedo, mat_param) = if material_roll < 0.65 {
+            let hue = Vec3A::new(rng.next_f32(), rng.next_f32(), rng.next_f32());
+            (hue.clamp(Vec3A::splat(0.2), Vec3A::splat(0.95)), 0.0)
+        } else if material_roll < 0.9 {
+            let tint = Vec3A::new(
+                0.6 + rng.next_f32() * 0.3,
+                0.6 + rng.next_f32() * 0.3,
+                0.6 + rng.next_f32() * 0.3,
+            );
+            let fuzz = (rng.next_f32() * 0.5).max(0.02);
+            (tint, fuzz)
+        } else {
+            let ior = 1.2 + rng.next_f32() * 0.6;
+            (Vec3A::splat(1.0), -ior)
+        };
 
         centers.push(pos);
         radii.push(radius);
         colors.push(albedo);
+        material_params.push(mat_param);
     }
 
     if centers.len() < MAX_SPHERE_COUNT {
@@ -86,9 +102,13 @@ pub fn create_spheres(device: &wgpu::Device) -> SpheresGpu {
 
     let mut center_radius = Vec::with_capacity(centers.len());
     let mut albedo = Vec::with_capacity(colors.len());
-    for ((center, radius), color) in centers.iter().zip(radii.iter()).zip(colors.iter()) {
-        center_radius.push([center.x, center.y, center.z, *radius]);
-        albedo.push([color.x, color.y, color.z, 0.0]);
+    for i in 0..centers.len() {
+        let center = centers[i];
+        let radius = radii[i];
+        let color = colors[i];
+        let param = material_params[i];
+        center_radius.push([center.x, center.y, center.z, radius]);
+        albedo.push([color.x, color.y, color.z, param]);
     }
 
     #[derive(Clone, Copy)]

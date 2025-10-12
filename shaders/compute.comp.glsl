@@ -74,6 +74,23 @@ vec3 sample_cos_hemisphere(vec3 N, inout uint seed) {
     return normalize(T * d.x + B * d.y + N * d.z);
 }
 
+vec3 random_in_unit_sphere(inout uint seed) {
+    for (int i = 0; i < 8; ++i) {
+        vec3 p = vec3(rng(seed), rng(seed), rng(seed)) * 2.0 - vec3(1.0);
+        if (dot(p, p) < 1.0) {
+            return p;
+        }
+    }
+    vec3 p = vec3(rng(seed), rng(seed), rng(seed)) * 2.0 - vec3(1.0);
+    return normalize(p);
+}
+
+float schlick(float cosine, float ref_idx) {
+    float r0 = (1.0 - ref_idx) / (1.0 + ref_idx);
+    r0 = r0 * r0;
+    return r0 + (1.0 - r0) * pow(1.0 - cosine, 5.0);
+}
+
 vec3 sky(vec3 rd) {
     float t = 0.5 * (normalize(rd).y + 1.0);
     return mix(vec3(1.0), vec3(0.5, 0.7, 1.0), t);
@@ -304,6 +321,7 @@ void main() {
         vec3 hit_pos = ro + t * rd;
         vec3 normal;
         vec3 albedo;
+        float mat_param = 0.0;
 
         if (hit_plane) {
             normal = vec3(0.0, 1.0, 0.0);
@@ -314,12 +332,45 @@ void main() {
             vec3 center = sphere.xyz;
             normal = normalize(hit_pos - center);
             albedo = alb.rgb;
+            mat_param = alb.w;
         }
 
-        throughput *= albedo;
-
-        ro = hit_pos + normal * 1e-3;
-        rd = sample_cos_hemisphere(normal, seed);
+        if (mat_param < -1e-4) {
+            float ior = -mat_param;
+            bool entering = dot(rd, normal) < 0.0;
+            vec3 n = entering ? normal : -normal;
+            float refraction_ratio = entering ? (1.0 / ior) : ior;
+            float cos_theta = min(dot(-rd, n), 1.0);
+            float sin_theta = sqrt(max(0.0, 1.0 - cos_theta * cos_theta));
+            bool cannot_refract = refraction_ratio * sin_theta > 1.0;
+            float reflect_prob = schlick(cos_theta, refraction_ratio);
+            vec3 direction;
+            if (cannot_refract || rng(seed) < reflect_prob) {
+                direction = reflect(rd, n);
+            } else {
+                direction = refract(rd, n, refraction_ratio);
+            }
+            direction = normalize(direction);
+            throughput *= albedo;
+            ro = hit_pos + direction * 1e-3;
+            rd = direction;
+        } else if (mat_param > 1e-4) {
+            vec3 reflected = reflect(rd, normal);
+            vec3 fuzz_dir = mat_param * random_in_unit_sphere(seed);
+            vec3 new_dir = normalize(reflected + fuzz_dir);
+            if (dot(new_dir, normal) <= 0.0) {
+                path_alive = false;
+                throughput = vec3(0.0);
+                break;
+            }
+            throughput *= albedo;
+            ro = hit_pos + normal * 1e-3;
+            rd = new_dir;
+        } else {
+            throughput *= albedo;
+            ro = hit_pos + normal * 1e-3;
+            rd = sample_cos_hemisphere(normal, seed);
+        }
 
         if (bounce >= 3) {
             const float rrP = 0.9;
