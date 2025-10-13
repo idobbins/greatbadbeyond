@@ -19,6 +19,9 @@ const BLIT_FRAG_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/blit.frag
 const TIMING_SAMPLE_INTERVAL: u32 = 60;
 const TIMING_HISTORY: usize = 600;
 const WINDOW_TITLE_BASE: &str = "Callandor";
+const DEFAULT_HISTORY_WEIGHT: f32 = 1.0;
+const RESET_HISTORY_WEIGHT: f32 = 0.0;
+const MOVING_HISTORY_WEIGHT: f32 = 0.2;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
@@ -40,8 +43,8 @@ struct CameraUbo {
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
 struct AccumParams {
-    reset_history: u32,
-    _pad: [u32; 3],
+    history_weight: f32,
+    _pad: [f32; 3],
 }
 
 pub struct State {
@@ -66,7 +69,7 @@ pub struct State {
     frame_index: u32,
     last_frame: Instant,
     timing: TimingStats,
-    accum_reset: bool,
+    history_weight: f32,
 
     compute_layout: wgpu::BindGroupLayout,
     compute_bind: wgpu::BindGroup,
@@ -484,7 +487,7 @@ impl State {
             frame_index: 0,
             last_frame: Instant::now(),
             timing,
-            accum_reset: true,
+            history_weight: DEFAULT_HISTORY_WEIGHT,
             compute_layout,
             compute_bind,
             compute_pipeline,
@@ -516,6 +519,7 @@ impl State {
         self.surface.configure(&self.device, &self.config);
         self.recreate_textures_and_bindings();
         self.frame_index = 0;
+        self.history_weight = RESET_HISTORY_WEIGHT;
         self.write_accum_params();
     }
 
@@ -526,7 +530,7 @@ impl State {
 
         let camera_moved = self.update_camera(input, dt);
         if camera_moved {
-            self.reset_accumulation();
+            self.history_weight = MOVING_HISTORY_WEIGHT;
         }
         self.frame_index = self.frame_index.wrapping_add(1);
         self.write_camera_ubo();
@@ -797,13 +801,7 @@ impl State {
         });
 
         self.history_is_a = true;
-        self.accum_reset = true;
-    }
-
-    fn reset_accumulation(&mut self) {
-        self.history_is_a = true;
-        self.accum_reset = true;
-        self.frame_index = 0;
+        self.history_weight = RESET_HISTORY_WEIGHT;
     }
 
     fn rotate_history_targets(&mut self) {
@@ -851,13 +849,14 @@ impl State {
     }
 
     fn write_accum_params(&mut self) {
+        let weight = self.history_weight.clamp(0.0, 1.0);
         let params = AccumParams {
-            reset_history: if self.accum_reset { 1 } else { 0 },
-            _pad: [0; 3],
+            history_weight: weight,
+            _pad: [0.0; 3],
         };
         self.queue
             .write_buffer(&self.accum_params_buf, 0, bytemuck::bytes_of(&params));
-        self.accum_reset = false;
+        self.history_weight = DEFAULT_HISTORY_WEIGHT;
     }
 
     fn update_camera(&mut self, input: &mut InputState, dt: f32) -> bool {

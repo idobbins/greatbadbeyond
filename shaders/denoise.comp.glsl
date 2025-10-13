@@ -6,10 +6,10 @@ layout(set = 0, binding = 0, rgba16f) readonly uniform image2D history_image;
 layout(set = 0, binding = 1, rgba32f) readonly uniform image2D current_image;
 layout(set = 0, binding = 2, rgba16f) writeonly uniform image2D accum_image;
 layout(std140, set = 0, binding = 3) uniform AccumParams {
-    uint reset_history;
-    uint _pad0;
-    uint _pad1;
-    uint _pad2;
+    float history_weight;
+    float _pad0;
+    float _pad1;
+    float _pad2;
 } u_accum;
 
 const float SAMPLE_EPSILON = 0.5;
@@ -30,10 +30,11 @@ void main() {
     float history_count = history.a;
     vec3 history_color = history.rgb;
 
+    float scaled_history = min(history_count * u_accum.history_weight, MAX_ACCUM_SAMPLES - 1.0);
     float new_count = 1.0;
     vec3 blended = sample_color;
 
-    bool use_history = history_count > SAMPLE_EPSILON && u_accum.reset_history == 0u;
+    bool use_history = scaled_history > SAMPLE_EPSILON;
 
     if (use_history) {
         vec3 history_min = history_color;
@@ -43,7 +44,8 @@ void main() {
             for (int ox = -1; ox <= 1; ++ox) {
                 ivec2 coord = clamp(gid + ivec2(ox, oy), ivec2(0), dims - ivec2(1));
                 vec4 neighbor = imageLoad(history_image, coord);
-                if (neighbor.a > SAMPLE_EPSILON) {
+                float neighbor_weight = neighbor.a * u_accum.history_weight;
+                if (neighbor_weight > SAMPLE_EPSILON) {
                     history_min = min(history_min, neighbor.rgb);
                     history_max = max(history_max, neighbor.rgb);
                 }
@@ -55,9 +57,11 @@ void main() {
         vec3 clamp_max = history_max + range * CLAMP_RELAXATION;
         vec3 clamped_sample = clamp(sample_color, clamp_min, clamp_max);
 
-        new_count = min(history_count + 1.0, MAX_ACCUM_SAMPLES);
-        float blend_weight = 1.0 / new_count;
-        blended = mix(history_color, clamped_sample, blend_weight);
+        float total_weight = scaled_history + 1.0;
+        float inv_total = 1.0 / total_weight;
+        float history_contrib = scaled_history * inv_total;
+        blended = history_color * history_contrib + clamped_sample * inv_total;
+        new_count = total_weight;
     }
 
     imageStore(accum_image, gid, vec4(blended, new_count));
