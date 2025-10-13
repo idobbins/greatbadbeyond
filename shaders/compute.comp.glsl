@@ -2,6 +2,9 @@
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
+const float EPS   = 1e-8;
+const float FMAX  = 1e30;
+
 const int   MAX_BOUNCES = 4;
 const float T_MIN       = 1e-3;
 const float T_MAX       = 1e30;
@@ -158,22 +161,23 @@ void hit_grid_min(vec3 ro, vec3 rd, out float tmin, out uint idmin) {
     vec3 p = ro + t * rd;
 
     ivec3 c = clamp(ivec3(floor((p - g_bmin) * g_inv_cell)), ivec3(0), dims - ivec3(1));
-    ivec3 step = ivec3(rd.x >= 0.0 ? 1 : -1, rd.y >= 0.0 ? 1 : -1, rd.z >= 0.0 ? 1 : -1);
+    ivec3 stepv = ivec3(rd.x >= 0.0 ? 1 : -1,
+                        rd.y >= 0.0 ? 1 : -1,
+                        rd.z >= 0.0 ? 1 : -1);
 
-    vec3 next_boundary = g_bmin + (vec3(c) + vec3(step.x > 0 ? 1.0 : 0.0,
-                                                 step.y > 0 ? 1.0 : 0.0,
-                                                 step.z > 0 ? 1.0 : 0.0)) * cell_size;
-
+    vec3 off = step(vec3(0.0), rd);
     vec3 inv_rd = 1.0 / rd;
+
+    vec3 next_b = g_bmin + (vec3(c) + off) * cell_size;
     vec3 t_max = vec3(
-        (abs(rd.x) < 1e-8) ? T_MAX : (next_boundary.x - ro.x) * inv_rd.x,
-        (abs(rd.y) < 1e-8) ? T_MAX : (next_boundary.y - ro.y) * inv_rd.y,
-        (abs(rd.z) < 1e-8) ? T_MAX : (next_boundary.z - ro.z) * inv_rd.z
+        mix(FMAX, (next_b.x - ro.x) * inv_rd.x, step(EPS, abs(rd.x))),
+        mix(FMAX, (next_b.y - ro.y) * inv_rd.y, step(EPS, abs(rd.y))),
+        mix(FMAX, (next_b.z - ro.z) * inv_rd.z, step(EPS, abs(rd.z)))
     );
     vec3 t_delta = vec3(
-        (abs(rd.x) < 1e-8) ? T_MAX : cell_size.x * abs(inv_rd.x),
-        (abs(rd.y) < 1e-8) ? T_MAX : cell_size.y * abs(inv_rd.y),
-        (abs(rd.z) < 1e-8) ? T_MAX : cell_size.z * abs(inv_rd.z)
+        mix(FMAX, cell_size.x * abs(inv_rd.x), step(EPS, abs(rd.x))),
+        mix(FMAX, cell_size.y * abs(inv_rd.y), step(EPS, abs(rd.y))),
+        mix(FMAX, cell_size.z * abs(inv_rd.z), step(EPS, abs(rd.z)))
     );
 
     const int CHILD_DIM = 4;
@@ -212,19 +216,17 @@ void hit_grid_min(vec3 ro, vec3 rd, out float tmin, out uint idmin) {
             vec3 rel = (pch - macro_min) / child_cell_size;
             ivec3 cc = clamp(ivec3(floor(rel)), ivec3(0), ch_dims - ivec3(1));
 
-            ivec3 ch_step = step;
-            vec3 ch_next_boundary = macro_min + (vec3(cc) + vec3(ch_step.x > 0 ? 1.0 : 0.0,
-                                                                 ch_step.y > 0 ? 1.0 : 0.0,
-                                                                 ch_step.z > 0 ? 1.0 : 0.0)) * child_cell_size;
+            vec3 ch_off = off;
+            vec3 ch_next_b = macro_min + (vec3(cc) + ch_off) * child_cell_size;
             vec3 ch_t_max = vec3(
-                (abs(rd.x) < 1e-8) ? T_MAX : (ch_next_boundary.x - ro.x) * inv_rd.x,
-                (abs(rd.y) < 1e-8) ? T_MAX : (ch_next_boundary.y - ro.y) * inv_rd.y,
-                (abs(rd.z) < 1e-8) ? T_MAX : (ch_next_boundary.z - ro.z) * inv_rd.z
+                mix(FMAX, (ch_next_b.x - ro.x) * inv_rd.x, step(EPS, abs(rd.x))),
+                mix(FMAX, (ch_next_b.y - ro.y) * inv_rd.y, step(EPS, abs(rd.y))),
+                mix(FMAX, (ch_next_b.z - ro.z) * inv_rd.z, step(EPS, abs(rd.z)))
             );
             vec3 ch_t_delta = vec3(
-                (abs(rd.x) < 1e-8) ? T_MAX : child_cell_size.x * abs(inv_rd.x),
-                (abs(rd.y) < 1e-8) ? T_MAX : child_cell_size.y * abs(inv_rd.y),
-                (abs(rd.z) < 1e-8) ? T_MAX : child_cell_size.z * abs(inv_rd.z)
+                mix(FMAX, child_cell_size.x * abs(inv_rd.x), step(EPS, abs(rd.x))),
+                mix(FMAX, child_cell_size.y * abs(inv_rd.y), step(EPS, abs(rd.y))),
+                mix(FMAX, child_cell_size.z * abs(inv_rd.z), step(EPS, abs(rd.z)))
             );
 
             for (int g2 = 0; g2 < 512; ++g2) {
@@ -253,26 +255,27 @@ void hit_grid_min(vec3 ro, vec3 rd, out float tmin, out uint idmin) {
                     return;
                 }
 
-                // step inner
-                if (ch_t_max.x < ch_t_max.y) {
-                    if (ch_t_max.x < ch_t_max.z) { cc.x += ch_step.x; t = ch_t_max.x; ch_t_max.x += ch_t_delta.x; }
-                    else                          { cc.z += ch_step.z; t = ch_t_max.z; ch_t_max.z += ch_t_delta.z; }
-                } else {
-                    if (ch_t_max.y < ch_t_max.z) { cc.y += ch_step.y; t = ch_t_max.y; ch_t_max.y += ch_t_delta.y; }
-                    else                          { cc.z += ch_step.z; t = ch_t_max.z; ch_t_max.z += ch_t_delta.z; }
-                }
+                float mch = min(ch_t_max.x, min(ch_t_max.y, ch_t_max.z));
+                float cselx = step(ch_t_max.x, ch_t_max.y) * step(ch_t_max.x, ch_t_max.z);
+                float csely = (1.0 - cselx) * step(ch_t_max.y, ch_t_max.z);
+                float cselz = 1.0 - max(cselx, csely);
+
+                cc += ivec3(int(cselx), int(csely), int(cselz)) * stepv;
+                t = mch;
+                ch_t_max += vec3(cselx, csely, cselz) * ch_t_delta;
+
                 if (any(lessThan(cc, ivec3(0))) || any(greaterThanEqual(cc, ch_dims))) break;
             }
         }
 
-        // step outer
-        if (t_max.x < t_max.y) {
-            if (t_max.x < t_max.z) { c.x += step.x; t = t_max.x; t_max.x += t_delta.x; }
-            else                   { c.z += step.z; t = t_max.z; t_max.z += t_delta.z; }
-        } else {
-            if (t_max.y < t_max.z) { c.y += step.y; t = t_max.y; t_max.y += t_delta.y; }
-            else                   { c.z += step.z; t = t_max.z; t_max.z += t_delta.z; }
-        }
+        float m = min(t_max.x, min(t_max.y, t_max.z));
+        float selx = step(t_max.x, t_max.y) * step(t_max.x, t_max.z);
+        float sely = (1.0 - selx) * step(t_max.y, t_max.z);
+        float selz = 1.0 - max(selx, sely);
+
+        c += ivec3(int(selx), int(sely), int(selz)) * stepv;
+        t = m;
+        t_max += vec3(selx, sely, selz) * t_delta;
 
         if (any(lessThan(c, ivec3(0))) || any(greaterThanEqual(c, dims))) break;
     }
@@ -300,23 +303,23 @@ void main() {
     for (int bounce = 0; bounce < MAX_BOUNCES; ++bounce) {
         if (!path_alive) break;
 
-        float t = T_MAX;
-        uint sid = MISS_ID;
-        bool hit_plane = false;
+        float t_plane = T_MAX;
+        bool have_plane = intersect_ground_plane(ro, rd, t_plane);
 
-        // Ground plane: intersect separately so the grid stays compact
-        float tg;
-        if (intersect_ground_plane(ro, rd, tg)) {
-            t = tg;
-            hit_plane = true;
-        }
-
-        // Grid for all other spheres
-        float t_grid; uint id_grid;
+        float t_grid = T_MAX;
+        uint id_grid;
         hit_grid_min(ro, rd, t_grid, id_grid);
-        if (id_grid != MISS_ID && t_grid < t) { t = t_grid; sid = id_grid; hit_plane = false; }
+        bool have_grid = (id_grid != MISS_ID);
 
-        if (!hit_plane && sid == MISS_ID) { radiance += throughput * sky(rd); break; }
+        bool choose_plane = have_plane && (!have_grid || t_plane <= t_grid);
+        float take_plane = choose_plane ? 1.0 : 0.0;
+
+        float t = mix(t_grid, t_plane, take_plane);
+        bool miss = !(have_plane || have_grid);
+        if (miss) { radiance += throughput * sky(rd); break; }
+
+        bool hit_plane = (take_plane > 0.5);
+        uint sid = hit_plane ? MISS_ID : id_grid;
 
         vec3 hit_pos = ro + t * rd;
         vec3 normal;
@@ -330,7 +333,7 @@ void main() {
             vec4 sphere = sphere_center_radius[sid];
             vec4 alb    = sphere_albedo[sid];
             vec3 center = sphere.xyz;
-            normal = normalize(hit_pos - center);
+            normal = (hit_pos - center) * (1.0 / sphere.w);
             albedo = alb.rgb;
             mat_param = alb.w;
         }
