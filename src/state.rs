@@ -12,7 +12,7 @@ use crate::metrics::{TimingStats, TimingSummary};
 use crate::scene::{SpheresGpu, create_spheres};
 
 const COMPUTE_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/compute.comp.glsl.spv"));
-const DENOISE_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/denoise.comp.glsl.spv"));
+const ACCUM_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/denoise.comp.glsl.spv"));
 const BLIT_VERT_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/blit.vert.glsl.spv"));
 const BLIT_FRAG_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/blit.frag.glsl.spv"));
 
@@ -37,6 +37,13 @@ struct CameraUbo {
     sphere_count: u32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, Debug)]
+struct AccumParams {
+    reset_history: u32,
+    _pad: [u32; 3],
+}
+
 pub struct State {
     window: Arc<Window>,
     surface: wgpu::Surface<'static>,
@@ -44,28 +51,35 @@ pub struct State {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
 
-    off_tex: wgpu::Texture,
-    off_view: wgpu::TextureView,
     trace_tex: wgpu::Texture,
     trace_view: wgpu::TextureView,
+    accum_tex_a: wgpu::Texture,
+    accum_view_a: wgpu::TextureView,
+    accum_tex_b: wgpu::Texture,
+    accum_view_b: wgpu::TextureView,
+    history_is_a: bool,
 
     spheres: SpheresGpu,
     cam_buf: wgpu::Buffer,
+    accum_params_buf: wgpu::Buffer,
     cam: Camera,
     frame_index: u32,
     last_frame: Instant,
     timing: TimingStats,
+    accum_reset: bool,
 
     compute_layout: wgpu::BindGroupLayout,
     compute_bind: wgpu::BindGroup,
     compute_pipeline: wgpu::ComputePipeline,
 
-    denoise_layout: wgpu::BindGroupLayout,
-    denoise_bind: wgpu::BindGroup,
-    denoise_pipeline: wgpu::ComputePipeline,
+    accumulate_layout: wgpu::BindGroupLayout,
+    accumulate_bind_a: wgpu::BindGroup,
+    accumulate_bind_b: wgpu::BindGroup,
+    accumulate_pipeline: wgpu::ComputePipeline,
 
     render_layout: wgpu::BindGroupLayout,
-    render_bind: wgpu::BindGroup,
+    render_bind_a: wgpu::BindGroup,
+    render_bind_b: wgpu::BindGroup,
     sampler: wgpu::Sampler,
     render_pipeline: wgpu::RenderPipeline,
 }
@@ -138,9 +152,9 @@ impl State {
             label: Some("compute"),
             source: make_spirv(COMPUTE_SPV),
         });
-        let denoise_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("denoise"),
-            source: make_spirv(DENOISE_SPV),
+        let accumulate_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("accumulate"),
+            source: make_spirv(ACCUM_SPV),
         });
         let blit_vertex = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("blit-vert"),
@@ -153,7 +167,10 @@ impl State {
 
         let (trace_tex, trace_view) =
             Self::create_trace_texture(&device, config.width, config.height);
-        let (off_tex, off_view) = Self::create_offscreen(&device, config.width, config.height);
+        let (accum_tex_a, accum_view_a) =
+            Self::create_accum_texture(&device, config.width, config.height, "accum-a");
+        let (accum_tex_b, accum_view_b) =
+            Self::create_accum_texture(&device, config.width, config.height, "accum-b");
 
         let spheres = create_spheres(&device);
 
@@ -161,6 +178,12 @@ impl State {
         let cam_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("CameraUBO"),
             size: std::mem::size_of::<CameraUbo>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let accum_params_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("AccumParams"),
+            size: std::mem::size_of::<AccumParams>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -243,11 +266,21 @@ impl State {
             ],
         });
 
-        let denoise_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("denoise-layout"),
+        let accumulate_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("accumulate-layout"),
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::ReadOnly,
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
                     visibility: ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::StorageTexture {
                         access: wgpu::StorageTextureAccess::ReadOnly,
@@ -257,42 +290,83 @@ impl State {
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
-                    binding: 1,
+                    binding: 2,
                     visibility: ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::StorageTexture {
                         access: wgpu::StorageTextureAccess::WriteOnly,
-                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        format: wgpu::TextureFormat::Rgba16Float,
                         view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
                     count: None,
                 },
             ],
         });
-        let denoise_pipeline_layout =
+        let accumulate_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("denoise-pipeline-layout"),
-                bind_group_layouts: &[&denoise_layout],
+                label: Some("accumulate-pipeline-layout"),
+                bind_group_layouts: &[&accumulate_layout],
                 push_constant_ranges: &[],
             });
-        let denoise_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("denoise"),
-            layout: Some(&denoise_pipeline_layout),
-            module: &denoise_module,
-            entry_point: Some("main"),
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-            cache: None,
-        });
-        let denoise_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("denoise-bind"),
-            layout: &denoise_layout,
+        let accumulate_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("accumulate"),
+                layout: Some(&accumulate_pipeline_layout),
+                module: &accumulate_module,
+                entry_point: Some("main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                cache: None,
+            });
+        let accumulate_bind_a = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("accumulate-bind-a"),
+            layout: &accumulate_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&trace_view),
+                    resource: wgpu::BindingResource::TextureView(&accum_view_a),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&off_view),
+                    resource: wgpu::BindingResource::TextureView(&trace_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&accum_view_b),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: accum_params_buf.as_entire_binding(),
+                },
+            ],
+        });
+        let accumulate_bind_b = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("accumulate-bind-b"),
+            layout: &accumulate_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&accum_view_b),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&trace_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&accum_view_a),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: accum_params_buf.as_entire_binding(),
                 },
             ],
         });
@@ -359,8 +433,8 @@ impl State {
             multiview: None,
             cache: None,
         });
-        let render_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("render-bind"),
+        let render_bind_a = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("render-bind-a"),
             layout: &render_layout,
             entries: &[
                 wgpu::BindGroupEntry {
@@ -369,7 +443,21 @@ impl State {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&off_view),
+                    resource: wgpu::BindingResource::TextureView(&accum_view_a),
+                },
+            ],
+        });
+        let render_bind_b = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("render-bind-b"),
+            layout: &render_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&accum_view_b),
                 },
             ],
         });
@@ -384,26 +472,34 @@ impl State {
             config,
             trace_tex,
             trace_view,
-            off_tex,
-            off_view,
+            accum_tex_a,
+            accum_view_a,
+            accum_tex_b,
+            accum_view_b,
+            history_is_a: true,
             spheres,
             cam_buf,
+            accum_params_buf,
             cam,
             frame_index: 0,
             last_frame: Instant::now(),
             timing,
+            accum_reset: true,
             compute_layout,
             compute_bind,
             compute_pipeline,
-            denoise_layout,
-            denoise_bind,
-            denoise_pipeline,
+            accumulate_layout,
+            accumulate_bind_a,
+            accumulate_bind_b,
+            accumulate_pipeline,
             render_layout,
-            render_bind,
+            render_bind_a,
+            render_bind_b,
             sampler,
             render_pipeline,
         };
         state.write_camera_ubo();
+        state.write_accum_params();
         state
     }
 
@@ -418,7 +514,9 @@ impl State {
         self.config.width = width;
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
-        self.recreate_offscreen_bindings();
+        self.recreate_textures_and_bindings();
+        self.frame_index = 0;
+        self.write_accum_params();
     }
 
     pub fn frame(&mut self, input: &mut InputState) {
@@ -426,7 +524,10 @@ impl State {
         let dt = (now - self.last_frame).as_secs_f32().max(1.0 / 600.0);
         self.last_frame = now;
 
-        self.update_camera(input, dt);
+        let camera_moved = self.update_camera(input, dt);
+        if camera_moved {
+            self.reset_accumulation();
+        }
         self.frame_index = self.frame_index.wrapping_add(1);
         self.write_camera_ubo();
 
@@ -446,6 +547,8 @@ impl State {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
+        self.write_accum_params();
+
         let frame_start = Instant::now();
 
         let mut encoder = self
@@ -459,6 +562,8 @@ impl State {
         let dispatch_x = gx.max(1);
         let dispatch_y = gy.max(1);
 
+        let history_is_a = self.history_is_a;
+
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("path-trace"),
@@ -470,11 +575,16 @@ impl State {
         }
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("denoise"),
+                label: Some("accumulate"),
                 timestamp_writes: None,
             });
-            pass.set_pipeline(&self.denoise_pipeline);
-            pass.set_bind_group(0, &self.denoise_bind, &[]);
+            let accumulate_bind = if history_is_a {
+                &self.accumulate_bind_a
+            } else {
+                &self.accumulate_bind_b
+            };
+            pass.set_pipeline(&self.accumulate_pipeline);
+            pass.set_bind_group(0, accumulate_bind, &[]);
             pass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
         }
 
@@ -495,12 +605,18 @@ impl State {
                 timestamp_writes: None,
             });
             pass.set_pipeline(&self.render_pipeline);
-            pass.set_bind_group(0, &self.render_bind, &[]);
+            let render_bind = if history_is_a {
+                &self.render_bind_b
+            } else {
+                &self.render_bind_a
+            };
+            pass.set_bind_group(0, render_bind, &[]);
             pass.draw(0..3, 0..1);
         }
 
         self.queue.submit(Some(encoder.finish()));
         frame.present();
+        self.rotate_history_targets();
         self.window.request_redraw();
 
         let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
@@ -524,20 +640,23 @@ impl State {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba32Float,
-            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: wgpu::TextureUsages::STORAGE_BINDING
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         (texture, view)
     }
 
-    fn create_offscreen(
+    fn create_accum_texture(
         device: &wgpu::Device,
         width: u32,
         height: u32,
+        label: &str,
     ) -> (wgpu::Texture, wgpu::TextureView) {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("offscreen"),
+            label: Some(label),
             size: wgpu::Extent3d {
                 width: width.max(1),
                 height: height.max(1),
@@ -546,24 +665,38 @@ impl State {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::STORAGE_BINDING
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         (texture, view)
     }
 
-    fn recreate_offscreen_bindings(&mut self) {
+    fn recreate_textures_and_bindings(&mut self) {
         let (trace_tex, trace_view) =
             Self::create_trace_texture(&self.device, self.config.width, self.config.height);
         self.trace_tex = trace_tex;
         self.trace_view = trace_view;
 
-        let (off_tex, off_view) =
-            Self::create_offscreen(&self.device, self.config.width, self.config.height);
-        self.off_tex = off_tex;
-        self.off_view = off_view;
+        let (accum_tex_a, accum_view_a) = Self::create_accum_texture(
+            &self.device,
+            self.config.width,
+            self.config.height,
+            "accum-a",
+        );
+        let (accum_tex_b, accum_view_b) = Self::create_accum_texture(
+            &self.device,
+            self.config.width,
+            self.config.height,
+            "accum-b",
+        );
+        self.accum_tex_a = accum_tex_a;
+        self.accum_view_a = accum_view_a;
+        self.accum_tex_b = accum_tex_b;
+        self.accum_view_b = accum_view_b;
 
         self.compute_bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("compute-bind-resized"),
@@ -588,22 +721,54 @@ impl State {
                 bind_storage(7, &self.spheres.buf_cell_indices),
             ],
         });
-        self.denoise_bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("denoise-bind-resized"),
-            layout: &self.denoise_layout,
+
+        self.accumulate_bind_a = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("accumulate-bind-a-resized"),
+            layout: &self.accumulate_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&self.trace_view),
+                    resource: wgpu::BindingResource::TextureView(&self.accum_view_a),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&self.off_view),
+                    resource: wgpu::BindingResource::TextureView(&self.trace_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&self.accum_view_b),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.accum_params_buf.as_entire_binding(),
                 },
             ],
         });
-        self.render_bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("render-bind-resized"),
+        self.accumulate_bind_b = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("accumulate-bind-b-resized"),
+            layout: &self.accumulate_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&self.accum_view_b),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&self.trace_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&self.accum_view_a),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.accum_params_buf.as_entire_binding(),
+                },
+            ],
+        });
+
+        self.render_bind_a = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("render-bind-a-resized"),
             layout: &self.render_layout,
             entries: &[
                 wgpu::BindGroupEntry {
@@ -612,10 +777,37 @@ impl State {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&self.off_view),
+                    resource: wgpu::BindingResource::TextureView(&self.accum_view_a),
                 },
             ],
         });
+        self.render_bind_b = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("render-bind-b-resized"),
+            layout: &self.render_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&self.accum_view_b),
+                },
+            ],
+        });
+
+        self.history_is_a = true;
+        self.accum_reset = true;
+    }
+
+    fn reset_accumulation(&mut self) {
+        self.history_is_a = true;
+        self.accum_reset = true;
+        self.frame_index = 0;
+    }
+
+    fn rotate_history_targets(&mut self) {
+        self.history_is_a = !self.history_is_a;
     }
 
     fn consume_timing_sample(&mut self, total_ms: f32) {
@@ -658,7 +850,21 @@ impl State {
             .write_buffer(&self.cam_buf, 0, bytemuck::bytes_of(&data));
     }
 
-    fn update_camera(&mut self, input: &mut InputState, dt: f32) {
+    fn write_accum_params(&mut self) {
+        let params = AccumParams {
+            reset_history: if self.accum_reset { 1 } else { 0 },
+            _pad: [0; 3],
+        };
+        self.queue
+            .write_buffer(&self.accum_params_buf, 0, bytemuck::bytes_of(&params));
+        self.accum_reset = false;
+    }
+
+    fn update_camera(&mut self, input: &mut InputState, dt: f32) -> bool {
+        let prev_pos = self.cam.pos;
+        let prev_yaw = self.cam.yaw;
+        let prev_pitch = self.cam.pitch;
+
         if input.mouse_locked {
             let (dx, dy) = input.consume_mouse_delta();
             let sensitivity = 0.0025;
@@ -700,6 +906,11 @@ impl State {
             };
             self.cam.pos += velocity.normalize() * speed * dt;
         }
+
+        let moved_pos = (self.cam.pos - prev_pos).length_squared() > 1e-6;
+        let moved_yaw = (self.cam.yaw - prev_yaw).abs() > 1e-6;
+        let moved_pitch = (self.cam.pitch - prev_pitch).abs() > 1e-6;
+        moved_pos || moved_yaw || moved_pitch
     }
 }
 
