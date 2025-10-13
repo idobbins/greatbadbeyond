@@ -206,7 +206,7 @@ pub fn create_spheres(device: &wgpu::Device) -> SpheresGpu {
     let child_total = (CHILD_DIM * CHILD_DIM * CHILD_DIM) as usize;
 
     let mut l0_headers: Vec<[u32; 4]> = Vec::with_capacity(l0_len);
-    let mut l1_headers: Vec<[u32; 2]> = Vec::new();
+    let mut l1_headers: Vec<[u32; 4]> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
 
     for idx in 0..l0_len {
@@ -257,7 +257,7 @@ pub fn create_spheres(device: &wgpu::Device) -> SpheresGpu {
                 let start = indices.len() as u32;
                 let count = ch.len() as u32;
                 indices.extend_from_slice(ch.as_slice());
-                l1_headers.push([start, count]);
+                l1_headers.push([start, count, 0, 0]);
             }
 
             l0_headers.push([0, 0, child_base, 1]);
@@ -265,7 +265,7 @@ pub fn create_spheres(device: &wgpu::Device) -> SpheresGpu {
     }
 
     if l1_headers.is_empty() {
-        l1_headers.push([0, 0]);
+        l1_headers.push([0, 0, 0, 0]);
     }
     if indices.is_empty() {
         indices.push(0);

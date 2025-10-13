@@ -45,8 +45,8 @@ layout(std430, set = 0, binding = 5) readonly buffer L0Cells {
     uvec4 l0_cells[];
 };
 layout(std430, set = 0, binding = 6) readonly buffer L1Cells {
-    // x=start (into indices), y=count
-    uvec2 l1_cells[];
+    // x=start (into indices), y=count, z/w: unused padding for DX12 alignment
+    uvec4 l1_cells[];
 };
 layout(std430, set = 0, binding = 7) readonly buffer CellIndices {
     uint cell_indices[];
@@ -234,7 +234,7 @@ void hit_grid_min(vec3 ro, vec3 rd, out float tmin, out uint idmin) {
                 if (t > t_cell_exit || t > tg1) break;
 
                 uint cci = h.z + l1_index(cc, CHILD_DIM);
-                uvec2 h1 = l1_cells[cci];
+                uvec4 h1 = l1_cells[cci];
 
                 float limit = min(t_ch_exit, t_cell_exit);
                 float best_child_t = T_MAX;
