@@ -34,10 +34,10 @@ layout(std140, set = 0, binding = 3) uniform Camera
 
 // ----------------- grid (two-level) ----------------
 layout(std140, set = 0, binding = 4) uniform GridParams {
-    vec3 g_bmin; float _gp0;
-    vec3 g_bmax; float _gp1;
-    uvec3 g_dims; uint _gp2;
-    vec3 g_inv_cell; uint _gp3; // 1 / cell_size
+    vec4 g_bmin;
+    vec4 g_bmax;
+    uvec4 g_dims;
+    vec4 g_inv_cell; // 1 / cell_size (xyz)
 };
 
 layout(std430, set = 0, binding = 5) readonly buffer L0Cells {
@@ -150,17 +150,17 @@ void hit_grid_min(vec3 ro, vec3 rd, out float tmin, out uint idmin) {
     idmin = MISS_ID;
 
     float tg0, tg1;
-    if (!intersect_aabb(ro, rd, g_bmin, g_bmax, tg0, tg1)) {
+    if (!intersect_aabb(ro, rd, g_bmin.xyz, g_bmax.xyz, tg0, tg1)) {
         return;
     }
 
-    vec3 cell_size = 1.0 / g_inv_cell;
-    ivec3 dims = ivec3(g_dims);
+    vec3 cell_size = 1.0 / g_inv_cell.xyz;
+    ivec3 dims = ivec3(g_dims.xyz);
 
     float t = max(tg0, 0.0);
     vec3 p = ro + t * rd;
 
-    ivec3 c = clamp(ivec3(floor((p - g_bmin) * g_inv_cell)), ivec3(0), dims - ivec3(1));
+    ivec3 c = clamp(ivec3(floor((p - g_bmin.xyz) * g_inv_cell.xyz)), ivec3(0), dims - ivec3(1));
     ivec3 stepv = ivec3(rd.x >= 0.0 ? 1 : -1,
                         rd.y >= 0.0 ? 1 : -1,
                         rd.z >= 0.0 ? 1 : -1);
@@ -168,7 +168,7 @@ void hit_grid_min(vec3 ro, vec3 rd, out float tmin, out uint idmin) {
     vec3 off = step(vec3(0.0), rd);
     vec3 inv_rd = 1.0 / rd;
 
-    vec3 next_b = g_bmin + (vec3(c) + off) * cell_size;
+    vec3 next_b = g_bmin.xyz + (vec3(c) + off) * cell_size;
     vec3 t_max = vec3(
         mix(FMAX, (next_b.x - ro.x) * inv_rd.x, step(EPS, abs(rd.x))),
         mix(FMAX, (next_b.y - ro.y) * inv_rd.y, step(EPS, abs(rd.y))),
@@ -208,7 +208,7 @@ void hit_grid_min(vec3 ro, vec3 rd, out float tmin, out uint idmin) {
             }
         } else {
             // Child grid inside this macro-cell
-            vec3 macro_min = g_bmin + vec3(c) * cell_size;
+            vec3 macro_min = g_bmin.xyz + vec3(c) * cell_size;
 
             // start at current t (inside macro cell), run inner DDA until t_cell_exit
             vec3 pch = ro + t * rd;

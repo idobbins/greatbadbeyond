@@ -11,14 +11,10 @@ const MAX_SPHERE_COUNT: usize = RANDOM_SPHERE_COUNT;
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Default, Debug)]
 pub struct GridParams {
-    pub bmin: [f32; 3],
-    _pad0: u32,
-    pub bmax: [f32; 3],
-    _pad1: u32,
-    pub dims: [u32; 3],
-    _pad2: u32,
-    pub inv_cell: [f32; 3],
-    _pad3: u32,
+    pub bmin: [f32; 4],
+    pub bmax: [f32; 4],
+    pub dims: [u32; 4],
+    pub inv_cell: [f32; 4],
 }
 
 pub struct SpheresGpu {
@@ -284,14 +280,10 @@ pub fn create_spheres(device: &wgpu::Device) -> SpheresGpu {
     };
 
     let params = GridParams {
-        bmin: scene_aabb.min.to_array(),
-        _pad0: 0,
-        bmax: scene_aabb.max.to_array(),
-        _pad1: 0,
-        dims: [dims.x, dims.y, dims.z],
-        _pad2: 0,
-        inv_cell: inv_cell.to_array(),
-        _pad3: 0,
+        bmin: [scene_aabb.min.x, scene_aabb.min.y, scene_aabb.min.z, 0.0],
+        bmax: [scene_aabb.max.x, scene_aabb.max.y, scene_aabb.max.z, 0.0],
+        dims: [dims.x, dims.y, dims.z, 0],
+        inv_cell: [inv_cell.x, inv_cell.y, inv_cell.z, 0.0],
     };
 
     SpheresGpu {
