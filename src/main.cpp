@@ -20,6 +20,7 @@
 #include <string_view>
 #include <vector>
 #include <cmath>
+#include <limits>
 
 using namespace std;
 
@@ -114,6 +115,38 @@ inline Vec3 clamp_vec3(const Vec3 v, const f32 min_value, const f32 max_value) {
     std::clamp(v.x, min_value, max_value),
     std::clamp(v.y, min_value, max_value),
     std::clamp(v.z, min_value, max_value),
+  };
+}
+
+inline Vec3 clamp_vec3(const Vec3 v, const Vec3 min_values, const Vec3 max_values) {
+  return Vec3{
+    std::clamp(v.x, min_values.x, max_values.x),
+    std::clamp(v.y, min_values.y, max_values.y),
+    std::clamp(v.z, min_values.z, max_values.z),
+  };
+}
+
+inline Vec3 min_vec3(const Vec3 a, const Vec3 b) {
+  return Vec3{
+    std::min(a.x, b.x),
+    std::min(a.y, b.y),
+    std::min(a.z, b.z),
+  };
+}
+
+inline Vec3 max_vec3(const Vec3 a, const Vec3 b) {
+  return Vec3{
+    std::max(a.x, b.x),
+    std::max(a.y, b.y),
+    std::max(a.z, b.z),
+  };
+}
+
+inline Vec3 floor_vec3(const Vec3 v) {
+  return Vec3{
+    std::floor(v.x),
+    std::floor(v.y),
+    std::floor(v.z),
   };
 }
 
@@ -250,6 +283,20 @@ struct SphereSoA {
   std::vector<std::array<f32, 4>> albedo{};
 };
 
+struct alignas(16) GridParamsGPU {
+  std::array<f32, 4> bmin{};
+  std::array<f32, 4> bmax{};
+  std::array<u32, 4> dims{};
+  std::array<f32, 4> inv_cell{};
+};
+
+struct GridGPUData {
+  GridParamsGPU params{};
+  std::vector<std::array<u32, 4>> l0_headers{};
+  std::vector<std::array<u32, 2>> l1_headers{};
+  std::vector<u32> indices{};
+};
+
 struct CameraState {
   Vec3 position{};
   f32 yaw = 0.0f;
@@ -320,7 +367,7 @@ struct FrameTimeHistory {
   }
 };
 
-constexpr u32 SPHERE_COUNT = 1280u;
+constexpr u32 SPHERE_COUNT = 10000u;
 static_assert(SPHERE_COUNT > 0u, "SPHERE_COUNT must be positive");
 constexpr f32 GROUND_Y = -1.0f;
 constexpr f32 CAMERA_DEFAULT_SPEED = 5.0f;
@@ -333,6 +380,8 @@ constexpr f32 SPHERE_RADIUS_MAX = 1.05f;
 constexpr f32 SPHERE_HEIGHT_MIN = 0.2f;
 constexpr f32 SPHERE_HEIGHT_MAX = 2.5f;
 constexpr f32 SPHERE_TARGET_DENSITY = 0.45f;
+constexpr usize GRID_MAX_LEAF = 16u;
+constexpr u32 GRID_CHILD_DIM = 4u;
 
 inline void init_glfw() {
   const int ok = glfwInit();
@@ -871,6 +920,226 @@ inline SphereSoA pack_spheres_gpu(const std::array<SphereCPU, SPHERE_COUNT>& cpu
   return gpu;
 }
 
+inline GridGPUData build_grid_structure(const std::array<SphereCPU, SPHERE_COUNT>& spheres, const u32 sphere_count) {
+  GridGPUData grid{};
+  if (sphere_count == 0u) {
+    grid.params.bmin = { 0.0f, 0.0f, 0.0f, 0.0f };
+    grid.params.bmax = { 0.0f, 0.0f, 0.0f, 0.0f };
+    grid.params.dims = { 1u, 1u, 1u, 0u };
+    grid.params.inv_cell = { 0.0f, 0.0f, 0.0f, 0.0f };
+    grid.l0_headers.push_back(std::array<u32, 4>{ 0u, 0u, 0xFFFFFFFFu, 0u });
+    grid.l1_headers.push_back(std::array<u32, 2>{ 0u, 0u });
+    grid.indices.push_back(0u);
+    return grid;
+  }
+
+  const f32 inf = std::numeric_limits<f32>::infinity();
+  Vec3 scene_min{ inf, inf, inf };
+  Vec3 scene_max{ -inf, -inf, -inf };
+
+  for (u32 i = 0u; i < sphere_count; ++i) {
+    const SphereCPU& sphere = spheres[i];
+    const Vec3 radius_vec{ sphere.radius, sphere.radius, sphere.radius };
+    scene_min = min_vec3(scene_min, sphere.center - radius_vec);
+    scene_max = max_vec3(scene_max, sphere.center + radius_vec);
+  }
+
+  const f32 margin = 0.5f;
+  const Vec3 margin_vec{ margin, margin, margin };
+  scene_min -= margin_vec;
+  scene_max += margin_vec;
+
+  Vec3 ext = scene_max - scene_min;
+  ext = max_vec3(ext, Vec3{ 0.1f, 0.1f, 0.1f });
+
+  const f32 n_spheres = static_cast<f32>(std::max<u32>(sphere_count, 1u));
+  const f32 total_cells_target = std::max(n_spheres / 4.0f, 1.0f);
+  const f32 base = std::cbrt(total_cells_target);
+  const f32 max_extent = std::max(ext.x, std::max(ext.y, ext.z));
+
+  const Vec3 dims_f{
+    std::max((ext.x / max_extent) * base, 1.0f),
+    std::max((ext.y / max_extent) * base, 1.0f),
+    std::max((ext.z / max_extent) * base, 1.0f),
+  };
+
+  const auto clamp_dim = [](const f32 value) -> u32 {
+    return static_cast<u32>(std::clamp(std::round(value), 1.0f, 64.0f));
+  };
+
+  const u32 dims_x = clamp_dim(dims_f.x);
+  const u32 dims_y = clamp_dim(dims_f.y);
+  const u32 dims_z = clamp_dim(dims_f.z);
+
+  const Vec3 cell_size{
+    ext.x / static_cast<f32>(dims_x),
+    ext.y / static_cast<f32>(dims_y),
+    ext.z / static_cast<f32>(dims_z),
+  };
+
+  const Vec3 inv_cell{
+    (std::abs(cell_size.x) > 1e-8f) ? 1.0f / cell_size.x : 0.0f,
+    (std::abs(cell_size.y) > 1e-8f) ? 1.0f / cell_size.y : 0.0f,
+    (std::abs(cell_size.z) > 1e-8f) ? 1.0f / cell_size.z : 0.0f,
+  };
+
+  const usize l0_len = static_cast<usize>(dims_x) * static_cast<usize>(dims_y) * static_cast<usize>(dims_z);
+  runtime_assert(l0_len > 0u, "Grid has zero cells");
+
+  std::vector<std::vector<u32>> l0_lists(l0_len);
+
+  const Vec3 clamp_max{
+    static_cast<f32>(dims_x > 0u ? dims_x - 1u : 0u),
+    static_cast<f32>(dims_y > 0u ? dims_y - 1u : 0u),
+    static_cast<f32>(dims_z > 0u ? dims_z - 1u : 0u),
+  };
+  const Vec3 zero_vec{ 0.0f, 0.0f, 0.0f };
+
+  const auto clamp_to_grid = [&](const Vec3 p) -> std::array<u32, 3> {
+    const Vec3 rel{
+      (p.x - scene_min.x) * inv_cell.x,
+      (p.y - scene_min.y) * inv_cell.y,
+      (p.z - scene_min.z) * inv_cell.z,
+    };
+    const Vec3 floored = floor_vec3(rel);
+    const Vec3 clamped = clamp_vec3(floored, zero_vec, clamp_max);
+    return std::array<u32, 3>{
+      static_cast<u32>(clamped.x),
+      static_cast<u32>(clamped.y),
+      static_cast<u32>(clamped.z),
+    };
+  };
+
+  const auto flatten = [&](const u32 x, const u32 y, const u32 z) -> usize {
+    const usize ux = static_cast<usize>(x);
+    const usize uy = static_cast<usize>(y);
+    const usize uz = static_cast<usize>(z);
+    const usize dx = static_cast<usize>(dims_x);
+    const usize dy = static_cast<usize>(dims_y);
+    return ux + dx * (uy + dy * uz);
+  };
+
+  for (u32 i = 0u; i < sphere_count; ++i) {
+    const SphereCPU& sphere = spheres[i];
+    const Vec3 radius_vec{ sphere.radius, sphere.radius, sphere.radius };
+    const Vec3 min_p = sphere.center - radius_vec;
+    const Vec3 max_p = sphere.center + radius_vec;
+    const std::array<u32, 3> mn = clamp_to_grid(min_p);
+    const std::array<u32, 3> mx = clamp_to_grid(max_p);
+    for (u32 z = mn[2]; z <= mx[2]; ++z) {
+      for (u32 y = mn[1]; y <= mx[1]; ++y) {
+        for (u32 x = mn[0]; x <= mx[0]; ++x) {
+          l0_lists[flatten(x, y, z)].push_back(i);
+        }
+      }
+    }
+  }
+
+  grid.l0_headers.reserve(l0_len);
+
+  const usize child_total = static_cast<usize>(GRID_CHILD_DIM) * static_cast<usize>(GRID_CHILD_DIM) * static_cast<usize>(GRID_CHILD_DIM);
+  const Vec3 child_cell_size{
+    cell_size.x / static_cast<f32>(GRID_CHILD_DIM),
+    cell_size.y / static_cast<f32>(GRID_CHILD_DIM),
+    cell_size.z / static_cast<f32>(GRID_CHILD_DIM),
+  };
+  const Vec3 child_inv{
+    inv_cell.x * static_cast<f32>(GRID_CHILD_DIM),
+    inv_cell.y * static_cast<f32>(GRID_CHILD_DIM),
+    inv_cell.z * static_cast<f32>(GRID_CHILD_DIM),
+  };
+  const Vec3 child_max{
+    static_cast<f32>(GRID_CHILD_DIM - 1u),
+    static_cast<f32>(GRID_CHILD_DIM - 1u),
+    static_cast<f32>(GRID_CHILD_DIM - 1u),
+  };
+
+  const auto clamp_child = [&](const Vec3 p, const Vec3 cell_min) -> std::array<u32, 3> {
+    const Vec3 rel{
+      (p.x - cell_min.x) * child_inv.x,
+      (p.y - cell_min.y) * child_inv.y,
+      (p.z - cell_min.z) * child_inv.z,
+    };
+    const Vec3 floored = floor_vec3(rel);
+    const Vec3 clamped = clamp_vec3(floored, zero_vec, child_max);
+    return std::array<u32, 3>{
+      static_cast<u32>(clamped.x),
+      static_cast<u32>(clamped.y),
+      static_cast<u32>(clamped.z),
+    };
+  };
+
+  const auto flatten_child = [](const u32 x, const u32 y, const u32 z) -> usize {
+    const usize ux = static_cast<usize>(x);
+    const usize uy = static_cast<usize>(y);
+    const usize uz = static_cast<usize>(z);
+    const usize dim = static_cast<usize>(GRID_CHILD_DIM);
+    return ux + dim * (uy + dim * uz);
+  };
+
+  for (usize idx = 0u; idx < l0_len; ++idx) {
+    std::vector<u32>& cell_list = l0_lists[idx];
+    const u32 start = static_cast<u32>(grid.indices.size());
+    if (cell_list.size() <= GRID_MAX_LEAF) {
+      const u32 count = static_cast<u32>(cell_list.size());
+      grid.indices.insert(grid.indices.end(), cell_list.begin(), cell_list.end());
+      grid.l0_headers.push_back(std::array<u32, 4>{ start, count, 0xFFFFFFFFu, 0u });
+      continue;
+    }
+
+    const u32 child_base = static_cast<u32>(grid.l1_headers.size());
+    std::vector<std::vector<u32>> child_lists(child_total);
+
+    const u32 z = static_cast<u32>(idx / (static_cast<usize>(dims_x) * static_cast<usize>(dims_y)));
+    const usize rem = idx - static_cast<usize>(z) * static_cast<usize>(dims_x) * static_cast<usize>(dims_y);
+    const u32 y = static_cast<u32>(rem / static_cast<usize>(dims_x));
+    const u32 x = static_cast<u32>(rem % static_cast<usize>(dims_x));
+
+    const Vec3 cell_min{
+      scene_min.x + static_cast<f32>(x) * cell_size.x,
+      scene_min.y + static_cast<f32>(y) * cell_size.y,
+      scene_min.z + static_cast<f32>(z) * cell_size.z,
+    };
+
+    for (const u32 sid : cell_list) {
+      const SphereCPU& sphere = spheres[sid];
+      const Vec3 radius_vec{ sphere.radius, sphere.radius, sphere.radius };
+      const std::array<u32, 3> mn = clamp_child(sphere.center - radius_vec, cell_min);
+      const std::array<u32, 3> mx = clamp_child(sphere.center + radius_vec, cell_min);
+      for (u32 cz = mn[2]; cz <= mx[2]; ++cz) {
+        for (u32 cy = mn[1]; cy <= mx[1]; ++cy) {
+          for (u32 cx = mn[0]; cx <= mx[0]; ++cx) {
+            child_lists[flatten_child(cx, cy, cz)].push_back(sid);
+          }
+        }
+      }
+    }
+
+    for (std::vector<u32>& child : child_lists) {
+      const u32 child_start = static_cast<u32>(grid.indices.size());
+      const u32 child_count = static_cast<u32>(child.size());
+      grid.indices.insert(grid.indices.end(), child.begin(), child.end());
+      grid.l1_headers.push_back(std::array<u32, 2>{ child_start, child_count });
+    }
+
+    grid.l0_headers.push_back(std::array<u32, 4>{ 0u, 0u, child_base, 1u });
+  }
+
+  if (grid.l1_headers.empty()) {
+    grid.l1_headers.push_back(std::array<u32, 2>{ 0u, 0u });
+  }
+  if (grid.indices.empty()) {
+    grid.indices.push_back(0u);
+  }
+
+  grid.params.bmin = to_vec4(scene_min, 0.0f);
+  grid.params.bmax = to_vec4(scene_max, 0.0f);
+  grid.params.dims = { dims_x, dims_y, dims_z, 0u };
+  grid.params.inv_cell = { inv_cell.x, inv_cell.y, inv_cell.z, 0.0f };
+
+  return grid;
+}
+
 inline Vec3 yaw_pitch_to_forward(const f32 yaw, const f32 pitch) {
   const f32 cos_pitch = std::cos(pitch);
   return Vec3{
@@ -938,7 +1207,41 @@ inline VkDescriptorSetLayout create_descriptor_set_layout(VkDevice device) {
     .descriptorCount = 1u,
     .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
   };
-  const array layout_bindings{ storage_binding, sampled_binding, centers_binding, albedo_binding, camera_binding };
+  const VkDescriptorSetLayoutBinding grid_params_binding{
+    .binding = 5u,
+    .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+    .descriptorCount = 1u,
+    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+  };
+  const VkDescriptorSetLayoutBinding grid_l0_binding{
+    .binding = 6u,
+    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+    .descriptorCount = 1u,
+    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+  };
+  const VkDescriptorSetLayoutBinding grid_l1_binding{
+    .binding = 7u,
+    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+    .descriptorCount = 1u,
+    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+  };
+  const VkDescriptorSetLayoutBinding grid_indices_binding{
+    .binding = 8u,
+    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+    .descriptorCount = 1u,
+    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+  };
+  const array layout_bindings{
+    storage_binding,
+    sampled_binding,
+    centers_binding,
+    albedo_binding,
+    camera_binding,
+    grid_params_binding,
+    grid_l0_binding,
+    grid_l1_binding,
+    grid_indices_binding
+  };
   const VkDescriptorSetLayoutCreateInfo info{
     .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
     .bindingCount = static_cast<u32>(layout_bindings.size()),
@@ -961,11 +1264,11 @@ inline VkDescriptorPool create_descriptor_pool(VkDevice device) {
     },
     {
       .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-      .descriptorCount = 2u,
+      .descriptorCount = 5u,
     },
     {
       .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-      .descriptorCount = 1u,
+      .descriptorCount = 2u,
     },
   };
   const VkDescriptorPoolCreateInfo info{
@@ -997,7 +1300,11 @@ inline void write_descriptor_set(
   const OffscreenImage& offscreen,
   const Buffer& centers_buffer,
   const Buffer& albedo_buffer,
-  const Buffer& camera_buffer
+  const Buffer& camera_buffer,
+  const Buffer& grid_params_buffer,
+  const Buffer& grid_l0_buffer,
+  const Buffer& grid_l1_buffer,
+  const Buffer& grid_indices_buffer
 ) {
   const VkDescriptorImageInfo storage_info{
     .sampler = VK_NULL_HANDLE,
@@ -1023,6 +1330,26 @@ inline void write_descriptor_set(
     .buffer = camera_buffer.buffer,
     .offset = 0u,
     .range = camera_buffer.size,
+  };
+  const VkDescriptorBufferInfo grid_params_info{
+    .buffer = grid_params_buffer.buffer,
+    .offset = 0u,
+    .range = grid_params_buffer.size,
+  };
+  const VkDescriptorBufferInfo grid_l0_info{
+    .buffer = grid_l0_buffer.buffer,
+    .offset = 0u,
+    .range = grid_l0_buffer.size,
+  };
+  const VkDescriptorBufferInfo grid_l1_info{
+    .buffer = grid_l1_buffer.buffer,
+    .offset = 0u,
+    .range = grid_l1_buffer.size,
+  };
+  const VkDescriptorBufferInfo grid_indices_info{
+    .buffer = grid_indices_buffer.buffer,
+    .offset = 0u,
+    .range = grid_indices_buffer.size,
   };
   const VkWriteDescriptorSet writes[]{
     {
@@ -1064,6 +1391,38 @@ inline void write_descriptor_set(
       .descriptorCount = 1u,
       .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
       .pBufferInfo = &camera_info,
+    },
+    {
+      .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+      .dstSet = set,
+      .dstBinding = 5u,
+      .descriptorCount = 1u,
+      .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+      .pBufferInfo = &grid_params_info,
+    },
+    {
+      .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+      .dstSet = set,
+      .dstBinding = 6u,
+      .descriptorCount = 1u,
+      .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+      .pBufferInfo = &grid_l0_info,
+    },
+    {
+      .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+      .dstSet = set,
+      .dstBinding = 7u,
+      .descriptorCount = 1u,
+      .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+      .pBufferInfo = &grid_l1_info,
+    },
+    {
+      .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+      .dstSet = set,
+      .dstBinding = 8u,
+      .descriptorCount = 1u,
+      .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+      .pBufferInfo = &grid_indices_info,
     },
   };
   vkUpdateDescriptorSets(device, static_cast<u32>(std::size(writes)), writes, 0u, nullptr);
@@ -1399,6 +1758,46 @@ int main() {
     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
     spheres_gpu.albedo.data()
   );
+
+  const GridGPUData grid_gpu = build_grid_structure(spheres_cpu, sphere_count);
+  runtime_assert(!grid_gpu.l0_headers.empty(), "Grid L0 headers cannot be empty");
+  runtime_assert(!grid_gpu.indices.empty(), "Grid indices cannot be empty");
+  Buffer grid_params_buffer = create_device_buffer_with_data(
+    physical,
+    device,
+    upload_pool,
+    queue,
+    static_cast<VkDeviceSize>(sizeof(GridParamsGPU)),
+    VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+    &grid_gpu.params
+  );
+  Buffer grid_l0_buffer = create_device_buffer_with_data(
+    physical,
+    device,
+    upload_pool,
+    queue,
+    static_cast<VkDeviceSize>(grid_gpu.l0_headers.size() * sizeof(grid_gpu.l0_headers[0])),
+    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+    grid_gpu.l0_headers.data()
+  );
+  Buffer grid_l1_buffer = create_device_buffer_with_data(
+    physical,
+    device,
+    upload_pool,
+    queue,
+    static_cast<VkDeviceSize>(grid_gpu.l1_headers.size() * sizeof(grid_gpu.l1_headers[0])),
+    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+    grid_gpu.l1_headers.data()
+  );
+  Buffer grid_indices_buffer = create_device_buffer_with_data(
+    physical,
+    device,
+    upload_pool,
+    queue,
+    static_cast<VkDeviceSize>(grid_gpu.indices.size() * sizeof(grid_gpu.indices[0])),
+    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+    grid_gpu.indices.data()
+  );
   vkDestroyCommandPool(device, upload_pool, nullptr);
 
   Buffer camera_buffer = create_buffer(
@@ -1413,7 +1812,18 @@ int main() {
   VkDescriptorSetLayout descriptor_layout = create_descriptor_set_layout(device);
   VkDescriptorPool descriptor_pool = create_descriptor_pool(device);
   VkDescriptorSet descriptor_set = allocate_descriptor_set(device, descriptor_pool, descriptor_layout);
-  write_descriptor_set(device, descriptor_set, offscreen, sphere_centers, sphere_albedo, camera_buffer);
+  write_descriptor_set(
+    device,
+    descriptor_set,
+    offscreen,
+    sphere_centers,
+    sphere_albedo,
+    camera_buffer,
+    grid_params_buffer,
+    grid_l0_buffer,
+    grid_l1_buffer,
+    grid_indices_buffer
+  );
 
   CameraState camera_state{};
   camera_state.position = Vec3{ 0.0f, 1.5f, 6.0f };
@@ -1797,6 +2207,10 @@ int main() {
 
   unmap_buffer(device, camera_buffer);
   destroy_buffer(device, camera_buffer);
+  destroy_buffer(device, grid_indices_buffer);
+  destroy_buffer(device, grid_l1_buffer);
+  destroy_buffer(device, grid_l0_buffer);
+  destroy_buffer(device, grid_params_buffer);
   destroy_buffer(device, sphere_albedo);
   destroy_buffer(device, sphere_centers);
 
