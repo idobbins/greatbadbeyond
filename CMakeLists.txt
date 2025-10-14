@@ -1,56 +1,31 @@
-cmake_minimum_required(VERSION 3.25)
-project(callandor)
+cmake_minimum_required(VERSION 3.28)
+
+if(WIN32)
+    set(CMAKE_RC_COMPILER "C:/Program Files/LLVM/bin/llvm-rc.exe" CACHE FILEPATH "LLVM resource compiler" FORCE)
+endif()
+
+project(callandor LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+include(FetchContent)
 
-find_package(glfw3 REQUIRED)
+# Configure GLFW build options before fetching
+set(GLFW_BUILD_DOCS OFF CACHE INTERNAL "")
+set(GLFW_BUILD_TESTS OFF CACHE INTERNAL "")
+set(GLFW_BUILD_EXAMPLES OFF CACHE INTERNAL "")
+set(GLFW_INSTALL OFF CACHE INTERNAL "")
+
+FetchContent_Declare(
+        glfw
+        GIT_REPOSITORY https://github.com/glfw/glfw.git
+        GIT_TAG        3.4
+)
+FetchContent_MakeAvailable(glfw)
+
 find_package(Vulkan REQUIRED COMPONENTS glslc)
 
-set(SHADERS
-  ${CMAKE_SOURCE_DIR}/shaders/compute.comp
-  ${CMAKE_SOURCE_DIR}/shaders/grid_l0_count.comp
-  ${CMAKE_SOURCE_DIR}/shaders/grid_l0_offsets.comp
-  ${CMAKE_SOURCE_DIR}/shaders/grid_l0_fill.comp
-  ${CMAKE_SOURCE_DIR}/shaders/grid_l1_count.comp
-  ${CMAKE_SOURCE_DIR}/shaders/grid_l1_offsets.comp
-  ${CMAKE_SOURCE_DIR}/shaders/grid_l1_fill.comp
-  ${CMAKE_SOURCE_DIR}/shaders/physics.comp
-  ${CMAKE_SOURCE_DIR}/shaders/physics_collide.comp
-  ${CMAKE_SOURCE_DIR}/shaders/fullscreen.vert
-  ${CMAKE_SOURCE_DIR}/shaders/blit.frag
-)
-
-set(SPV_DIR ${CMAKE_BINARY_DIR}/shaders)
-file(MAKE_DIRECTORY ${SPV_DIR})
-
-set(SPV_OUTPUTS)
-foreach(SRC ${SHADERS})
-  get_filename_component(NAME ${SRC} NAME)
-  set(OUT ${SPV_DIR}/${NAME}.spv)
-  add_custom_command(
-    OUTPUT ${OUT}
-    COMMAND $<TARGET_FILE:Vulkan::glslc>
-            --target-env=vulkan1.2
-            $<$<CONFIG:Debug>:-g>
-            -O
-            -o ${OUT} ${SRC}
-    DEPENDS ${SRC}
-    COMMENT "glslc ${NAME}"
-    VERBATIM
-    COMMAND_EXPAND_LISTS
-  )
-  list(APPEND SPV_OUTPUTS ${OUT})
-endforeach()
-
-add_custom_target(shaders DEPENDS ${SPV_OUTPUTS})
-
 add_executable(${PROJECT_NAME} src/main.cpp)
-target_link_libraries(${PROJECT_NAME} PRIVATE Vulkan::Vulkan glfw)
-add_dependencies(${PROJECT_NAME} shaders)
 
-add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-  COMMAND ${CMAKE_COMMAND} -E copy_directory
-          ${SPV_DIR} $<TARGET_FILE_DIR:${PROJECT_NAME}>/shaders
-)
+target_link_libraries(${PROJECT_NAME} PRIVATE glfw Vulkan::Vulkan)
