@@ -367,7 +367,7 @@ struct FrameTimeHistory {
   }
 };
 
-constexpr u32 SPHERE_COUNT = 10000u;
+constexpr u32 SPHERE_COUNT = 100'000u;
 static_assert(SPHERE_COUNT > 0u, "SPHERE_COUNT must be positive");
 constexpr f32 GROUND_Y = -1.0f;
 constexpr f32 CAMERA_DEFAULT_SPEED = 5.0f;

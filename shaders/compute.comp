@@ -192,6 +192,8 @@ void hit_grid_min(const vec3 ro, const vec3 rd, out float tmin, out uint idmin) 
     const uvec4 h = l0_cells[ci];
 
     if (h.w == 0u) {
+      float best_leaf_t = T_MAX;
+      uint best_leaf_id = MISS_ID;
       for (uint k = 0u; k < h.y; ++k) {
         const uint offset = h.x + k;
         if (offset >= index_count) {
@@ -202,11 +204,15 @@ void hit_grid_min(const vec3 ro, const vec3 rd, out float tmin, out uint idmin) 
           continue;
         }
         float th;
-        if (intersect_sphere(sid, ro, rd, th) && th <= t_cell_exit) {
-          tmin = th;
-          idmin = sid;
-          return;
+        if (intersect_sphere(sid, ro, rd, th) && th <= t_cell_exit && th < best_leaf_t) {
+          best_leaf_t = th;
+          best_leaf_id = sid;
         }
+      }
+      if (best_leaf_id != MISS_ID) {
+        tmin = best_leaf_t;
+        idmin = best_leaf_id;
+        return;
       }
     } else {
       const vec3 macro_min = g_bmin + vec3(c) * cell_size;
@@ -242,6 +248,9 @@ void hit_grid_min(const vec3 ro, const vec3 rd, out float tmin, out uint idmin) 
           break;
         }
         const uvec2 h1 = l1_cells[child_index];
+        float best_child_t = T_MAX;
+        uint best_child_id = MISS_ID;
+        const float t_child_max = min(t_ch_exit, t_cell_exit);
 
         for (uint k = 0u; k < h1.y; ++k) {
           const uint offset = h1.x + k;
@@ -253,11 +262,15 @@ void hit_grid_min(const vec3 ro, const vec3 rd, out float tmin, out uint idmin) 
             continue;
           }
           float th;
-          if (intersect_sphere(sid, ro, rd, th) && th <= min(t_ch_exit, t_cell_exit)) {
-            tmin = th;
-            idmin = sid;
-            return;
+          if (intersect_sphere(sid, ro, rd, th) && th <= t_child_max && th < best_child_t) {
+            best_child_t = th;
+            best_child_id = sid;
           }
+        }
+        if (best_child_id != MISS_ID) {
+          tmin = best_child_t;
+          idmin = best_child_id;
+          return;
         }
 
         if (ch_t_max.x < ch_t_max.y) {
