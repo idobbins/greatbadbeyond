@@ -225,7 +225,7 @@ inline VkPhysicalDevice pick_device(VkInstance inst, i32& out_gfx_qf) {
 }
 
 inline VkDevice create_device(VkPhysicalDevice pd, u32 gfx_qf) {
-  const f32 prio = 1.0f;
+  constexpr f32 prio = 1.0f;
   const VkDeviceQueueCreateInfo qci{
     .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
     .queueFamilyIndex = gfx_qf,
