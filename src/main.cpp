@@ -48,13 +48,6 @@ constexpr string_view APP_NAME = "callandor";
 // ---------- Instance ----------
 VkResult result = VK_SUCCESS;
 
-constexpr VkApplicationInfo application_info = {
-  .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
-  .pApplicationName = APP_NAME.data(),
-  .pEngineName = APP_NAME.data(),
-  .apiVersion = VK_API_VERSION_1_3,
-};
-
 #if defined(__APPLE__)
 constexpr array<const char*, 3> instance_exts{
   VK_KHR_SURFACE_EXTENSION_NAME,
@@ -65,17 +58,29 @@ constexpr array<const char*, 3> instance_exts{
 constexpr array<const char*, 0> instance_exts{}; // keep zero cleanly typed
 #endif
 
-constexpr VkInstanceCreateInfo instance_create_info = {
-  .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
-#if defined(__APPLE__)
-  .flags = VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR,
-#endif
-  .pApplicationInfo = &application_info,
-  .enabledExtensionCount = static_cast<u32>(instance_exts.size()),
-  .ppEnabledExtensionNames = instance_exts.data(),
-};
+inline VkInstance create_instance() {
+  const VkApplicationInfo app_info{
+    .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
+    .pApplicationName = APP_NAME.data(),
+    .pEngineName = APP_NAME.data(),
+    .apiVersion = VK_API_VERSION_1_3,
+  };
 
-VkInstance instance = VK_NULL_HANDLE;
+  VkInstanceCreateInfo ici{
+    .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+    .pApplicationInfo = &app_info,
+    .enabledExtensionCount = static_cast<u32>(instance_exts.size()),
+    .ppEnabledExtensionNames = instance_exts.data(),
+  };
+
+#if defined(__APPLE__)
+  ici.flags = VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+#endif
+
+  VkInstance inst = VK_NULL_HANDLE;
+  result = vkCreateInstance(&ici, nullptr, &inst);
+  return inst;
+}
 
 // ---------- Device selection policy (all constexpr) ----------
 struct Caps {
@@ -207,7 +212,7 @@ inline VkDevice create_device(VkPhysicalDevice pd, u32 gfx_qf) {
 
 // ---------- Main ----------
 int main() {
-  result = vkCreateInstance(&instance_create_info, nullptr, &instance);
+  VkInstance instance = create_instance();
   vk_assert(result, "Failed to create instance");
 
   i32 gfx_qf = -1;
