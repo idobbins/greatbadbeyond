@@ -16,6 +16,8 @@ set(SHADERS
   ${CMAKE_SOURCE_DIR}/shaders/grid_l1_count.comp
   ${CMAKE_SOURCE_DIR}/shaders/grid_l1_offsets.comp
   ${CMAKE_SOURCE_DIR}/shaders/grid_l1_fill.comp
+  ${CMAKE_SOURCE_DIR}/shaders/physics.comp
+  ${CMAKE_SOURCE_DIR}/shaders/physics_collide.comp
   ${CMAKE_SOURCE_DIR}/shaders/fullscreen.vert
   ${CMAKE_SOURCE_DIR}/shaders/blit.frag
 )

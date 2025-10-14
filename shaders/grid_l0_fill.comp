@@ -39,6 +39,7 @@ layout(std430, binding = 17) readonly buffer Globals {
 layout(push_constant) uniform PushConstants {
   vec4 screen_params;
   uvec4 frame_params;
+  vec4 physics_params;
 } pushc;
 
 uint l0_index(ivec3 c, ivec3 dims) {

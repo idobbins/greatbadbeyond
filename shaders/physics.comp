@@ -1,0 +1,84 @@
+#version 460
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 2) buffer SphereCenters {
+  vec4 centers[];
+};
+
+layout(std430, binding = 16) buffer SphereVelocities {
+  uvec4 velocity_bits[];
+};
+
+layout(push_constant) uniform PushConstants {
+  vec4 screen_params;
+  uvec4 frame_params;
+  vec4 physics_params;
+} pushc;
+
+const float FRICTION = 0.75;
+const float VELOCITY_LIMIT = 120.0;
+const float REST_THRESHOLD = 0.01;
+
+void main() {
+  const uint sid = gl_GlobalInvocationID.x;
+  const uint sphere_count = pushc.frame_params.z;
+  if (sid >= sphere_count) {
+    return;
+  }
+
+  vec4 center = centers[sid];
+  uvec4 vel_bits = velocity_bits[sid];
+  vec3 velocity = vec3(
+    uintBitsToFloat(vel_bits.x),
+    uintBitsToFloat(vel_bits.y),
+    uintBitsToFloat(vel_bits.z)
+  );
+
+  float dt = clamp(pushc.physics_params.x, 0.0, 0.1);
+  if (dt <= 0.0) {
+    return;
+  }
+
+  const float gravity = pushc.physics_params.y;
+  const float plane_y = pushc.physics_params.z;
+  const float restitution = clamp(pushc.physics_params.w, 0.0, 1.0);
+
+  velocity += vec3(0.0, gravity, 0.0) * dt;
+  velocity = clamp(velocity, vec3(-VELOCITY_LIMIT), vec3(VELOCITY_LIMIT));
+
+  vec3 position = center.xyz + velocity * dt;
+  const float radius = center.w;
+  const float bottom = position.y - radius;
+
+  if (bottom < plane_y) {
+    position.y = plane_y + radius;
+    if (velocity.y < 0.0) {
+      velocity.y = -velocity.y * restitution;
+    }
+    vec2 lateral = velocity.xz * FRICTION;
+    if (length(lateral) < REST_THRESHOLD) {
+      lateral = vec2(0.0);
+    }
+    velocity.xz = lateral;
+    if (abs(velocity.y) < REST_THRESHOLD) {
+      velocity.y = 0.0;
+    }
+  }
+
+  const float damping = 0.02;
+  const float damp_factor = clamp(1.0 - damping * dt * 60.0, 0.0, 1.0);
+  velocity *= damp_factor;
+
+  if (length(velocity) < REST_THRESHOLD && position.y - radius <= plane_y + 1e-3) {
+    velocity = vec3(0.0);
+  }
+
+  centers[sid] = vec4(position, radius);
+  velocity_bits[sid] = uvec4(
+    floatBitsToUint(velocity.x),
+    floatBitsToUint(velocity.y),
+    floatBitsToUint(velocity.z),
+    0u
+  );
+}

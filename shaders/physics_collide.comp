@@ -1,0 +1,219 @@
+#version 460
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 2) buffer SphereCenters {
+  vec4 centers[];
+};
+
+layout(std430, binding = 16) buffer SphereVelocities {
+  uvec4 velocity_bits[];
+};
+
+layout(std430, binding = 18) readonly buffer SpherePrevVelocities {
+  uvec4 velocity_prev_bits[];
+};
+
+layout(std430, binding = 5) readonly buffer GridParams {
+  vec4 bmin;
+  vec4 bmax;
+  uvec4 dims;
+  vec4 inv_cell;
+} grid;
+
+layout(std430, binding = 6) readonly buffer GridL0Cells {
+  uvec4 l0_cells[];
+};
+
+layout(std430, binding = 7) readonly buffer GridL1Cells {
+  uvec2 l1_cells[];
+};
+
+layout(std430, binding = 8) readonly buffer GridIndices {
+  uint cell_indices[];
+};
+
+layout(push_constant) uniform PushConstants {
+  vec4 screen_params;
+  uvec4 frame_params;
+  vec4 physics_params;
+} pushc;
+
+const float VELOCITY_LIMIT = 120.0;
+const float POSITION_SLOP = 1e-4;
+const float MIN_DISTANCE = 1e-5;
+const int CHILD_DIM = 4;
+
+uint l0_index(ivec3 c, ivec3 dims) {
+  return uint(c.x + dims.x * (c.y + dims.y * c.z));
+}
+
+uint l1_index(ivec3 c) {
+  return uint(c.x + CHILD_DIM * (c.y + CHILD_DIM * c.z));
+}
+
+ivec3 compute_cell(vec3 position, vec3 gmin, vec3 inv_cell, ivec3 clamp_max) {
+  ivec3 cell = ivec3(floor((position - gmin) * inv_cell));
+  return clamp(cell, ivec3(0), clamp_max);
+}
+
+vec3 load_prev_velocity(uint sid) {
+  const uvec4 bits = velocity_prev_bits[sid];
+  return vec3(
+    uintBitsToFloat(bits.x),
+    uintBitsToFloat(bits.y),
+    uintBitsToFloat(bits.z)
+  );
+}
+
+void store_velocity(uint sid, vec3 velocity) {
+  velocity_bits[sid] = uvec4(
+    floatBitsToUint(velocity.x),
+    floatBitsToUint(velocity.y),
+    floatBitsToUint(velocity.z),
+    0u
+  );
+}
+
+void main() {
+  const uint sid = gl_GlobalInvocationID.x;
+  const uint sphere_count = pushc.frame_params.z;
+  if (sid >= sphere_count) {
+    return;
+  }
+
+  vec4 center = centers[sid];
+  vec3 position = center.xyz;
+  const float radius = center.w;
+  vec3 velocity = load_prev_velocity(sid);
+
+  const float restitution = clamp(pushc.physics_params.w, 0.0, 1.0);
+  const vec3 gmin = grid.bmin.xyz;
+  const vec3 inv_cell = grid.inv_cell.xyz;
+  const ivec3 dims = ivec3(grid.dims.xyz);
+  const ivec3 dims_minus_one = max(dims - ivec3(1), ivec3(0));
+
+  if (any(lessThanEqual(dims, ivec3(0)))) {
+    centers[sid] = vec4(position, radius);
+    store_velocity(sid, velocity);
+    return;
+  }
+
+  const ivec3 base_cell = compute_cell(position, gmin, inv_cell, dims_minus_one);
+
+  for (int dz = -1; dz <= 1; ++dz) {
+    for (int dy = -1; dy <= 1; ++dy) {
+      for (int dx = -1; dx <= 1; ++dx) {
+        const ivec3 cell = base_cell + ivec3(dx, dy, dz);
+        if (any(lessThan(cell, ivec3(0))) || any(greaterThan(cell, dims_minus_one))) {
+          continue;
+        }
+
+        const uint ci = l0_index(cell, dims);
+        const uvec4 hdr = l0_cells[ci];
+
+        const uint max_leaf_count = hdr.y;
+        if (hdr.w == 0u) {
+          const uint base = hdr.x;
+          for (uint i = 0u; i < max_leaf_count; ++i) {
+            const uint other_id = cell_indices[base + i];
+            if (other_id == sid) continue;
+
+            const vec4 other_center = centers[other_id];
+            const ivec3 other_cell = compute_cell(other_center.xyz, gmin, inv_cell, dims_minus_one);
+            if (any(notEqual(other_cell, cell))) {
+              continue;
+            }
+
+            const float other_radius = other_center.w;
+            vec3 delta = position - other_center.xyz;
+            const float dist_sq = dot(delta, delta);
+            const float min_dist = radius + other_radius;
+            if (dist_sq >= min_dist * min_dist) {
+              continue;
+            }
+
+            float dist = sqrt(dist_sq);
+            vec3 normal = (dist > MIN_DISTANCE) ? delta / dist : vec3(0.0, 1.0, 0.0);
+            const float penetration = max(min_dist - dist - POSITION_SLOP, 0.0);
+            if (penetration > 0.0) {
+              position += normal * (penetration * 0.5);
+            }
+
+            const vec3 other_velocity = load_prev_velocity(other_id);
+            const float rel = dot(velocity - other_velocity, normal);
+            if (rel < 0.0) {
+              const float impulse = rel * (1.0 + restitution) * 0.5;
+              velocity -= normal * impulse;
+            }
+          }
+        } else {
+          const uint child_base = hdr.z;
+          const vec3 cell_size = vec3(
+            inv_cell.x > 0.0 ? 1.0 / inv_cell.x : 1e30,
+            inv_cell.y > 0.0 ? 1.0 / inv_cell.y : 1e30,
+            inv_cell.z > 0.0 ? 1.0 / inv_cell.z : 1e30
+          );
+          const vec3 macro_min = gmin + vec3(cell) * cell_size;
+          const vec3 inv_child = inv_cell * float(CHILD_DIM);
+          const ivec3 child_max = ivec3(CHILD_DIM - 1);
+          for (int cz = 0; cz < CHILD_DIM; ++cz) {
+            for (int cy = 0; cy < CHILD_DIM; ++cy) {
+              for (int cx = 0; cx < CHILD_DIM; ++cx) {
+                const ivec3 child_coords = ivec3(cx, cy, cz);
+                const uint child_idx = child_base + l1_index(ivec3(cx, cy, cz));
+                const uvec2 child = l1_cells[child_idx];
+                const uint count = child.y;
+                const uint base = child.x;
+                for (uint i = 0u; i < count; ++i) {
+                  const uint other_id = cell_indices[base + i];
+                  if (other_id == sid) continue;
+
+                  const vec4 other_center = centers[other_id];
+                  const ivec3 other_cell = compute_cell(other_center.xyz, gmin, inv_cell, dims_minus_one);
+                  if (any(notEqual(other_cell, cell))) {
+                    continue;
+                  }
+                  const ivec3 other_child = clamp(
+                    ivec3(floor((other_center.xyz - macro_min) * inv_child)),
+                    ivec3(0),
+                    child_max
+                  );
+                  if (any(notEqual(other_child, child_coords))) {
+                    continue;
+                  }
+
+                  const float other_radius = other_center.w;
+                  vec3 delta = position - other_center.xyz;
+                  const float dist_sq = dot(delta, delta);
+                  const float min_dist = radius + other_radius;
+                  if (dist_sq >= min_dist * min_dist) {
+                    continue;
+                  }
+
+                  float dist = sqrt(dist_sq);
+                  vec3 normal = (dist > MIN_DISTANCE) ? delta / dist : vec3(0.0, 1.0, 0.0);
+                  const float penetration = max(min_dist - dist - POSITION_SLOP, 0.0);
+                  if (penetration > 0.0) {
+                    position += normal * (penetration * 0.5);
+                  }
+
+                  const vec3 other_velocity = load_prev_velocity(other_id);
+                  const float rel = dot(velocity - other_velocity, normal);
+                  if (rel < 0.0) {
+                    const float impulse = rel * (1.0 + restitution) * 0.5;
+                    velocity -= normal * impulse;
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  velocity = clamp(velocity, vec3(-VELOCITY_LIMIT), vec3(VELOCITY_LIMIT));
+  centers[sid] = vec4(position, radius);
+  store_velocity(sid, velocity);
+}
