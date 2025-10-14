@@ -15,7 +15,11 @@
 #include <cstdio>
 #include <cstring>
 #include <iostream>
+#include <iomanip>
+#include <random>
 #include <string_view>
+#include <vector>
+#include <cmath>
 
 using namespace std;
 
@@ -34,6 +38,88 @@ using  f64 = double;
 
 using  usize = size_t;
 using  isize = ptrdiff_t;
+
+constexpr f32 PI = 3.14159265358979323846f;
+
+struct Vec3 {
+  f32 x = 0.0f;
+  f32 y = 0.0f;
+  f32 z = 0.0f;
+};
+
+inline Vec3 operator+(const Vec3 a, const Vec3 b) {
+  return Vec3{ a.x + b.x, a.y + b.y, a.z + b.z };
+}
+
+inline Vec3 operator-(const Vec3 a, const Vec3 b) {
+  return Vec3{ a.x - b.x, a.y - b.y, a.z - b.z };
+}
+
+inline Vec3 operator-(const Vec3 v) {
+  return Vec3{ -v.x, -v.y, -v.z };
+}
+
+inline Vec3 operator*(const Vec3 v, const f32 s) {
+  return Vec3{ v.x * s, v.y * s, v.z * s };
+}
+
+inline Vec3 operator*(const f32 s, const Vec3 v) {
+  return v * s;
+}
+
+inline Vec3 operator/(const Vec3 v, const f32 s) {
+  return Vec3{ v.x / s, v.y / s, v.z / s };
+}
+
+inline Vec3& operator+=(Vec3& a, const Vec3 b) {
+  a = a + b;
+  return a;
+}
+
+inline Vec3& operator-=(Vec3& a, const Vec3 b) {
+  a = a - b;
+  return a;
+}
+
+inline f32 dot(const Vec3 a, const Vec3 b) {
+  return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+
+inline Vec3 cross(const Vec3 a, const Vec3 b) {
+  return Vec3{
+    a.y * b.z - a.z * b.y,
+    a.z * b.x - a.x * b.z,
+    a.x * b.y - a.y * b.x,
+  };
+}
+
+inline f32 length_squared(const Vec3 v) {
+  return dot(v, v);
+}
+
+inline f32 length(const Vec3 v) {
+  return std::sqrt(length_squared(v));
+}
+
+inline Vec3 normalize(const Vec3 v) {
+  const f32 len = length(v);
+  if (len <= 0.0f) {
+    return Vec3{ 0.0f, 0.0f, 0.0f };
+  }
+  return v / len;
+}
+
+inline Vec3 clamp_vec3(const Vec3 v, const f32 min_value, const f32 max_value) {
+  return Vec3{
+    std::clamp(v.x, min_value, max_value),
+    std::clamp(v.y, min_value, max_value),
+    std::clamp(v.z, min_value, max_value),
+  };
+}
+
+inline std::array<f32, 4> to_vec4(const Vec3 v, const f32 w = 0.0f) {
+  return std::array<f32, 4>{ v.x, v.y, v.z, w };
+}
 
 inline void runtime_assert(const bool condition, const string_view message) {
   if (!condition) {
@@ -146,6 +232,107 @@ struct FrameSync {
   VkSemaphore render_finished = VK_NULL_HANDLE;
   VkFence in_flight = VK_NULL_HANDLE;
 };
+
+struct Buffer {
+  VkBuffer buffer = VK_NULL_HANDLE;
+  VkDeviceMemory memory = VK_NULL_HANDLE;
+  VkDeviceSize size = 0;
+};
+
+struct SphereCPU {
+  Vec3 center{};
+  f32 radius = 1.0f;
+  Vec3 albedo{};
+};
+
+struct SphereSoA {
+  std::vector<std::array<f32, 4>> center_radius{};
+  std::vector<std::array<f32, 4>> albedo{};
+};
+
+struct CameraState {
+  Vec3 position{};
+  f32 yaw = 0.0f;
+  f32 pitch = 0.0f;
+};
+
+struct alignas(16) CameraUniform {
+  std::array<f32, 4> origin{};
+  std::array<f32, 4> lower_left{};
+  std::array<f32, 4> horizontal{};
+  std::array<f32, 4> vertical{};
+};
+
+struct FrameTimeHistory {
+  static constexpr usize MaxSamples = 600;
+  std::vector<double> samples{};
+
+  void push(const double ms) {
+    if (samples.size() == MaxSamples) {
+      samples.erase(samples.begin());
+    }
+    samples.push_back(ms);
+  }
+
+  [[nodiscard]] bool has_enough() const {
+    return samples.size() >= 4;
+  }
+
+  [[nodiscard]] double percentile(const double p) const {
+    if (samples.empty()) return 0.0;
+    std::vector<double> sorted = samples;
+    std::sort(sorted.begin(), sorted.end());
+    const double idx = p * static_cast<double>(sorted.size() - 1);
+    const usize lo = static_cast<usize>(std::floor(idx));
+    const usize hi = static_cast<usize>(std::ceil(idx));
+    const double t = idx - static_cast<double>(lo);
+    const double a = sorted[lo];
+    const double b = sorted[std::min(hi, sorted.size() - 1)];
+    return std::lerp(a, b, t);
+  }
+
+  [[nodiscard]] double average() const {
+    if (samples.empty()) return 0.0;
+    double sum = 0.0;
+    for (const double v : samples) {
+      sum += v;
+    }
+    return sum / static_cast<double>(samples.size());
+  }
+
+  void log_to_stdout() const {
+    if (!has_enough()) return;
+    const double p0 = percentile(0.0);
+    const double p50 = percentile(0.5);
+    const double p95 = percentile(0.95);
+    const double p99 = percentile(0.99);
+    const double avg = average();
+    const double fps = (avg > 0.0) ? 1000.0 / avg : 0.0;
+    std::cout << std::fixed << std::setprecision(2)
+              << "[FrameTimes] count=" << samples.size()
+              << " avg=" << avg << "ms"
+              << " fps=" << fps
+              << " p0=" << p0 << "ms"
+              << " p50=" << p50 << "ms"
+              << " p95=" << p95 << "ms"
+              << " p99=" << p99 << "ms"
+              << std::defaultfloat << std::endl;
+  }
+};
+
+constexpr u32 SPHERE_COUNT = 1280u;
+static_assert(SPHERE_COUNT > 0u, "SPHERE_COUNT must be positive");
+constexpr f32 GROUND_Y = -1.0f;
+constexpr f32 CAMERA_DEFAULT_SPEED = 5.0f;
+constexpr f32 CAMERA_BOOST_SPEED = 12.0f;
+constexpr f32 CAMERA_MOUSE_SENSITIVITY = 0.0025f;
+constexpr f32 CAMERA_FOV_DEGREES = 60.0f;
+constexpr u32 PATH_MAX_BOUNCES = 4u;
+constexpr f32 SPHERE_RADIUS_MIN = 0.35f;
+constexpr f32 SPHERE_RADIUS_MAX = 1.05f;
+constexpr f32 SPHERE_HEIGHT_MIN = 0.2f;
+constexpr f32 SPHERE_HEIGHT_MAX = 2.5f;
+constexpr f32 SPHERE_TARGET_DENSITY = 0.45f;
 
 inline void init_glfw() {
   const int ok = glfwInit();
@@ -489,6 +676,237 @@ inline OffscreenImage create_offscreen_image(VkPhysicalDevice pd, VkDevice devic
   return off;
 }
 
+inline Buffer create_buffer(
+  VkPhysicalDevice physical,
+  VkDevice device,
+  VkDeviceSize size,
+  VkBufferUsageFlags usage,
+  VkMemoryPropertyFlags properties
+) {
+  const VkBufferCreateInfo info{
+    .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+    .size = size,
+    .usage = usage,
+    .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+  };
+  Buffer buffer{};
+  buffer.size = size;
+  vk_assert(vkCreateBuffer(device, &info, nullptr, &buffer.buffer), "Failed to create buffer");
+
+  VkMemoryRequirements req{};
+  vkGetBufferMemoryRequirements(device, buffer.buffer, &req);
+
+  VkPhysicalDeviceMemoryProperties mem_props{};
+  vkGetPhysicalDeviceMemoryProperties(physical, &mem_props);
+  const u32 memory_index = find_memory_type_index(mem_props, req.memoryTypeBits, properties);
+  runtime_assert(memory_index != UINT32_MAX, "No suitable memory type for buffer");
+
+  const VkMemoryAllocateInfo alloc_info{
+    .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+    .allocationSize = req.size,
+    .memoryTypeIndex = memory_index,
+  };
+  vk_assert(vkAllocateMemory(device, &alloc_info, nullptr, &buffer.memory), "Failed to allocate buffer memory");
+  vk_assert(vkBindBufferMemory(device, buffer.buffer, buffer.memory, 0u), "Failed to bind buffer memory");
+
+  return buffer;
+}
+
+inline void destroy_buffer(VkDevice device, Buffer& buffer) {
+  if (buffer.buffer != VK_NULL_HANDLE) {
+    vkDestroyBuffer(device, buffer.buffer, nullptr);
+    buffer.buffer = VK_NULL_HANDLE;
+  }
+  if (buffer.memory != VK_NULL_HANDLE) {
+    vkFreeMemory(device, buffer.memory, nullptr);
+    buffer.memory = VK_NULL_HANDLE;
+  }
+  buffer.size = 0;
+}
+
+inline void* map_buffer(VkDevice device, Buffer& buffer, VkDeviceSize size) {
+  void* ptr = nullptr;
+  vk_assert(vkMapMemory(device, buffer.memory, 0u, size, 0u, &ptr), "Failed to map buffer memory");
+  return ptr;
+}
+
+inline void unmap_buffer(VkDevice device, Buffer& buffer) {
+  vkUnmapMemory(device, buffer.memory);
+}
+
+inline void copy_buffer(
+  VkDevice device,
+  VkCommandPool command_pool,
+  VkQueue queue,
+  VkBuffer src,
+  VkBuffer dst,
+  VkDeviceSize size
+) {
+  VkCommandBufferAllocateInfo alloc_info{
+    .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+    .commandPool = command_pool,
+    .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+    .commandBufferCount = 1u,
+  };
+  VkCommandBuffer cmd = VK_NULL_HANDLE;
+  vk_assert(vkAllocateCommandBuffers(device, &alloc_info, &cmd), "Failed to allocate copy command buffer");
+
+  VkCommandBufferBeginInfo begin_info{
+    .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+    .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+  };
+  vk_assert(vkBeginCommandBuffer(cmd, &begin_info), "Failed to begin copy command buffer");
+
+  const VkBufferCopy region{
+    .srcOffset = 0u,
+    .dstOffset = 0u,
+    .size = size,
+  };
+  vkCmdCopyBuffer(cmd, src, dst, 1u, &region);
+  vk_assert(vkEndCommandBuffer(cmd), "Failed to end copy command buffer");
+
+  const VkSubmitInfo submit_info{
+    .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+    .commandBufferCount = 1u,
+    .pCommandBuffers = &cmd,
+  };
+  vk_assert(vkQueueSubmit(queue, 1u, &submit_info, VK_NULL_HANDLE), "Failed to submit copy command buffer");
+  vk_assert(vkQueueWaitIdle(queue), "Failed to wait for buffer copy");
+
+  vkFreeCommandBuffers(device, command_pool, 1u, &cmd);
+}
+
+inline Buffer create_device_buffer_with_data(
+  VkPhysicalDevice physical,
+  VkDevice device,
+  VkCommandPool upload_pool,
+  VkQueue queue,
+  VkDeviceSize size,
+  VkBufferUsageFlags usage,
+  const void* data
+) {
+  Buffer staging = create_buffer(
+    physical,
+    device,
+    size,
+    VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+  );
+  {
+    void* mapped = map_buffer(device, staging, staging.size);
+    std::memcpy(mapped, data, static_cast<size_t>(staging.size));
+    unmap_buffer(device, staging);
+  }
+
+  Buffer gpu = create_buffer(
+    physical,
+    device,
+    size,
+    usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+  );
+
+  copy_buffer(device, upload_pool, queue, staging.buffer, gpu.buffer, size);
+  destroy_buffer(device, staging);
+  return gpu;
+}
+
+inline std::array<SphereCPU, SPHERE_COUNT> generate_random_spheres() {
+  std::mt19937 rng(1337u);
+  const f32 avg_radius = 0.5f * (SPHERE_RADIUS_MIN + SPHERE_RADIUS_MAX);
+  const f32 target_area = (PI * avg_radius * avg_radius / SPHERE_TARGET_DENSITY) * static_cast<f32>(SPHERE_COUNT);
+  const f32 base_extent = 6.0f;
+  const f32 spawn_extent = std::max(base_extent, 0.5f * std::sqrt(target_area));
+  std::uniform_real_distribution<f32> dist_xz(-spawn_extent, spawn_extent);
+  std::uniform_real_distribution<f32> dist_radius(SPHERE_RADIUS_MIN, SPHERE_RADIUS_MAX);
+  std::uniform_real_distribution<f32> dist_height(SPHERE_HEIGHT_MIN, SPHERE_HEIGHT_MAX);
+  std::uniform_real_distribution<f32> dist_color(0.2f, 0.95f);
+
+  std::array<SphereCPU, SPHERE_COUNT> spheres{};
+  usize placed = 0;
+  const f32 min_separation = avg_radius * 0.25f;
+  u32 attempts = 0;
+
+  while (placed < SPHERE_COUNT) {
+    if (attempts++ > SPHERE_COUNT * 8192u) {
+      runtime_assert(false, "Failed to place non-overlapping spheres");
+    }
+
+    const f32 radius = dist_radius(rng);
+    const Vec3 candidate{
+      dist_xz(rng),
+      GROUND_Y + radius + dist_height(rng),
+      dist_xz(rng),
+    };
+
+    bool overlaps = false;
+    for (usize i = 0; i < placed; ++i) {
+      const SphereCPU& other = spheres[i];
+      const f32 required = radius + other.radius + min_separation;
+      if (length_squared(candidate - other.center) < required * required) {
+        overlaps = true;
+        break;
+      }
+    }
+    if (overlaps) continue;
+
+    SphereCPU sphere{};
+    sphere.center = candidate;
+    sphere.radius = radius;
+    sphere.albedo = Vec3{ dist_color(rng), dist_color(rng), dist_color(rng) };
+    spheres[placed++] = sphere;
+  }
+
+  return spheres;
+}
+
+inline SphereSoA pack_spheres_gpu(const std::array<SphereCPU, SPHERE_COUNT>& cpu_spheres) {
+  SphereSoA gpu{};
+  gpu.center_radius.reserve(SPHERE_COUNT);
+  gpu.albedo.reserve(SPHERE_COUNT);
+  for (const SphereCPU& sphere : cpu_spheres) {
+    gpu.center_radius.push_back(to_vec4(sphere.center, sphere.radius));
+    gpu.albedo.push_back(to_vec4(sphere.albedo, 0.0f));
+  }
+  return gpu;
+}
+
+inline Vec3 yaw_pitch_to_forward(const f32 yaw, const f32 pitch) {
+  const f32 cos_pitch = std::cos(pitch);
+  return Vec3{
+    cos_pitch * std::cos(yaw),
+    std::sin(pitch),
+    cos_pitch * std::sin(yaw),
+  };
+}
+
+inline CameraUniform build_camera_uniform(const CameraState& state, const f32 aspect_ratio, Vec3& out_forward, Vec3& out_right, Vec3& out_up) {
+  out_forward = normalize(yaw_pitch_to_forward(state.yaw, state.pitch));
+  const Vec3 world_up{ 0.0f, 1.0f, 0.0f };
+  out_right = normalize(cross(out_forward, world_up));
+  if (length_squared(out_right) < 1e-6f) {
+    out_right = Vec3{ 1.0f, 0.0f, 0.0f };
+  }
+  out_up = normalize(cross(out_right, out_forward));
+
+  const f32 theta = CAMERA_FOV_DEGREES * PI / 180.0f;
+  const f32 h = std::tan(theta * 0.5f);
+  const f32 viewport_height = 2.0f * h;
+  const f32 viewport_width = aspect_ratio * viewport_height;
+
+  const Vec3 horizontal = out_right * viewport_width;
+  const Vec3 vertical = out_up * viewport_height;
+  const Vec3 forward = out_forward;
+  const Vec3 lower_left = state.position + forward - horizontal * 0.5f - vertical * 0.5f;
+
+  CameraUniform uniform{};
+  uniform.origin = to_vec4(state.position, 0.0f);
+  uniform.lower_left = to_vec4(lower_left, 0.0f);
+  uniform.horizontal = to_vec4(horizontal, 0.0f);
+  uniform.vertical = to_vec4(vertical, 0.0f);
+  return uniform;
+}
+
 inline VkDescriptorSetLayout create_descriptor_set_layout(VkDevice device) {
   const VkDescriptorSetLayoutBinding storage_binding{
     .binding = 0u,
@@ -502,7 +920,25 @@ inline VkDescriptorSetLayout create_descriptor_set_layout(VkDevice device) {
     .descriptorCount = 1u,
     .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
   };
-  const array layout_bindings{ storage_binding, sampled_binding };
+  const VkDescriptorSetLayoutBinding centers_binding{
+    .binding = 2u,
+    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+    .descriptorCount = 1u,
+    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+  };
+  const VkDescriptorSetLayoutBinding albedo_binding{
+    .binding = 3u,
+    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+    .descriptorCount = 1u,
+    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+  };
+  const VkDescriptorSetLayoutBinding camera_binding{
+    .binding = 4u,
+    .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+    .descriptorCount = 1u,
+    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+  };
+  const array layout_bindings{ storage_binding, sampled_binding, centers_binding, albedo_binding, camera_binding };
   const VkDescriptorSetLayoutCreateInfo info{
     .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
     .bindingCount = static_cast<u32>(layout_bindings.size()),
@@ -521,6 +957,14 @@ inline VkDescriptorPool create_descriptor_pool(VkDevice device) {
     },
     {
       .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+      .descriptorCount = 1u,
+    },
+    {
+      .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+      .descriptorCount = 2u,
+    },
+    {
+      .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
       .descriptorCount = 1u,
     },
   };
@@ -547,7 +991,14 @@ inline VkDescriptorSet allocate_descriptor_set(VkDevice device, VkDescriptorPool
   return set;
 }
 
-inline void write_descriptor_set(VkDevice device, VkDescriptorSet set, const OffscreenImage& offscreen) {
+inline void write_descriptor_set(
+  VkDevice device,
+  VkDescriptorSet set,
+  const OffscreenImage& offscreen,
+  const Buffer& centers_buffer,
+  const Buffer& albedo_buffer,
+  const Buffer& camera_buffer
+) {
   const VkDescriptorImageInfo storage_info{
     .sampler = VK_NULL_HANDLE,
     .imageView = offscreen.view,
@@ -557,6 +1008,21 @@ inline void write_descriptor_set(VkDevice device, VkDescriptorSet set, const Off
     .sampler = offscreen.sampler,
     .imageView = offscreen.view,
     .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+  };
+  const VkDescriptorBufferInfo center_info{
+    .buffer = centers_buffer.buffer,
+    .offset = 0u,
+    .range = centers_buffer.size,
+  };
+  const VkDescriptorBufferInfo albedo_info{
+    .buffer = albedo_buffer.buffer,
+    .offset = 0u,
+    .range = albedo_buffer.size,
+  };
+  const VkDescriptorBufferInfo camera_info{
+    .buffer = camera_buffer.buffer,
+    .offset = 0u,
+    .range = camera_buffer.size,
   };
   const VkWriteDescriptorSet writes[]{
     {
@@ -574,6 +1040,30 @@ inline void write_descriptor_set(VkDevice device, VkDescriptorSet set, const Off
       .descriptorCount = 1u,
       .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
       .pImageInfo = &sampler_info,
+    },
+    {
+      .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+      .dstSet = set,
+      .dstBinding = 2u,
+      .descriptorCount = 1u,
+      .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+      .pBufferInfo = &center_info,
+    },
+    {
+      .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+      .dstSet = set,
+      .dstBinding = 3u,
+      .descriptorCount = 1u,
+      .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+      .pBufferInfo = &albedo_info,
+    },
+    {
+      .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+      .dstSet = set,
+      .dstBinding = 4u,
+      .descriptorCount = 1u,
+      .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+      .pBufferInfo = &camera_info,
     },
   };
   vkUpdateDescriptorSets(device, static_cast<u32>(std::size(writes)), writes, 0u, nullptr);
@@ -603,11 +1093,9 @@ inline VkShaderModule load_shader_module(VkDevice device, const char* path) {
   return module;
 }
 
-struct ComputePushConstants {
-  f32 time = 0.0f;
-  f32 inv_width = 0.0f;
-  f32 inv_height = 0.0f;
-  u32 frame_index = 0u;
+struct alignas(16) ComputePushConstants {
+  std::array<f32, 4> screen{};
+  std::array<u32, 4> frame{};
 };
 static_assert(sizeof(ComputePushConstants) <= 128, "Push constants exceed spec limit");
 
@@ -811,10 +1299,10 @@ inline void create_framebuffers(
   }
 }
 
-inline VkCommandPool create_command_pool(VkDevice device, u32 queue_family) {
+inline VkCommandPool create_command_pool(VkDevice device, u32 queue_family, VkCommandPoolCreateFlags flags) {
   const VkCommandPoolCreateInfo info{
     .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
-    .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+    .flags = flags,
     .queueFamilyIndex = queue_family,
   };
   VkCommandPool pool = VK_NULL_HANDLE;
@@ -857,6 +1345,13 @@ inline void initialize_frame_sync_objects(
 int main() {
   init_glfw();
   GLFWwindow* window = create_window();
+  glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+  if (glfwRawMouseMotionSupported()) {
+    glfwSetInputMode(window, GLFW_RAW_MOUSE_MOTION, GLFW_TRUE);
+  }
+  double last_mouse_x = 0.0;
+  double last_mouse_y = 0.0;
+  bool first_mouse = true;
 
   VkInstance instance = create_instance();
   vk_assert(result, "Failed to create instance");
@@ -881,10 +1376,56 @@ int main() {
 
   OffscreenImage offscreen = create_offscreen_image(physical, device, swapchain.extent);
 
+  VkCommandPool upload_pool = create_command_pool(device, static_cast<u32>(gfx_qf), VK_COMMAND_POOL_CREATE_TRANSIENT_BIT);
+
+  const auto spheres_cpu = generate_random_spheres();
+  const SphereSoA spheres_gpu = pack_spheres_gpu(spheres_cpu);
+  const u32 sphere_count = static_cast<u32>(spheres_gpu.center_radius.size());
+  Buffer sphere_centers = create_device_buffer_with_data(
+    physical,
+    device,
+    upload_pool,
+    queue,
+    static_cast<VkDeviceSize>(spheres_gpu.center_radius.size() * sizeof(spheres_gpu.center_radius.front())),
+    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+    spheres_gpu.center_radius.data()
+  );
+  Buffer sphere_albedo = create_device_buffer_with_data(
+    physical,
+    device,
+    upload_pool,
+    queue,
+    static_cast<VkDeviceSize>(spheres_gpu.albedo.size() * sizeof(spheres_gpu.albedo.front())),
+    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+    spheres_gpu.albedo.data()
+  );
+  vkDestroyCommandPool(device, upload_pool, nullptr);
+
+  Buffer camera_buffer = create_buffer(
+    physical,
+    device,
+    sizeof(CameraUniform),
+    VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+  );
+  auto* camera_uniform_ptr = static_cast<CameraUniform*>(map_buffer(device, camera_buffer, camera_buffer.size));
+
   VkDescriptorSetLayout descriptor_layout = create_descriptor_set_layout(device);
   VkDescriptorPool descriptor_pool = create_descriptor_pool(device);
   VkDescriptorSet descriptor_set = allocate_descriptor_set(device, descriptor_pool, descriptor_layout);
-  write_descriptor_set(device, descriptor_set, offscreen);
+  write_descriptor_set(device, descriptor_set, offscreen, sphere_centers, sphere_albedo, camera_buffer);
+
+  CameraState camera_state{};
+  camera_state.position = Vec3{ 0.0f, 1.5f, 6.0f };
+  camera_state.yaw = 0.0f;
+  camera_state.pitch = 0.0f;
+
+  Vec3 camera_forward{};
+  Vec3 camera_right{};
+  Vec3 camera_up{};
+  const f32 aspect_ratio = static_cast<f32>(swapchain.extent.width) / static_cast<f32>(swapchain.extent.height);
+  const CameraUniform initial_camera_uniform = build_camera_uniform(camera_state, aspect_ratio, camera_forward, camera_right, camera_up);
+  *camera_uniform_ptr = initial_camera_uniform;
 
   VkShaderModule compute_module = load_shader_module(device, SHADER_PATH_COMPUTE);
   VkShaderModule vert_module = load_shader_module(device, SHADER_PATH_VERT);
@@ -904,12 +1445,15 @@ int main() {
   vkDestroyShaderModule(device, vert_module, nullptr);
   vkDestroyShaderModule(device, compute_module, nullptr);
 
-  VkCommandPool command_pool = create_command_pool(device, static_cast<u32>(gfx_qf));
+  VkCommandPool command_pool = create_command_pool(device, static_cast<u32>(gfx_qf), VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT);
   array<VkCommandBuffer, FRAMES_IN_FLIGHT> command_buffers = allocate_command_buffers(device, command_pool);
   array<FrameSync, FRAMES_IN_FLIGHT> frames{};
   initialize_frame_sync_objects(device, command_buffers, frames);
 
+  FrameTimeHistory frame_times{};
+  u32 frames_since_log = 0u;
   const auto start_time = chrono::steady_clock::now();
+  auto last_frame_time = start_time;
   bool running = true;
   bool first_compute = true;
   u32 frame_cursor = 0u;
@@ -918,7 +1462,77 @@ int main() {
   while (running) {
     glfwPollEvents();
     running = glfwWindowShouldClose(window) == GLFW_FALSE;
+    if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS) {
+      running = false;
+    }
     if (!running) break;
+
+    const auto frame_begin = chrono::steady_clock::now();
+    const chrono::duration<f32> delta = frame_begin - last_frame_time;
+    last_frame_time = frame_begin;
+    const f32 dt = std::clamp(delta.count(), 0.0f, 0.1f);
+
+    double current_mouse_x = 0.0;
+    double current_mouse_y = 0.0;
+    glfwGetCursorPos(window, &current_mouse_x, &current_mouse_y);
+    if (first_mouse) {
+      last_mouse_x = current_mouse_x;
+      last_mouse_y = current_mouse_y;
+      first_mouse = false;
+    }
+    const double delta_x = current_mouse_x - last_mouse_x;
+    const double delta_y = current_mouse_y - last_mouse_y;
+    last_mouse_x = current_mouse_x;
+    last_mouse_y = current_mouse_y;
+
+    bool camera_updated = false;
+    if (delta_x != 0.0 || delta_y != 0.0) {
+      camera_state.yaw += static_cast<f32>(delta_x) * CAMERA_MOUSE_SENSITIVITY;
+      camera_state.pitch += static_cast<f32>(-delta_y) * CAMERA_MOUSE_SENSITIVITY;
+      camera_state.pitch = std::clamp(camera_state.pitch, -PI * 0.49f, PI * 0.49f);
+      camera_updated = true;
+    }
+
+    Vec3 move_forward = normalize(yaw_pitch_to_forward(camera_state.yaw, camera_state.pitch));
+    Vec3 move_right = normalize(cross(move_forward, Vec3{ 0.0f, 1.0f, 0.0f }));
+    if (length_squared(move_right) < 1e-6f) {
+      move_right = Vec3{ 1.0f, 0.0f, 0.0f };
+    }
+    Vec3 move_up = normalize(cross(move_right, move_forward));
+
+    const f32 move_speed = (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS)
+      ? CAMERA_BOOST_SPEED
+      : CAMERA_DEFAULT_SPEED;
+    if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) {
+      camera_state.position += move_forward * move_speed * dt;
+      camera_updated = true;
+    }
+    if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) {
+      camera_state.position -= move_forward * move_speed * dt;
+      camera_updated = true;
+    }
+    if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) {
+      camera_state.position -= move_right * move_speed * dt;
+      camera_updated = true;
+    }
+    if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) {
+      camera_state.position += move_right * move_speed * dt;
+      camera_updated = true;
+    }
+    if (glfwGetKey(window, GLFW_KEY_Q) == GLFW_PRESS) {
+      camera_state.position -= move_up * move_speed * dt;
+      camera_updated = true;
+    }
+    if (glfwGetKey(window, GLFW_KEY_E) == GLFW_PRESS) {
+      camera_state.position += move_up * move_speed * dt;
+      camera_updated = true;
+    }
+
+    if (camera_updated) {
+      const CameraUniform updated_uniform = build_camera_uniform(camera_state, aspect_ratio, camera_forward, camera_right, camera_up);
+      *camera_uniform_ptr = updated_uniform;
+      frame_counter = 0u;
+    }
 
     FrameSync& frame = frames[frame_cursor];
     vk_assert(vkWaitForFences(device, 1u, &frame.in_flight, VK_TRUE, UINT64_MAX), "Failed waiting for fence");
@@ -943,9 +1557,9 @@ int main() {
 
     const VkImageMemoryBarrier to_storage{
       .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-      .srcAccessMask = first_compute ? 0u : VK_ACCESS_SHADER_READ_BIT,
+      .srcAccessMask = first_compute ? 0u : VK_ACCESS_SHADER_WRITE_BIT,
       .dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
-      .oldLayout = first_compute ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+      .oldLayout = first_compute ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_GENERAL,
       .newLayout = VK_IMAGE_LAYOUT_GENERAL,
       .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
       .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
@@ -960,7 +1574,7 @@ int main() {
     };
     vkCmdPipelineBarrier(
       frame.cmd,
-      first_compute ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+      first_compute ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
       VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
       0u,
       0u, nullptr,
@@ -972,13 +1586,18 @@ int main() {
     vkCmdBindPipeline(frame.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, compute_pipeline);
     vkCmdBindDescriptorSets(frame.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, compute_layout, 0u, 1u, &descriptor_set, 0u, nullptr);
 
-    const auto now = chrono::steady_clock::now();
-    const chrono::duration<f32> elapsed = now - start_time;
-    const ComputePushConstants push{
-      .time = elapsed.count(),
-      .inv_width = 1.0f / static_cast<f32>(swapchain.extent.width),
-      .inv_height = 1.0f / static_cast<f32>(swapchain.extent.height),
-      .frame_index = static_cast<u32>(frame_counter),
+    ComputePushConstants push{};
+    push.screen = {
+      1.0f / static_cast<f32>(swapchain.extent.width),
+      1.0f / static_cast<f32>(swapchain.extent.height),
+      0.0f,
+      0.0f
+    };
+    push.frame = {
+      static_cast<u32>(frame_counter),
+      static_cast<u32>((frame_counter + 1u) * 0x9E3779B9u),
+      sphere_count,
+      0u
     };
     vkCmdPushConstants(frame.cmd, compute_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0u, static_cast<u32>(sizeof(ComputePushConstants)), &push);
 
@@ -1140,6 +1759,15 @@ int main() {
 
     frame_cursor = (frame_cursor + 1u) % FRAMES_IN_FLIGHT;
     ++frame_counter;
+
+    const auto frame_end = chrono::steady_clock::now();
+    const double frame_ms = chrono::duration<double, std::milli>(frame_end - frame_begin).count();
+    frame_times.push(frame_ms);
+    ++frames_since_log;
+    if (frames_since_log >= 120u) {
+      frame_times.log_to_stdout();
+      frames_since_log = 0u;
+    }
   }
 
   vkDeviceWaitIdle(device);
@@ -1166,6 +1794,11 @@ int main() {
 
   vkDestroyDescriptorPool(device, descriptor_pool, nullptr);
   vkDestroyDescriptorSetLayout(device, descriptor_layout, nullptr);
+
+  unmap_buffer(device, camera_buffer);
+  destroy_buffer(device, camera_buffer);
+  destroy_buffer(device, sphere_albedo);
+  destroy_buffer(device, sphere_centers);
 
   vkDestroySampler(device, offscreen.sampler, nullptr);
   vkDestroyImageView(device, offscreen.view, nullptr);

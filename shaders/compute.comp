@@ -4,12 +4,141 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 layout(binding = 0, rgba16f) uniform image2D accum_image;
 
+layout(std430, binding = 2) readonly buffer SphereCenters {
+  vec4 centers[];
+};
+
+layout(std430, binding = 3) readonly buffer SphereAlbedo {
+  vec4 albedo[];
+};
+
+layout(std140, binding = 4) uniform CameraBuffer {
+  vec4 origin;
+  vec4 lower_left;
+  vec4 horizontal;
+  vec4 vertical;
+} camera;
+
 layout(push_constant) uniform PushConstants {
-  float time;
-  float inv_width;
-  float inv_height;
-  uint frame_index;
+  vec4 screen_params;
+  uvec4 frame_params;
 } pushc;
+
+const float GROUND_Y = -1.0;
+const uint MAX_BOUNCES = 4u;
+
+struct HitInfo {
+  float t;
+  vec3 point;
+  vec3 normal;
+  vec3 albedo;
+  bool hit;
+};
+
+uint lcg(inout uint state) {
+  state = state * 1664525u + 1013904223u;
+  return state;
+}
+
+float rand(inout uint state) {
+  return float(lcg(state) & 0x00FFFFFFu) / float(0x01000000u);
+}
+
+vec3 random_unit_vector(inout uint state) {
+  const float z = rand(state) * 2.0 - 1.0;
+  const float a = rand(state) * 6.28318530718;
+  const float r = sqrt(max(0.0, 1.0 - z * z));
+  return vec3(r * cos(a), z, r * sin(a));
+}
+
+vec3 random_hemisphere(const vec3 normal, inout uint state) {
+  vec3 dir = random_unit_vector(state);
+  if (dot(dir, normal) < 0.0) {
+    dir = -dir;
+  }
+  return dir;
+}
+
+HitInfo intersect_scene(const vec3 ray_origin, const vec3 ray_dir, const uint sphere_count) {
+  HitInfo hit;
+  hit.t = 1e30;
+  hit.hit = false;
+
+  for (uint i = 0u; i < sphere_count; ++i) {
+    const vec3 center = centers[i].xyz;
+    const float radius = centers[i].w;
+
+    const vec3 oc = ray_origin - center;
+    const float a = dot(ray_dir, ray_dir);
+    const float half_b = dot(oc, ray_dir);
+    const float c = dot(oc, oc) - radius * radius;
+    const float discriminant = half_b * half_b - a * c;
+    if (discriminant <= 0.0) {
+      continue;
+    }
+
+    const float sqrt_d = sqrt(discriminant);
+    float temp = (-half_b - sqrt_d) / a;
+    if (temp <= 0.001) {
+      temp = (-half_b + sqrt_d) / a;
+    }
+    if (temp > 0.001 && temp < hit.t) {
+      hit.t = temp;
+      hit.point = ray_origin + ray_dir * temp;
+      hit.normal = normalize(hit.point - center);
+      hit.albedo = albedo[i].xyz;
+      hit.hit = true;
+    }
+  }
+
+  const float denom = ray_dir.y;
+  if (denom < -0.0001) {
+    const float t_plane = (GROUND_Y - ray_origin.y) / denom;
+    if (t_plane > 0.001 && t_plane < hit.t) {
+      const vec3 p = ray_origin + ray_dir * t_plane;
+      const vec2 checker = floor(p.xz);
+      const float pattern = mod(checker.x + checker.y, 2.0);
+      const vec3 plane_albedo = mix(vec3(0.8, 0.85, 0.8), vec3(0.3, 0.3, 0.35), pattern);
+      hit.t = t_plane;
+      hit.point = p;
+      hit.normal = vec3(0.0, 1.0, 0.0);
+      hit.albedo = plane_albedo;
+      hit.hit = true;
+    }
+  }
+
+  return hit;
+}
+
+vec3 shade(const vec3 ray_origin, const vec3 ray_dir, const uint sphere_count, inout uint rng_state) {
+  vec3 radiance = vec3(0.0);
+  vec3 throughput = vec3(1.0);
+  vec3 origin = ray_origin;
+  vec3 direction = ray_dir;
+
+  for (uint bounce = 0u; bounce < MAX_BOUNCES; ++bounce) {
+    HitInfo hit = intersect_scene(origin, direction, sphere_count);
+    if (!hit.hit) {
+      const vec3 unit_dir = normalize(direction);
+      const float t = clamp(unit_dir.y * 0.5 + 0.5, 0.0, 1.0);
+      const vec3 sky = mix(vec3(0.8, 0.9, 1.0), vec3(0.15, 0.2, 0.35), pow(1.0 - t, 2.0));
+      radiance += throughput * sky;
+      break;
+    }
+
+    const vec3 bounce_dir = random_hemisphere(hit.normal, rng_state);
+    throughput *= hit.albedo;
+
+    origin = hit.point + hit.normal * 0.001;
+    direction = bounce_dir;
+
+    if (max(max(throughput.x, throughput.y), throughput.z) < 0.001) {
+      break;
+    }
+  }
+
+  return radiance;
+}
 
 void main() {
   const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
@@ -19,11 +148,28 @@ void main() {
     return;
   }
 
-  const vec2 uv = (vec2(pixel) + 0.5) * vec2(pushc.inv_width, pushc.inv_height);
-  const float wave = sin(pushc.time + uv.x * 6.28318530718) * cos(pushc.time * 0.5 + uv.y * 6.28318530718);
-  const float vignette = 1.0 - dot(uv - 0.5, uv - 0.5) * 1.5;
-  const float flicker = 0.5 + 0.5 * sin(float(pushc.frame_index) * 0.1);
+  const float inv_width = pushc.screen_params.x;
+  const float inv_height = pushc.screen_params.y;
+  const uint frame_index = pushc.frame_params.x;
+  const uint sample_seed = pushc.frame_params.y;
+  const uint sphere_count = pushc.frame_params.z;
 
-  const vec3 color = vec3(0.35, 0.6, 1.0) * (0.5 + 0.5 * wave) * vignette * flicker;
-  imageStore(accum_image, pixel, vec4(color, 1.0));
+  uint rng_state = sample_seed
+                 ^ (uint(pixel.x) * 1973u)
+                 ^ (uint(pixel.y) * 9277u)
+                 ^ (frame_index * 26699u);
+  const vec2 jitter = vec2(rand(rng_state), rand(rng_state));
+  const vec2 uv = (vec2(pixel) + jitter) * vec2(inv_width, inv_height);
+  const float v = 1.0 - uv.y;
+
+  const vec3 ray_origin = camera.origin.xyz;
+  const vec3 ray_target = camera.lower_left.xyz + uv.x * camera.horizontal.xyz + v * camera.vertical.xyz;
+  const vec3 ray_direction = normalize(ray_target - ray_origin);
+
+  const vec3 sample_color = shade(ray_origin, ray_direction, sphere_count, rng_state);
+
+  vec3 accumulated = (frame_index == 0u) ? vec3(0.0) : imageLoad(accum_image, pixel).rgb;
+  const float frame_f = float(frame_index);
+  accumulated = (accumulated * frame_f + sample_color) / (frame_f + 1.0);
+  imageStore(accum_image, pixel, vec4(accumulated, 1.0));
 }
