@@ -5,6 +5,7 @@
 #include <vulkan/vulkan_beta.h>
 #endif
 
+#include <GLFW/glfw3.h>
 #include <array>
 #include <cstdint>
 #include <cstring>
@@ -44,6 +45,8 @@ inline void vk_assert(const VkResult result, const string_view message) {
 }
 
 constexpr string_view APP_NAME = "callandor";
+constexpr i32 WINDOW_WIDTH = 800;
+constexpr i32 WINDOW_HEIGHT = 600;
 
 // ---------- Instance ----------
 VkResult result = VK_SUCCESS;
@@ -54,8 +57,20 @@ constexpr array<const char*, 3> instance_exts{
   VK_EXT_METAL_SURFACE_EXTENSION_NAME,
   VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME,
 };
+#elif defined(_WIN32)
+constexpr array<const char*, 2> instance_exts{
+  VK_KHR_SURFACE_EXTENSION_NAME,
+  VK_KHR_WIN32_SURFACE_EXTENSION_NAME,
+};
+#elif defined(__linux__)
+constexpr array<const char*, 2> instance_exts{
+  VK_KHR_SURFACE_EXTENSION_NAME,
+  VK_KHR_XCB_SURFACE_EXTENSION_NAME,
+};
 #else
-constexpr array<const char*, 0> instance_exts{}; // keep zero cleanly typed
+constexpr array<const char*, 1> instance_exts{
+  VK_KHR_SURFACE_EXTENSION_NAME,
+};
 #endif
 
 inline VkInstance create_instance() {
@@ -82,6 +97,26 @@ inline VkInstance create_instance() {
   return inst;
 }
 
+inline void init_glfw() {
+  const int ok = glfwInit();
+  runtime_assert(ok == GLFW_TRUE, "Failed to initialize GLFW");
+  runtime_assert(glfwVulkanSupported() == GLFW_TRUE, "GLFW reports no Vulkan support");
+}
+
+inline GLFWwindow* create_window() {
+  glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+  glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+  GLFWwindow* win = glfwCreateWindow(WINDOW_WIDTH, WINDOW_HEIGHT, APP_NAME.data(), nullptr, nullptr);
+  runtime_assert(win != nullptr, "Failed to create GLFW window");
+  return win;
+}
+
+inline VkSurfaceKHR create_surface(VkInstance inst, GLFWwindow* win) {
+  VkSurfaceKHR surface = VK_NULL_HANDLE;
+  result = glfwCreateWindowSurface(inst, win, nullptr, &surface);
+  return surface;
+}
+
 // ---------- Device selection policy (all constexpr) ----------
 struct Caps {
   static constexpr u32 MaxPhys   = 8;
@@ -91,17 +126,17 @@ struct Caps {
 };
 
 #if defined(__APPLE__)
-constexpr array<const char*, 2> device_exts{
+constexpr array device_exts{
   VK_KHR_SWAPCHAIN_EXTENSION_NAME,
   VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME,
 };
 #else
-constexpr array<const char*, 1> device_exts{
+constexpr array device_exts{
   VK_KHR_SWAPCHAIN_EXTENSION_NAME,
 };
 #endif
 
-constexpr array<VkPhysicalDeviceType, 4> preferred_types{
+constexpr array preferred_types{
   VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU,
   VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU,
   VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU,
@@ -212,8 +247,14 @@ inline VkDevice create_device(VkPhysicalDevice pd, u32 gfx_qf) {
 
 // ---------- Main ----------
 int main() {
+  init_glfw();
+  GLFWwindow* window = create_window();
+
   VkInstance instance = create_instance();
   vk_assert(result, "Failed to create instance");
+
+  VkSurfaceKHR surface = create_surface(instance, window);
+  vk_assert(result, "Failed to create surface");
 
   i32 gfx_qf = -1;
   VkPhysicalDevice physical = pick_device(instance, gfx_qf);
@@ -227,8 +268,14 @@ int main() {
   vkGetDeviceQueue(device, static_cast<u32>(gfx_qf), 0, &graphics_queue);
   runtime_assert(graphics_queue != VK_NULL_HANDLE, "No graphics queue returned");
 
-  // ... your app ...
+  while (!glfwWindowShouldClose(window)) {
+    glfwPollEvents();
+    // ... your app ...
+  }
 
   vkDestroyDevice(device, nullptr);
+  vkDestroySurfaceKHR(instance, surface, nullptr);
   vkDestroyInstance(instance, nullptr);
+  glfwDestroyWindow(window);
+  glfwTerminate();
 }
