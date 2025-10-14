@@ -38,6 +38,10 @@ layout(std430, binding = 8) readonly buffer GridIndices {
   uint cell_indices[];
 };
 
+layout(std430, binding = 9) readonly buffer SobolDirs {
+  uint directions[];
+} sobol_buffer;
+
 layout(push_constant) uniform PushConstants {
   vec4 screen_params;
   uvec4 frame_params;
@@ -49,25 +53,56 @@ const float T_MIN = 1e-3;
 const float T_MAX = 1e30;
 const uint MISS_ID = 0xFFFFFFFFu;
 const int CHILD_DIM = 4;
+const uint SOBOL_BITS = 32u;
+const uint SOBOL_BOUNCE_STRIDE = 4u;
+const uint SOBOL_DIMENSIONS = 4u + SOBOL_BOUNCE_STRIDE * MAX_BOUNCES;
+const float SOBOL_SCALE = 1.0 / 4294967296.0;
 
-uint lcg(inout uint state) {
-  state = state * 1664525u + 1013904223u;
-  return state;
+uint hash32(uint x) {
+  x ^= x >> 16u;
+  x *= 0x7FEB352Du;
+  x ^= x >> 15u;
+  x *= 0x846CA68Bu;
+  x ^= x >> 16u;
+  return x;
 }
 
-float rand(inout uint state) {
-  return float(lcg(state) & 0x00FFFFFFu) / float(0x01000000u);
+uint sobol_uint(uint index, uint dim, uint scramble) {
+  if (dim >= SOBOL_DIMENSIONS) {
+    return scramble;
+  }
+  const uint base = dim * SOBOL_BITS;
+  uint value = scramble;
+  uint i = index;
+  uint bit = 0u;
+  while (i != 0u && bit < SOBOL_BITS) {
+    if ((i & 1u) != 0u) {
+      value ^= sobol_buffer.directions[base + bit];
+    }
+    i >>= 1u;
+    ++bit;
+  }
+  return value;
 }
 
-vec3 random_unit_vector(inout uint state) {
-  const float z = rand(state) * 2.0 - 1.0;
-  const float a = rand(state) * 6.28318530718;
+float sobol(uint index, uint dim, uint scramble) {
+  return (float(sobol_uint(index, dim, scramble)) + 1.0) * SOBOL_SCALE;
+}
+
+float sobol_sample(uint index, uint dim, uint pixel_seed, uint global_scramble) {
+  const uint scramble = pixel_seed ^ hash32(dim * 0x9E3779B9u ^ global_scramble);
+  return sobol(index, dim, scramble);
+}
+
+vec3 sample_uniform_sphere(float u1, float u2) {
+  const float z = u1 * 2.0 - 1.0;
+  const float a = u2 * 6.28318530718;
   const float r = sqrt(max(0.0, 1.0 - z * z));
   return vec3(r * cos(a), z, r * sin(a));
 }
 
-vec3 random_hemisphere(const vec3 normal, inout uint state) {
-  vec3 dir = random_unit_vector(state);
+vec3 sample_hemisphere(const vec3 normal, float u1, float u2) {
+  vec3 dir = sample_uniform_sphere(u1, u2);
   if (dot(dir, normal) < 0.0) {
     dir = -dir;
   }
@@ -359,14 +394,19 @@ void main() {
   const float inv_width = pushc.screen_params.x;
   const float inv_height = pushc.screen_params.y;
   const uint frame_index = pushc.frame_params.x;
-  const uint sample_seed = pushc.frame_params.y;
+  const uint global_scramble = pushc.frame_params.y;
   const uint sphere_count = pushc.frame_params.z;
+  const uint spp = max(pushc.frame_params.w, 1u);
+  const uint sample_index = frame_index * spp;
 
-  uint rng_state = sample_seed
-                 ^ (uint(pixel.x) * 1973u)
-                 ^ (uint(pixel.y) * 9277u)
-                 ^ (frame_index * 26699u);
-  const vec2 jitter = vec2(rand(rng_state), rand(rng_state));
+  const uint pixel_index = uint(pixel.x) + uint(pixel.y) * uint(extent.x);
+  const uint pixel_seed = hash32(pixel_index ^ global_scramble);
+
+  const vec2 jitter = vec2(
+    sobol_sample(sample_index, 0u, pixel_seed, global_scramble),
+    sobol_sample(sample_index, 1u, pixel_seed, global_scramble)
+  );
+
   const vec2 uv = (vec2(pixel) + jitter) * vec2(inv_width, inv_height);
   const float v = 1.0 - uv.y;
 
@@ -423,7 +463,11 @@ void main() {
     throughput *= hit_albedo;
     const vec3 hit_point = origin + direction * t_hit;
     origin = hit_point + hit_normal * 1e-3;
-    direction = random_hemisphere(hit_normal, rng_state);
+    const uint sobol_dim_base = 4u + SOBOL_BOUNCE_STRIDE * bounce;
+    const float u1 = sobol_sample(sample_index, sobol_dim_base + 0u, pixel_seed, global_scramble);
+    const float u2 = sobol_sample(sample_index, sobol_dim_base + 1u, pixel_seed, global_scramble);
+    const float rr_sample = sobol_sample(sample_index, sobol_dim_base + 2u, pixel_seed, global_scramble);
+    direction = sample_hemisphere(hit_normal, u1, u2);
 
     if (max(max(throughput.x, throughput.y), throughput.z) < 0.001) {
       path_alive = false;
@@ -432,7 +476,7 @@ void main() {
 
     if (bounce >= 3u) {
       const float rr_prob = 0.9;
-      if (rand(rng_state) > rr_prob) {
+      if (rr_sample > rr_prob) {
         path_alive = false;
         break;
       }

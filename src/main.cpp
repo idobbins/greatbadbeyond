@@ -21,6 +21,7 @@
 #include <vector>
 #include <cmath>
 #include <limits>
+#include <bit>
 
 using namespace std;
 
@@ -166,6 +167,201 @@ inline void vk_assert(const VkResult result, const string_view message) {
     cerr << "Vk Assert failed: " << message << " (" << result << ")" << endl;
     exit(EXIT_FAILURE);
   }
+}
+
+inline u32 hash32(u32 x) {
+  x ^= x >> 16;
+  x *= 0x7FEB352Du;
+  x ^= x >> 15;
+  x *= 0x846CA68Bu;
+  x ^= x >> 16;
+  return x;
+}
+
+inline u32 gf2_degree(u32 poly) {
+  runtime_assert(poly != 0u, "Polynomial degree is undefined for zero");
+  return 31u - static_cast<u32>(std::countl_zero(poly));
+}
+
+inline int gf2_degree64(u64 poly) {
+  runtime_assert(poly != 0u, "Polynomial degree is undefined for zero");
+  return 63 - static_cast<int>(std::countl_zero(poly));
+}
+
+inline u64 gf2_mod(u64 poly, u32 mod) {
+  if (poly == 0u) {
+    return 0u;
+  }
+  runtime_assert(mod != 0u, "Modulo polynomial must be non-zero");
+  const int mod_degree = gf2_degree(mod);
+  const u64 mod64 = static_cast<u64>(mod);
+  while (poly != 0u) {
+    const int poly_degree = gf2_degree64(poly);
+    if (poly_degree < mod_degree) {
+      break;
+    }
+    const int shift = poly_degree - mod_degree;
+    poly ^= (mod64 << static_cast<u64>(shift));
+  }
+  return poly;
+}
+
+inline u32 gf2_mod_poly(u32 poly, u32 mod) {
+  return static_cast<u32>(gf2_mod(poly, mod));
+}
+
+inline u32 gf2_mod_mul(u32 a, u32 b, u32 mod) {
+  u64 product = 0u;
+  u64 aa = static_cast<u64>(a);
+  u32 bb = b;
+  while (bb != 0u) {
+    if ((bb & 1u) != 0u) {
+      product ^= aa;
+    }
+    bb >>= 1u;
+    aa <<= 1u;
+  }
+  return static_cast<u32>(gf2_mod(product, mod));
+}
+
+inline u32 gf2_mod_pow(u32 base, u64 exp, u32 mod) {
+  u32 result = 1u;
+  u32 power = base;
+  while (exp != 0u) {
+    if ((exp & 1u) != 0u) {
+      result = gf2_mod_mul(result, power, mod);
+    }
+    exp >>= 1u;
+    if (exp != 0u) {
+      power = gf2_mod_mul(power, power, mod);
+    }
+  }
+  return result;
+}
+
+inline u32 gf2_poly_gcd(u32 a, u32 b) {
+  while (b != 0u) {
+    const u32 r = gf2_mod_poly(a, b);
+    a = b;
+    b = r;
+  }
+  return a;
+}
+
+inline bool gf2_is_irreducible(u32 poly) {
+  const u32 degree = gf2_degree(poly);
+  if (degree <= 1u) {
+    return true;
+  }
+  u32 x = 2u; // Polynomial "x"
+  for (u32 i = 0u; i < degree / 2u; ++i) {
+    x = gf2_mod_mul(x, x, poly);
+    const u32 diff = x ^ 2u;
+    if (gf2_poly_gcd(diff, poly) != 1u) {
+      return false;
+    }
+  }
+  return true;
+}
+
+inline std::vector<u64> unique_prime_factors(u64 n) {
+  std::vector<u64> factors;
+  for (u64 p = 2u; p * p <= n; ++p) {
+    if ((n % p) != 0u) {
+      continue;
+    }
+    factors.push_back(p);
+    while ((n % p) == 0u) {
+      n /= p;
+    }
+  }
+  if (n > 1u) {
+    factors.push_back(n);
+  }
+  return factors;
+}
+
+inline bool gf2_is_primitive(u32 poly) {
+  if ((poly & 1u) == 0u) {
+    return false;
+  }
+  const u32 degree = gf2_degree(poly);
+  if (!gf2_is_irreducible(poly)) {
+    return false;
+  }
+  const u64 order = (1ull << degree) - 1ull;
+  const std::vector<u64> factors = unique_prime_factors(order);
+  for (const u64 factor : factors) {
+    const u64 exponent = order / factor;
+    if (gf2_mod_pow(2u, exponent, poly) == 1u) {
+      return false;
+    }
+  }
+  return true;
+}
+
+inline std::vector<u32> generate_primitive_polynomials(u32 count) {
+  std::vector<u32> polynomials;
+  polynomials.reserve(count);
+  for (u32 degree = 1u; polynomials.size() < count; ++degree) {
+    const u32 start = (1u << degree) | 1u;
+    const u32 end = 1u << (degree + 1u);
+    for (u32 poly = start; poly < end; poly += 2u) {
+      if (!gf2_is_primitive(poly)) {
+        continue;
+      }
+      polynomials.push_back(poly);
+      if (polynomials.size() == count) {
+        break;
+      }
+    }
+  }
+  return polynomials;
+}
+
+inline std::vector<u32> generate_sobol_directions(u32 dimensions, u32 bits) {
+  constexpr u32 MAX_BITS = 32u;
+  runtime_assert(bits <= MAX_BITS, "Sobol generator supports up to 32 bits");
+  std::vector<u32> result(dimensions * bits, 0u);
+  const std::vector<u32> polynomials = generate_primitive_polynomials(dimensions);
+
+  for (u32 dim = 0u; dim < dimensions; ++dim) {
+    const u32 polynomial = polynomials[dim];
+    const u32 degree = gf2_degree(polynomial);
+    runtime_assert(degree <= bits, "Sobol polynomial degree exceeds direction bit count");
+
+    std::array<u32, MAX_BITS> directions{};
+    for (u32 i = 0u; i < degree; ++i) {
+      const u32 limit = 1u << (i + 1u);
+      u32 mk = hash32((dim + 1u) * 0x9E3779B9u ^ (i + 1u) * 0x94D049BBu);
+      mk &= (limit - 1u);
+      mk |= 1u;
+      if (mk >= limit) {
+        mk = limit - 1u;
+      }
+      if ((mk & 1u) == 0u) {
+        mk ^= 1u;
+      }
+      directions[i] = mk << (MAX_BITS - (i + 1u));
+    }
+
+    const u32 mask = (degree > 1u) ? ((1u << (degree - 1u)) - 1u) : 0u;
+    const u32 a = (degree > 1u) ? ((polynomial >> 1u) & mask) : 0u;
+    for (u32 i = degree; i < bits; ++i) {
+      u32 value = directions[i - degree] ^ (directions[i - degree] >> degree);
+      for (u32 k = 1u; k < degree; ++k) {
+        if ((a >> (degree - 1u - k)) & 1u) {
+          value ^= directions[i - k];
+        }
+      }
+      directions[i] = value;
+    }
+
+    for (u32 i = 0u; i < bits; ++i) {
+      result[dim * bits + i] = directions[i];
+    }
+  }
+  return result;
 }
 
 constexpr string_view APP_NAME = "callandor";
@@ -375,6 +571,9 @@ constexpr f32 CAMERA_BOOST_SPEED = 12.0f;
 constexpr f32 CAMERA_MOUSE_SENSITIVITY = 0.0025f;
 constexpr f32 CAMERA_FOV_DEGREES = 60.0f;
 constexpr u32 PATH_MAX_BOUNCES = 4u;
+constexpr u32 SOBOL_DIMENSIONS = 4u + 4u * PATH_MAX_BOUNCES;
+constexpr u32 SOBOL_BITS = 32u;
+constexpr u32 SOBOL_GLOBAL_SCRAMBLE = 0xA511E9B3u;
 constexpr f32 SPHERE_RADIUS_MIN = 0.35f;
 constexpr f32 SPHERE_RADIUS_MAX = 1.05f;
 constexpr f32 SPHERE_HEIGHT_MIN = 0.2f;
@@ -392,12 +591,14 @@ inline void init_glfw() {
 inline GLFWwindow* create_window() {
   glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
   glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+#ifdef __APPLE__
+  glfwWindowHint(GLFW_COCOA_RETINA_FRAMEBUFFER, GLFW_FALSE);
+#endif
   GLFWwindow* win = glfwCreateWindow(WINDOW_WIDTH, WINDOW_HEIGHT, APP_NAME.data(), nullptr, nullptr);
   runtime_assert(win != nullptr, "Failed to create GLFW window");
   return win;
 }
-
-inline VkInstance create_instance() {
+sssssssssssssssswwwaaaaaaaaaadddddddddddddnline VkInstance create_instance() {
   const VkApplicationInfo app_info{
     .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
     .pApplicationName = APP_NAME.data(),
@@ -1231,6 +1432,12 @@ inline VkDescriptorSetLayout create_descriptor_set_layout(VkDevice device) {
     .descriptorCount = 1u,
     .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
   };
+  const VkDescriptorSetLayoutBinding sobol_binding{
+    .binding = 9u,
+    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+    .descriptorCount = 1u,
+    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+  };
   const array layout_bindings{
     storage_binding,
     sampled_binding,
@@ -1240,7 +1447,8 @@ inline VkDescriptorSetLayout create_descriptor_set_layout(VkDevice device) {
     grid_params_binding,
     grid_l0_binding,
     grid_l1_binding,
-    grid_indices_binding
+    grid_indices_binding,
+    sobol_binding
   };
   const VkDescriptorSetLayoutCreateInfo info{
     .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
@@ -1264,7 +1472,7 @@ inline VkDescriptorPool create_descriptor_pool(VkDevice device) {
     },
     {
       .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-      .descriptorCount = 5u,
+      .descriptorCount = 6u,
     },
     {
       .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
@@ -1304,7 +1512,8 @@ inline void write_descriptor_set(
   const Buffer& grid_params_buffer,
   const Buffer& grid_l0_buffer,
   const Buffer& grid_l1_buffer,
-  const Buffer& grid_indices_buffer
+  const Buffer& grid_indices_buffer,
+  const Buffer& sobol_buffer
 ) {
   const VkDescriptorImageInfo storage_info{
     .sampler = VK_NULL_HANDLE,
@@ -1350,6 +1559,11 @@ inline void write_descriptor_set(
     .buffer = grid_indices_buffer.buffer,
     .offset = 0u,
     .range = grid_indices_buffer.size,
+  };
+  const VkDescriptorBufferInfo sobol_info{
+    .buffer = sobol_buffer.buffer,
+    .offset = 0u,
+    .range = sobol_buffer.size,
   };
   const VkWriteDescriptorSet writes[]{
     {
@@ -1423,6 +1637,14 @@ inline void write_descriptor_set(
       .descriptorCount = 1u,
       .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
       .pBufferInfo = &grid_indices_info,
+    },
+    {
+      .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+      .dstSet = set,
+      .dstBinding = 9u,
+      .descriptorCount = 1u,
+      .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+      .pBufferInfo = &sobol_info,
     },
   };
   vkUpdateDescriptorSets(device, static_cast<u32>(std::size(writes)), writes, 0u, nullptr);
@@ -1798,6 +2020,16 @@ int main() {
     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
     grid_gpu.indices.data()
   );
+  const std::vector<u32> sobol_dirs_cpu = generate_sobol_directions(SOBOL_DIMENSIONS, SOBOL_BITS);
+  Buffer sobol_dirs_buffer = create_device_buffer_with_data(
+    physical,
+    device,
+    upload_pool,
+    queue,
+    static_cast<VkDeviceSize>(sobol_dirs_cpu.size() * sizeof(u32)),
+    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+    sobol_dirs_cpu.data()
+  );
   vkDestroyCommandPool(device, upload_pool, nullptr);
 
   Buffer camera_buffer = create_buffer(
@@ -1822,7 +2054,8 @@ int main() {
     grid_params_buffer,
     grid_l0_buffer,
     grid_l1_buffer,
-    grid_indices_buffer
+    grid_indices_buffer,
+    sobol_dirs_buffer
   );
 
   CameraState camera_state{};
@@ -2005,9 +2238,9 @@ int main() {
     };
     push.frame = {
       static_cast<u32>(frame_counter),
-      static_cast<u32>((frame_counter + 1u) * 0x9E3779B9u),
+      SOBOL_GLOBAL_SCRAMBLE,
       sphere_count,
-      0u
+      1u
     };
     vkCmdPushConstants(frame.cmd, compute_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0u, static_cast<u32>(sizeof(ComputePushConstants)), &push);
 
@@ -2207,6 +2440,7 @@ int main() {
 
   unmap_buffer(device, camera_buffer);
   destroy_buffer(device, camera_buffer);
+  destroy_buffer(device, sobol_dirs_buffer);
   destroy_buffer(device, grid_indices_buffer);
   destroy_buffer(device, grid_l1_buffer);
   destroy_buffer(device, grid_l0_buffer);
