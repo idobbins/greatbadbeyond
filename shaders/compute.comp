@@ -1,0 +1,29 @@
+#version 460
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(binding = 0, rgba16f) uniform image2D accum_image;
+
+layout(push_constant) uniform PushConstants {
+  float time;
+  float inv_width;
+  float inv_height;
+  uint frame_index;
+} pushc;
+
+void main() {
+  const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+  const ivec2 extent = imageSize(accum_image);
+
+  if (pixel.x >= extent.x || pixel.y >= extent.y) {
+    return;
+  }
+
+  const vec2 uv = (vec2(pixel) + 0.5) * vec2(pushc.inv_width, pushc.inv_height);
+  const float wave = sin(pushc.time + uv.x * 6.28318530718) * cos(pushc.time * 0.5 + uv.y * 6.28318530718);
+  const float vignette = 1.0 - dot(uv - 0.5, uv - 0.5) * 1.5;
+  const float flicker = 0.5 + 0.5 * sin(float(pushc.frame_index) * 0.1);
+
+  const vec3 color = vec3(0.35, 0.6, 1.0) * (0.5 + 0.5 * wave) * vignette * flicker;
+  imageStore(accum_image, pixel, vec4(color, 1.0));
+}
