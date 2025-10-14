@@ -489,6 +489,96 @@ inline OffscreenImage create_offscreen_image(VkPhysicalDevice pd, VkDevice devic
   return off;
 }
 
+inline VkDescriptorSetLayout create_descriptor_set_layout(VkDevice device) {
+  const VkDescriptorSetLayoutBinding storage_binding{
+    .binding = 0u,
+    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+    .descriptorCount = 1u,
+    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+  };
+  const VkDescriptorSetLayoutBinding sampled_binding{
+    .binding = 1u,
+    .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+    .descriptorCount = 1u,
+    .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+  };
+  const array layout_bindings{ storage_binding, sampled_binding };
+  const VkDescriptorSetLayoutCreateInfo info{
+    .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+    .bindingCount = static_cast<u32>(layout_bindings.size()),
+    .pBindings = layout_bindings.data(),
+  };
+  VkDescriptorSetLayout layout = VK_NULL_HANDLE;
+  vk_assert(vkCreateDescriptorSetLayout(device, &info, nullptr, &layout), "Failed to create descriptor set layout");
+  return layout;
+}
+
+inline VkDescriptorPool create_descriptor_pool(VkDevice device) {
+  const VkDescriptorPoolSize pool_sizes[]{
+    {
+      .type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+      .descriptorCount = 1u,
+    },
+    {
+      .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+      .descriptorCount = 1u,
+    },
+  };
+  const VkDescriptorPoolCreateInfo info{
+    .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+    .maxSets = 1u,
+    .poolSizeCount = static_cast<u32>(std::size(pool_sizes)),
+    .pPoolSizes = pool_sizes,
+  };
+  VkDescriptorPool pool = VK_NULL_HANDLE;
+  vk_assert(vkCreateDescriptorPool(device, &info, nullptr, &pool), "Failed to create descriptor pool");
+  return pool;
+}
+
+inline VkDescriptorSet allocate_descriptor_set(VkDevice device, VkDescriptorPool pool, VkDescriptorSetLayout layout) {
+  const VkDescriptorSetAllocateInfo info{
+    .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+    .descriptorPool = pool,
+    .descriptorSetCount = 1u,
+    .pSetLayouts = &layout,
+  };
+  VkDescriptorSet set = VK_NULL_HANDLE;
+  vk_assert(vkAllocateDescriptorSets(device, &info, &set), "Failed to allocate descriptor set");
+  return set;
+}
+
+inline void write_descriptor_set(VkDevice device, VkDescriptorSet set, const OffscreenImage& offscreen) {
+  const VkDescriptorImageInfo storage_info{
+    .sampler = VK_NULL_HANDLE,
+    .imageView = offscreen.view,
+    .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+  };
+  const VkDescriptorImageInfo sampler_info{
+    .sampler = offscreen.sampler,
+    .imageView = offscreen.view,
+    .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+  };
+  const VkWriteDescriptorSet writes[]{
+    {
+      .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+      .dstSet = set,
+      .dstBinding = 0u,
+      .descriptorCount = 1u,
+      .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+      .pImageInfo = &storage_info,
+    },
+    {
+      .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+      .dstSet = set,
+      .dstBinding = 1u,
+      .descriptorCount = 1u,
+      .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+      .pImageInfo = &sampler_info,
+    },
+  };
+  vkUpdateDescriptorSets(device, static_cast<u32>(std::size(writes)), writes, 0u, nullptr);
+}
+
 inline VkShaderModule load_shader_module(VkDevice device, const char* path) {
   std::array<u32, MAX_SHADER_BYTES / sizeof(u32)> buffer{};
   std::FILE* file = std::fopen(path, "rb");
@@ -521,6 +611,249 @@ struct ComputePushConstants {
 };
 static_assert(sizeof(ComputePushConstants) <= 128, "Push constants exceed spec limit");
 
+inline VkPipelineLayout create_compute_pipeline_layout(VkDevice device, VkDescriptorSetLayout layout) {
+  const VkPushConstantRange push_range{
+    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+    .offset = 0u,
+    .size = static_cast<u32>(sizeof(ComputePushConstants)),
+  };
+  const VkPipelineLayoutCreateInfo info{
+    .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+    .setLayoutCount = 1u,
+    .pSetLayouts = &layout,
+    .pushConstantRangeCount = 1u,
+    .pPushConstantRanges = &push_range,
+  };
+  VkPipelineLayout pipeline_layout = VK_NULL_HANDLE;
+  vk_assert(vkCreatePipelineLayout(device, &info, nullptr, &pipeline_layout), "Failed to create compute pipeline layout");
+  return pipeline_layout;
+}
+
+inline VkPipelineLayout create_graphics_pipeline_layout(VkDevice device, VkDescriptorSetLayout layout) {
+  const VkPipelineLayoutCreateInfo info{
+    .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+    .setLayoutCount = 1u,
+    .pSetLayouts = &layout,
+  };
+  VkPipelineLayout pipeline_layout = VK_NULL_HANDLE;
+  vk_assert(vkCreatePipelineLayout(device, &info, nullptr, &pipeline_layout), "Failed to create graphics pipeline layout");
+  return pipeline_layout;
+}
+
+inline VkPipeline create_compute_pipeline(VkDevice device, VkPipelineLayout layout, VkShaderModule shader) {
+  const VkPipelineShaderStageCreateInfo stage{
+    .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+    .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+    .module = shader,
+    .pName = "main",
+  };
+  const VkComputePipelineCreateInfo info{
+    .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+    .stage = stage,
+    .layout = layout,
+  };
+  VkPipeline pipeline = VK_NULL_HANDLE;
+  vk_assert(vkCreateComputePipelines(device, VK_NULL_HANDLE, 1u, &info, nullptr, &pipeline), "Failed to create compute pipeline");
+  return pipeline;
+}
+
+inline VkRenderPass create_render_pass(VkDevice device, VkFormat format) {
+  const VkAttachmentDescription color_attachment{
+    .format = format,
+    .samples = VK_SAMPLE_COUNT_1_BIT,
+    .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+    .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+    .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+    .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+    .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+    .finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+  };
+  const VkAttachmentReference color_ref{
+    .attachment = 0u,
+    .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+  };
+  const VkSubpassDescription subpass{
+    .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
+    .colorAttachmentCount = 1u,
+    .pColorAttachments = &color_ref,
+  };
+  const VkSubpassDependency dependency{
+    .srcSubpass = VK_SUBPASS_EXTERNAL,
+    .dstSubpass = 0u,
+    .srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+    .dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+    .srcAccessMask = 0u,
+    .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+  };
+  const VkRenderPassCreateInfo info{
+    .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
+    .attachmentCount = 1u,
+    .pAttachments = &color_attachment,
+    .subpassCount = 1u,
+    .pSubpasses = &subpass,
+    .dependencyCount = 1u,
+    .pDependencies = &dependency,
+  };
+  VkRenderPass render_pass = VK_NULL_HANDLE;
+  vk_assert(vkCreateRenderPass(device, &info, nullptr, &render_pass), "Failed to create render pass");
+  return render_pass;
+}
+
+inline VkPipeline create_graphics_pipeline(
+  VkDevice device,
+  VkPipelineLayout layout,
+  VkRenderPass render_pass,
+  VkShaderModule vert_module,
+  VkShaderModule frag_module
+) {
+  const VkPipelineShaderStageCreateInfo stages[]{
+    {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+      .stage = VK_SHADER_STAGE_VERTEX_BIT,
+      .module = vert_module,
+      .pName = "main",
+    },
+    {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+      .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+      .module = frag_module,
+      .pName = "main",
+    },
+  };
+  const VkPipelineVertexInputStateCreateInfo vertex_input{
+    .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+  };
+  const VkPipelineInputAssemblyStateCreateInfo input_assembly{
+    .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+    .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+    .primitiveRestartEnable = VK_FALSE,
+  };
+  const VkPipelineViewportStateCreateInfo viewport_state{
+    .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+    .viewportCount = 1u,
+    .pViewports = nullptr,
+    .scissorCount = 1u,
+    .pScissors = nullptr,
+  };
+  const VkPipelineRasterizationStateCreateInfo raster_state{
+    .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+    .polygonMode = VK_POLYGON_MODE_FILL,
+    .cullMode = VK_CULL_MODE_NONE,
+    .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+    .lineWidth = 1.0f,
+  };
+  const VkPipelineMultisampleStateCreateInfo multisample_state{
+    .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+    .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+  };
+  const VkPipelineColorBlendAttachmentState blend_attachment{
+    .blendEnable = VK_FALSE,
+    .srcColorBlendFactor = VK_BLEND_FACTOR_ONE,
+    .dstColorBlendFactor = VK_BLEND_FACTOR_ZERO,
+    .colorBlendOp = VK_BLEND_OP_ADD,
+    .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+    .dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
+    .alphaBlendOp = VK_BLEND_OP_ADD,
+    .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+  };
+  const VkPipelineColorBlendStateCreateInfo blend_state{
+    .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+    .attachmentCount = 1u,
+    .pAttachments = &blend_attachment,
+  };
+  constexpr array dynamic_states{
+    VK_DYNAMIC_STATE_VIEWPORT,
+    VK_DYNAMIC_STATE_SCISSOR,
+  };
+  const VkPipelineDynamicStateCreateInfo dynamic_state{
+    .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+    .dynamicStateCount = static_cast<u32>(dynamic_states.size()),
+    .pDynamicStates = dynamic_states.data(),
+  };
+  const VkGraphicsPipelineCreateInfo info{
+    .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+    .stageCount = static_cast<u32>(std::size(stages)),
+    .pStages = stages,
+    .pVertexInputState = &vertex_input,
+    .pInputAssemblyState = &input_assembly,
+    .pViewportState = &viewport_state,
+    .pRasterizationState = &raster_state,
+    .pMultisampleState = &multisample_state,
+    .pColorBlendState = &blend_state,
+    .pDynamicState = &dynamic_state,
+    .layout = layout,
+    .renderPass = render_pass,
+    .subpass = 0u,
+  };
+  VkPipeline pipeline = VK_NULL_HANDLE;
+  vk_assert(vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1u, &info, nullptr, &pipeline), "Failed to create graphics pipeline");
+  return pipeline;
+}
+
+inline void create_framebuffers(
+  VkDevice device,
+  VkRenderPass render_pass,
+  const SwapchainBundle& swapchain,
+  array<VkFramebuffer, Caps::MaxSwapchainImages>& framebuffers
+) {
+  for (u32 i = 0; i < swapchain.count; ++i) {
+    const VkImageView attachments[]{ swapchain.views[i] };
+    const VkFramebufferCreateInfo info{
+      .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+      .renderPass = render_pass,
+      .attachmentCount = 1u,
+      .pAttachments = attachments,
+      .width = swapchain.extent.width,
+      .height = swapchain.extent.height,
+      .layers = 1u,
+    };
+    vk_assert(vkCreateFramebuffer(device, &info, nullptr, &framebuffers[i]), "Failed to create framebuffer");
+  }
+}
+
+inline VkCommandPool create_command_pool(VkDevice device, u32 queue_family) {
+  const VkCommandPoolCreateInfo info{
+    .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+    .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+    .queueFamilyIndex = queue_family,
+  };
+  VkCommandPool pool = VK_NULL_HANDLE;
+  vk_assert(vkCreateCommandPool(device, &info, nullptr, &pool), "Failed to create command pool");
+  return pool;
+}
+
+inline array<VkCommandBuffer, FRAMES_IN_FLIGHT> allocate_command_buffers(VkDevice device, VkCommandPool pool) {
+  array<VkCommandBuffer, FRAMES_IN_FLIGHT> buffers{};
+  const VkCommandBufferAllocateInfo info{
+    .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+    .commandPool = pool,
+    .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+    .commandBufferCount = FRAMES_IN_FLIGHT,
+  };
+  vk_assert(vkAllocateCommandBuffers(device, &info, buffers.data()), "Failed to allocate command buffers");
+  return buffers;
+}
+
+inline void initialize_frame_sync_objects(
+  VkDevice device,
+  const array<VkCommandBuffer, FRAMES_IN_FLIGHT>& buffers,
+  array<FrameSync, FRAMES_IN_FLIGHT>& frames
+) {
+  const VkSemaphoreCreateInfo semaphore_info{
+    .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+  };
+  const VkFenceCreateInfo fence_info{
+    .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+    .flags = VK_FENCE_CREATE_SIGNALED_BIT,
+  };
+  for (u32 i = 0; i < FRAMES_IN_FLIGHT; ++i) {
+    frames[i].cmd = buffers[i];
+    vk_assert(vkCreateSemaphore(device, &semaphore_info, nullptr, &frames[i].image_available), "Failed to create semaphore");
+    vk_assert(vkCreateSemaphore(device, &semaphore_info, nullptr, &frames[i].render_finished), "Failed to create semaphore");
+    vk_assert(vkCreateFence(device, &fence_info, nullptr, &frames[i].in_flight), "Failed to create fence");
+  }
+}
+
 int main() {
   init_glfw();
   GLFWwindow* window = create_window();
@@ -548,312 +881,33 @@ int main() {
 
   OffscreenImage offscreen = create_offscreen_image(physical, device, swapchain.extent);
 
-  const VkDescriptorSetLayoutBinding storage_binding{
-    .binding = 0u,
-    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-    .descriptorCount = 1u,
-    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-  };
-  const VkDescriptorSetLayoutBinding sampled_binding{
-    .binding = 1u,
-    .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-    .descriptorCount = 1u,
-    .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
-  };
-  const array layout_bindings{ storage_binding, sampled_binding };
-  const VkDescriptorSetLayoutCreateInfo ds_layout_ci{
-    .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-    .bindingCount = static_cast<u32>(layout_bindings.size()),
-    .pBindings = layout_bindings.data(),
-  };
-  VkDescriptorSetLayout descriptor_layout = VK_NULL_HANDLE;
-  vk_assert(vkCreateDescriptorSetLayout(device, &ds_layout_ci, nullptr, &descriptor_layout), "Failed to create descriptor set layout");
-
-  const VkDescriptorPoolSize pool_sizes[]{
-    {
-      .type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-      .descriptorCount = 1u,
-    },
-    {
-      .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-      .descriptorCount = 1u,
-    },
-  };
-  const VkDescriptorPoolCreateInfo dpci{
-    .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-    .maxSets = 1u,
-    .poolSizeCount = static_cast<u32>(std::size(pool_sizes)),
-    .pPoolSizes = pool_sizes,
-  };
-  VkDescriptorPool descriptor_pool = VK_NULL_HANDLE;
-  vk_assert(vkCreateDescriptorPool(device, &dpci, nullptr, &descriptor_pool), "Failed to create descriptor pool");
-
-  VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
-  const VkDescriptorSetAllocateInfo dsai{
-    .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-    .descriptorPool = descriptor_pool,
-    .descriptorSetCount = 1u,
-    .pSetLayouts = &descriptor_layout,
-  };
-  vk_assert(vkAllocateDescriptorSets(device, &dsai, &descriptor_set), "Failed to allocate descriptor set");
-
-  const VkDescriptorImageInfo storage_info{
-    .sampler = VK_NULL_HANDLE,
-    .imageView = offscreen.view,
-    .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-  };
-  const VkDescriptorImageInfo sampler_info{
-    .sampler = offscreen.sampler,
-    .imageView = offscreen.view,
-    .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-  };
-  const VkWriteDescriptorSet descriptor_writes[]{
-    {
-      .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-      .dstSet = descriptor_set,
-      .dstBinding = 0u,
-      .descriptorCount = 1u,
-      .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-      .pImageInfo = &storage_info,
-    },
-    {
-      .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-      .dstSet = descriptor_set,
-      .dstBinding = 1u,
-      .descriptorCount = 1u,
-      .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-      .pImageInfo = &sampler_info,
-    },
-  };
-  vkUpdateDescriptorSets(device, static_cast<u32>(std::size(descriptor_writes)), descriptor_writes, 0u, nullptr);
+  VkDescriptorSetLayout descriptor_layout = create_descriptor_set_layout(device);
+  VkDescriptorPool descriptor_pool = create_descriptor_pool(device);
+  VkDescriptorSet descriptor_set = allocate_descriptor_set(device, descriptor_pool, descriptor_layout);
+  write_descriptor_set(device, descriptor_set, offscreen);
 
   VkShaderModule compute_module = load_shader_module(device, SHADER_PATH_COMPUTE);
   VkShaderModule vert_module = load_shader_module(device, SHADER_PATH_VERT);
   VkShaderModule frag_module = load_shader_module(device, SHADER_PATH_FRAG);
 
-  const VkPushConstantRange compute_push_range{
-    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-    .offset = 0u,
-    .size = static_cast<u32>(sizeof(ComputePushConstants)),
-  };
-
-  const VkPipelineLayoutCreateInfo compute_pl_ci{
-    .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-    .setLayoutCount = 1u,
-    .pSetLayouts = &descriptor_layout,
-    .pushConstantRangeCount = 1u,
-    .pPushConstantRanges = &compute_push_range,
-  };
-  VkPipelineLayout compute_layout = VK_NULL_HANDLE;
-  vk_assert(vkCreatePipelineLayout(device, &compute_pl_ci, nullptr, &compute_layout), "Failed to create compute pipeline layout");
-
-  const VkPipelineLayoutCreateInfo graphics_pl_ci{
-    .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-    .setLayoutCount = 1u,
-    .pSetLayouts = &descriptor_layout,
-    .pushConstantRangeCount = 0u,
-    .pPushConstantRanges = nullptr,
-  };
-  VkPipelineLayout graphics_layout = VK_NULL_HANDLE;
-  vk_assert(vkCreatePipelineLayout(device, &graphics_pl_ci, nullptr, &graphics_layout), "Failed to create graphics pipeline layout");
-
-  const VkPipelineShaderStageCreateInfo compute_stage{
-    .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-    .stage = VK_SHADER_STAGE_COMPUTE_BIT,
-    .module = compute_module,
-    .pName = "main",
-  };
-  const VkComputePipelineCreateInfo cpci_compute{
-    .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-    .stage = compute_stage,
-    .layout = compute_layout,
-  };
-  VkPipeline compute_pipeline = VK_NULL_HANDLE;
-  vk_assert(vkCreateComputePipelines(device, VK_NULL_HANDLE, 1u, &cpci_compute, nullptr, &compute_pipeline), "Failed to create compute pipeline");
-
-  const VkPipelineShaderStageCreateInfo shader_stages[]{
-    {
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-      .stage = VK_SHADER_STAGE_VERTEX_BIT,
-      .module = vert_module,
-      .pName = "main",
-    },
-    {
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-      .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
-      .module = frag_module,
-      .pName = "main",
-    },
-  };
-  const VkPipelineVertexInputStateCreateInfo vi_state{
-    .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-    .vertexBindingDescriptionCount = 0u,
-    .vertexAttributeDescriptionCount = 0u,
-  };
-  const VkPipelineInputAssemblyStateCreateInfo ia_state{
-    .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-    .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
-    .primitiveRestartEnable = VK_FALSE,
-  };
-  const VkPipelineViewportStateCreateInfo vp_state{
-    .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
-    .viewportCount = 1u,
-    .pViewports = nullptr,
-    .scissorCount = 1u,
-    .pScissors = nullptr,
-  };
-  const VkPipelineRasterizationStateCreateInfo rs_state{
-    .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
-    .depthClampEnable = VK_FALSE,
-    .rasterizerDiscardEnable = VK_FALSE,
-    .polygonMode = VK_POLYGON_MODE_FILL,
-    .cullMode = VK_CULL_MODE_NONE,
-    .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
-    .depthBiasEnable = VK_FALSE,
-    .lineWidth = 1.0f,
-  };
-  const VkPipelineMultisampleStateCreateInfo ms_state{
-    .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-    .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
-    .sampleShadingEnable = VK_FALSE,
-  };
-  const VkPipelineColorBlendAttachmentState blend_attachment{
-    .blendEnable = VK_FALSE,
-    .srcColorBlendFactor = VK_BLEND_FACTOR_ONE,
-    .dstColorBlendFactor = VK_BLEND_FACTOR_ZERO,
-    .colorBlendOp = VK_BLEND_OP_ADD,
-    .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
-    .dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
-    .alphaBlendOp = VK_BLEND_OP_ADD,
-    .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
-  };
-  const VkPipelineColorBlendStateCreateInfo cb_state{
-    .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
-    .logicOpEnable = VK_FALSE,
-    .attachmentCount = 1u,
-    .pAttachments = &blend_attachment,
-  };
-  constexpr array dynamic_states{
-    VK_DYNAMIC_STATE_VIEWPORT,
-    VK_DYNAMIC_STATE_SCISSOR,
-  };
-  const VkPipelineDynamicStateCreateInfo dyn_state{
-    .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-    .dynamicStateCount = static_cast<u32>(dynamic_states.size()),
-    .pDynamicStates = dynamic_states.data(),
-  };
-
-  const VkAttachmentDescription color_attachment{
-    .format = swapchain.format,
-    .samples = VK_SAMPLE_COUNT_1_BIT,
-    .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
-    .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-    .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-    .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
-    .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-    .finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-  };
-  const VkAttachmentReference color_ref{
-    .attachment = 0u,
-    .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-  };
-  const VkSubpassDescription subpass{
-    .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
-    .colorAttachmentCount = 1u,
-    .pColorAttachments = &color_ref,
-  };
-  const VkSubpassDependency dependency{
-    .srcSubpass = VK_SUBPASS_EXTERNAL,
-    .dstSubpass = 0u,
-    .srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-    .dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-    .srcAccessMask = 0u,
-    .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-  };
-  const VkRenderPassCreateInfo rpci{
-    .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
-    .attachmentCount = 1u,
-    .pAttachments = &color_attachment,
-    .subpassCount = 1u,
-    .pSubpasses = &subpass,
-    .dependencyCount = 1u,
-    .pDependencies = &dependency,
-  };
-  VkRenderPass render_pass = VK_NULL_HANDLE;
-  vk_assert(vkCreateRenderPass(device, &rpci, nullptr, &render_pass), "Failed to create render pass");
+  VkPipelineLayout compute_layout = create_compute_pipeline_layout(device, descriptor_layout);
+  VkPipelineLayout graphics_layout = create_graphics_pipeline_layout(device, descriptor_layout);
+  VkPipeline compute_pipeline = create_compute_pipeline(device, compute_layout, compute_module);
+  VkRenderPass render_pass = create_render_pass(device, swapchain.format);
+  VkPipeline graphics_pipeline = create_graphics_pipeline(device, graphics_layout, render_pass, vert_module, frag_module);
 
   array<VkFramebuffer, Caps::MaxSwapchainImages> framebuffers{};
-  for (u32 i = 0; i < swapchain.count; ++i) {
-    const VkImageView attachments[] { swapchain.views[i] };
-    const VkFramebufferCreateInfo fbci{
-      .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
-      .renderPass = render_pass,
-      .attachmentCount = 1u,
-      .pAttachments = attachments,
-      .width = swapchain.extent.width,
-      .height = swapchain.extent.height,
-      .layers = 1u,
-    };
-    vk_assert(vkCreateFramebuffer(device, &fbci, nullptr, &framebuffers[i]), "Failed to create framebuffer");
-  }
-
-  const VkGraphicsPipelineCreateInfo gpci{
-    .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-    .stageCount = static_cast<u32>(std::size(shader_stages)),
-    .pStages = shader_stages,
-    .pVertexInputState = &vi_state,
-    .pInputAssemblyState = &ia_state,
-    .pViewportState = &vp_state,
-    .pRasterizationState = &rs_state,
-    .pMultisampleState = &ms_state,
-    .pDepthStencilState = nullptr,
-    .pColorBlendState = &cb_state,
-    .pDynamicState = &dyn_state,
-    .layout = graphics_layout,
-    .renderPass = render_pass,
-    .subpass = 0u,
-  };
-  VkPipeline graphics_pipeline = VK_NULL_HANDLE;
-  vk_assert(vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1u, &gpci, nullptr, &graphics_pipeline), "Failed to create graphics pipeline");
+  create_framebuffers(device, render_pass, swapchain, framebuffers);
 
   // Shader modules no longer needed once pipelines are created.
   vkDestroyShaderModule(device, frag_module, nullptr);
   vkDestroyShaderModule(device, vert_module, nullptr);
   vkDestroyShaderModule(device, compute_module, nullptr);
 
-  const VkCommandPoolCreateInfo cpci_pool{
-    .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
-    .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
-    .queueFamilyIndex = static_cast<u32>(gfx_qf),
-  };
-  VkCommandPool command_pool = VK_NULL_HANDLE;
-  vk_assert(vkCreateCommandPool(device, &cpci_pool, nullptr, &command_pool), "Failed to create command pool");
-
+  VkCommandPool command_pool = create_command_pool(device, static_cast<u32>(gfx_qf));
+  array<VkCommandBuffer, FRAMES_IN_FLIGHT> command_buffers = allocate_command_buffers(device, command_pool);
   array<FrameSync, FRAMES_IN_FLIGHT> frames{};
-  const VkCommandBufferAllocateInfo cbai{
-    .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-    .commandPool = command_pool,
-    .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-    .commandBufferCount = FRAMES_IN_FLIGHT,
-  };
-  VkCommandBuffer cmd_buffers[FRAMES_IN_FLIGHT] = {};
-  vk_assert(vkAllocateCommandBuffers(device, &cbai, cmd_buffers), "Failed to allocate command buffers");
-
-  for (u32 i = 0; i < FRAMES_IN_FLIGHT; ++i) {
-    frames[i].cmd = cmd_buffers[i];
-
-    const VkSemaphoreCreateInfo sci_sync{
-      .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
-    };
-    vk_assert(vkCreateSemaphore(device, &sci_sync, nullptr, &frames[i].image_available), "Failed to create semaphore");
-    vk_assert(vkCreateSemaphore(device, &sci_sync, nullptr, &frames[i].render_finished), "Failed to create semaphore");
-
-    const VkFenceCreateInfo fci{
-      .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
-      .flags = VK_FENCE_CREATE_SIGNALED_BIT,
-    };
-    vk_assert(vkCreateFence(device, &fci, nullptr, &frames[i].in_flight), "Failed to create fence");
-  }
+  initialize_frame_sync_objects(device, command_buffers, frames);
 
   const auto start_time = chrono::steady_clock::now();
   bool running = true;
@@ -1096,7 +1150,7 @@ int main() {
     vkDestroyFence(device, frame.in_flight, nullptr);
   }
 
-  vkFreeCommandBuffers(device, command_pool, FRAMES_IN_FLIGHT, cmd_buffers);
+  vkFreeCommandBuffers(device, command_pool, FRAMES_IN_FLIGHT, command_buffers.data());
   vkDestroyCommandPool(device, command_pool, nullptr);
 
   vkDestroyPipeline(device, graphics_pipeline, nullptr);
