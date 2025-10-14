@@ -1,0 +1,59 @@
+#version 460
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 5) readonly buffer GridParams {
+  vec4 bmin;
+  vec4 bmax;
+  uvec4 dims;
+  vec4 inv_cell;
+} grid;
+
+layout(std430, binding = 6) buffer GridL0Cells {
+  uvec4 l0_cells[];
+};
+
+layout(std430, binding = 10) readonly buffer L0Counts {
+  uint counts[];
+};
+
+layout(std430, binding = 11) buffer L0Offsets {
+  uint offsets[];
+};
+
+layout(std430, binding = 17) buffer Globals {
+  uint l0_total;
+  uint l1_total;
+  uint indices_capacity;
+  uint overflow;
+} globals;
+
+const uint GRID_MAX_LEAF = 16u;
+const uint CHILD_DIM = 4u;
+
+void main() {
+  const uint ci = gl_GlobalInvocationID.x;
+  const uint C = grid.dims.x * grid.dims.y * grid.dims.z;
+  if (ci >= C) {
+    return;
+  }
+
+  const uint c = counts[ci];
+  const uint base = atomicAdd(globals.l0_total, c);
+  offsets[ci] = base;
+
+  uvec4 header = uvec4(0u);
+  if (c <= GRID_MAX_LEAF) {
+    header = uvec4(base, c, 0xFFFFFFFFu, 0u);
+  } else {
+    const uint child_total = CHILD_DIM * CHILD_DIM * CHILD_DIM;
+    const uint child_base = ci * child_total;
+    header = uvec4(0u, 0u, child_base, 1u);
+  }
+
+  if (base + c > globals.indices_capacity) {
+    globals.overflow = 1u;
+  }
+
+  l0_cells[ci] = header;
+}

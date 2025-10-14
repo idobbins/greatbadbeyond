@@ -10,6 +10,12 @@ find_package(Vulkan REQUIRED COMPONENTS glslc)
 
 set(SHADERS
   ${CMAKE_SOURCE_DIR}/shaders/compute.comp
+  ${CMAKE_SOURCE_DIR}/shaders/grid_l0_count.comp
+  ${CMAKE_SOURCE_DIR}/shaders/grid_l0_offsets.comp
+  ${CMAKE_SOURCE_DIR}/shaders/grid_l0_fill.comp
+  ${CMAKE_SOURCE_DIR}/shaders/grid_l1_count.comp
+  ${CMAKE_SOURCE_DIR}/shaders/grid_l1_offsets.comp
+  ${CMAKE_SOURCE_DIR}/shaders/grid_l1_fill.comp
   ${CMAKE_SOURCE_DIR}/shaders/fullscreen.vert
   ${CMAKE_SOURCE_DIR}/shaders/blit.frag
 )

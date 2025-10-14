@@ -1,0 +1,49 @@
+#version 460
+
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 5) readonly buffer GridParams {
+  vec4 bmin;
+  vec4 bmax;
+  uvec4 dims;
+  vec4 inv_cell;
+} grid;
+
+layout(std430, binding = 7) buffer GridL1Cells {
+  uvec2 l1_cells[];
+};
+
+layout(std430, binding = 13) readonly buffer L1Counts {
+  uint counts[];
+};
+
+layout(std430, binding = 14) buffer L1Offsets {
+  uint offsets[];
+};
+
+layout(std430, binding = 17) buffer Globals {
+  uint l0_total;
+  uint l1_total;
+  uint indices_capacity;
+  uint overflow;
+} globals;
+
+const uint CHILD_DIM = 4u;
+
+void main() {
+  const uint idx = gl_GlobalInvocationID.x;
+  const uint C = grid.dims.x * grid.dims.y * grid.dims.z;
+  const uint child_total = CHILD_DIM * CHILD_DIM * CHILD_DIM;
+  const uint N = C * child_total;
+  if (idx >= N) {
+    return;
+  }
+
+  const uint c = counts[idx];
+  const uint base = atomicAdd(globals.l1_total, c);
+  offsets[idx] = base;
+  l1_cells[idx] = uvec2(base, c);
+  if (base + c > globals.indices_capacity) {
+    globals.overflow = 1u;
+  }
+}

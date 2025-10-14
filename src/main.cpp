@@ -374,9 +374,16 @@ constexpr VkFormat OFFSCREEN_FORMAT = VK_FORMAT_R16G16B16A16_SFLOAT;
 
 constexpr u32 LOCAL_SIZE_X = 8;
 constexpr u32 LOCAL_SIZE_Y = 8;
+constexpr u32 BUILDER_GROUP_SIZE = 256u;
 constexpr u32 FRAMES_IN_FLIGHT = 2;
 
 constexpr const char* SHADER_PATH_COMPUTE = "./shaders/compute.comp.spv";
+constexpr const char* SHADER_PATH_L0_COUNT = "./shaders/grid_l0_count.comp.spv";
+constexpr const char* SHADER_PATH_L0_OFFSETS = "./shaders/grid_l0_offsets.comp.spv";
+constexpr const char* SHADER_PATH_L0_FILL = "./shaders/grid_l0_fill.comp.spv";
+constexpr const char* SHADER_PATH_L1_COUNT = "./shaders/grid_l1_count.comp.spv";
+constexpr const char* SHADER_PATH_L1_OFFSETS = "./shaders/grid_l1_offsets.comp.spv";
+constexpr const char* SHADER_PATH_L1_FILL = "./shaders/grid_l1_fill.comp.spv";
 constexpr const char* SHADER_PATH_VERT    = "./shaders/fullscreen.vert.spv";
 constexpr const char* SHADER_PATH_FRAG    = "./shaders/blit.frag.spv";
 
@@ -486,12 +493,19 @@ struct alignas(16) GridParamsGPU {
   std::array<f32, 4> inv_cell{};
 };
 
-struct GridGPUData {
+struct GridStaticConfig {
   GridParamsGPU params{};
-  std::vector<std::array<u32, 4>> l0_headers{};
-  std::vector<std::array<u32, 2>> l1_headers{};
-  std::vector<u32> indices{};
+  u32 cell_count = 0u;
+  u32 child_cell_count = 0u;
 };
+
+struct alignas(16) BuilderGlobals {
+  u32 l0_total = 0u;
+  u32 l1_total = 0u;
+  u32 indices_capacity = 0u;
+  u32 overflow = 0u;
+};
+static_assert(sizeof(BuilderGlobals) == sizeof(u32) * 4u, "BuilderGlobals layout mismatch");
 
 struct CameraState {
   Vec3 position{};
@@ -598,7 +612,7 @@ inline GLFWwindow* create_window() {
   runtime_assert(win != nullptr, "Failed to create GLFW window");
   return win;
 }
-sssssssssssssssswwwaaaaaaaaaadddddddddddddnline VkInstance create_instance() {
+inline VkInstance create_instance() {
   const VkApplicationInfo app_info{
     .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
     .pApplicationName = APP_NAME.data(),
@@ -1121,16 +1135,15 @@ inline SphereSoA pack_spheres_gpu(const std::array<SphereCPU, SPHERE_COUNT>& cpu
   return gpu;
 }
 
-inline GridGPUData build_grid_structure(const std::array<SphereCPU, SPHERE_COUNT>& spheres, const u32 sphere_count) {
-  GridGPUData grid{};
+inline GridStaticConfig build_grid_static_config(const std::array<SphereCPU, SPHERE_COUNT>& spheres, const u32 sphere_count) {
+  GridStaticConfig grid{};
   if (sphere_count == 0u) {
     grid.params.bmin = { 0.0f, 0.0f, 0.0f, 0.0f };
     grid.params.bmax = { 0.0f, 0.0f, 0.0f, 0.0f };
     grid.params.dims = { 1u, 1u, 1u, 0u };
     grid.params.inv_cell = { 0.0f, 0.0f, 0.0f, 0.0f };
-    grid.l0_headers.push_back(std::array<u32, 4>{ 0u, 0u, 0xFFFFFFFFu, 0u });
-    grid.l1_headers.push_back(std::array<u32, 2>{ 0u, 0u });
-    grid.indices.push_back(0u);
+    grid.cell_count = 1u;
+    grid.child_cell_count = GRID_CHILD_DIM * GRID_CHILD_DIM * GRID_CHILD_DIM;
     return grid;
   }
 
@@ -1184,159 +1197,17 @@ inline GridGPUData build_grid_structure(const std::array<SphereCPU, SPHERE_COUNT
     (std::abs(cell_size.z) > 1e-8f) ? 1.0f / cell_size.z : 0.0f,
   };
 
-  const usize l0_len = static_cast<usize>(dims_x) * static_cast<usize>(dims_y) * static_cast<usize>(dims_z);
-  runtime_assert(l0_len > 0u, "Grid has zero cells");
-
-  std::vector<std::vector<u32>> l0_lists(l0_len);
-
-  const Vec3 clamp_max{
-    static_cast<f32>(dims_x > 0u ? dims_x - 1u : 0u),
-    static_cast<f32>(dims_y > 0u ? dims_y - 1u : 0u),
-    static_cast<f32>(dims_z > 0u ? dims_z - 1u : 0u),
-  };
-  const Vec3 zero_vec{ 0.0f, 0.0f, 0.0f };
-
-  const auto clamp_to_grid = [&](const Vec3 p) -> std::array<u32, 3> {
-    const Vec3 rel{
-      (p.x - scene_min.x) * inv_cell.x,
-      (p.y - scene_min.y) * inv_cell.y,
-      (p.z - scene_min.z) * inv_cell.z,
-    };
-    const Vec3 floored = floor_vec3(rel);
-    const Vec3 clamped = clamp_vec3(floored, zero_vec, clamp_max);
-    return std::array<u32, 3>{
-      static_cast<u32>(clamped.x),
-      static_cast<u32>(clamped.y),
-      static_cast<u32>(clamped.z),
-    };
-  };
-
-  const auto flatten = [&](const u32 x, const u32 y, const u32 z) -> usize {
-    const usize ux = static_cast<usize>(x);
-    const usize uy = static_cast<usize>(y);
-    const usize uz = static_cast<usize>(z);
-    const usize dx = static_cast<usize>(dims_x);
-    const usize dy = static_cast<usize>(dims_y);
-    return ux + dx * (uy + dy * uz);
-  };
-
-  for (u32 i = 0u; i < sphere_count; ++i) {
-    const SphereCPU& sphere = spheres[i];
-    const Vec3 radius_vec{ sphere.radius, sphere.radius, sphere.radius };
-    const Vec3 min_p = sphere.center - radius_vec;
-    const Vec3 max_p = sphere.center + radius_vec;
-    const std::array<u32, 3> mn = clamp_to_grid(min_p);
-    const std::array<u32, 3> mx = clamp_to_grid(max_p);
-    for (u32 z = mn[2]; z <= mx[2]; ++z) {
-      for (u32 y = mn[1]; y <= mx[1]; ++y) {
-        for (u32 x = mn[0]; x <= mx[0]; ++x) {
-          l0_lists[flatten(x, y, z)].push_back(i);
-        }
-      }
-    }
-  }
-
-  grid.l0_headers.reserve(l0_len);
-
-  const usize child_total = static_cast<usize>(GRID_CHILD_DIM) * static_cast<usize>(GRID_CHILD_DIM) * static_cast<usize>(GRID_CHILD_DIM);
-  const Vec3 child_cell_size{
-    cell_size.x / static_cast<f32>(GRID_CHILD_DIM),
-    cell_size.y / static_cast<f32>(GRID_CHILD_DIM),
-    cell_size.z / static_cast<f32>(GRID_CHILD_DIM),
-  };
-  const Vec3 child_inv{
-    inv_cell.x * static_cast<f32>(GRID_CHILD_DIM),
-    inv_cell.y * static_cast<f32>(GRID_CHILD_DIM),
-    inv_cell.z * static_cast<f32>(GRID_CHILD_DIM),
-  };
-  const Vec3 child_max{
-    static_cast<f32>(GRID_CHILD_DIM - 1u),
-    static_cast<f32>(GRID_CHILD_DIM - 1u),
-    static_cast<f32>(GRID_CHILD_DIM - 1u),
-  };
-
-  const auto clamp_child = [&](const Vec3 p, const Vec3 cell_min) -> std::array<u32, 3> {
-    const Vec3 rel{
-      (p.x - cell_min.x) * child_inv.x,
-      (p.y - cell_min.y) * child_inv.y,
-      (p.z - cell_min.z) * child_inv.z,
-    };
-    const Vec3 floored = floor_vec3(rel);
-    const Vec3 clamped = clamp_vec3(floored, zero_vec, child_max);
-    return std::array<u32, 3>{
-      static_cast<u32>(clamped.x),
-      static_cast<u32>(clamped.y),
-      static_cast<u32>(clamped.z),
-    };
-  };
-
-  const auto flatten_child = [](const u32 x, const u32 y, const u32 z) -> usize {
-    const usize ux = static_cast<usize>(x);
-    const usize uy = static_cast<usize>(y);
-    const usize uz = static_cast<usize>(z);
-    const usize dim = static_cast<usize>(GRID_CHILD_DIM);
-    return ux + dim * (uy + dim * uz);
-  };
-
-  for (usize idx = 0u; idx < l0_len; ++idx) {
-    std::vector<u32>& cell_list = l0_lists[idx];
-    const u32 start = static_cast<u32>(grid.indices.size());
-    if (cell_list.size() <= GRID_MAX_LEAF) {
-      const u32 count = static_cast<u32>(cell_list.size());
-      grid.indices.insert(grid.indices.end(), cell_list.begin(), cell_list.end());
-      grid.l0_headers.push_back(std::array<u32, 4>{ start, count, 0xFFFFFFFFu, 0u });
-      continue;
-    }
-
-    const u32 child_base = static_cast<u32>(grid.l1_headers.size());
-    std::vector<std::vector<u32>> child_lists(child_total);
-
-    const u32 z = static_cast<u32>(idx / (static_cast<usize>(dims_x) * static_cast<usize>(dims_y)));
-    const usize rem = idx - static_cast<usize>(z) * static_cast<usize>(dims_x) * static_cast<usize>(dims_y);
-    const u32 y = static_cast<u32>(rem / static_cast<usize>(dims_x));
-    const u32 x = static_cast<u32>(rem % static_cast<usize>(dims_x));
-
-    const Vec3 cell_min{
-      scene_min.x + static_cast<f32>(x) * cell_size.x,
-      scene_min.y + static_cast<f32>(y) * cell_size.y,
-      scene_min.z + static_cast<f32>(z) * cell_size.z,
-    };
-
-    for (const u32 sid : cell_list) {
-      const SphereCPU& sphere = spheres[sid];
-      const Vec3 radius_vec{ sphere.radius, sphere.radius, sphere.radius };
-      const std::array<u32, 3> mn = clamp_child(sphere.center - radius_vec, cell_min);
-      const std::array<u32, 3> mx = clamp_child(sphere.center + radius_vec, cell_min);
-      for (u32 cz = mn[2]; cz <= mx[2]; ++cz) {
-        for (u32 cy = mn[1]; cy <= mx[1]; ++cy) {
-          for (u32 cx = mn[0]; cx <= mx[0]; ++cx) {
-            child_lists[flatten_child(cx, cy, cz)].push_back(sid);
-          }
-        }
-      }
-    }
-
-    for (std::vector<u32>& child : child_lists) {
-      const u32 child_start = static_cast<u32>(grid.indices.size());
-      const u32 child_count = static_cast<u32>(child.size());
-      grid.indices.insert(grid.indices.end(), child.begin(), child.end());
-      grid.l1_headers.push_back(std::array<u32, 2>{ child_start, child_count });
-    }
-
-    grid.l0_headers.push_back(std::array<u32, 4>{ 0u, 0u, child_base, 1u });
-  }
-
-  if (grid.l1_headers.empty()) {
-    grid.l1_headers.push_back(std::array<u32, 2>{ 0u, 0u });
-  }
-  if (grid.indices.empty()) {
-    grid.indices.push_back(0u);
-  }
+  const u32 cell_count = dims_x * dims_y * dims_z;
+  runtime_assert(cell_count > 0u, "Grid has zero cells");
+  const u32 child_cells_per_macro = GRID_CHILD_DIM * GRID_CHILD_DIM * GRID_CHILD_DIM;
+  const u32 child_total = cell_count * child_cells_per_macro;
 
   grid.params.bmin = to_vec4(scene_min, 0.0f);
   grid.params.bmax = to_vec4(scene_max, 0.0f);
   grid.params.dims = { dims_x, dims_y, dims_z, 0u };
   grid.params.inv_cell = { inv_cell.x, inv_cell.y, inv_cell.z, 0.0f };
+  grid.cell_count = cell_count;
+  grid.child_cell_count = child_total;
 
   return grid;
 }
@@ -1410,7 +1281,7 @@ inline VkDescriptorSetLayout create_descriptor_set_layout(VkDevice device) {
   };
   const VkDescriptorSetLayoutBinding grid_params_binding{
     .binding = 5u,
-    .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
     .descriptorCount = 1u,
     .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
   };
@@ -1438,6 +1309,48 @@ inline VkDescriptorSetLayout create_descriptor_set_layout(VkDevice device) {
     .descriptorCount = 1u,
     .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
   };
+  const VkDescriptorSetLayoutBinding l0_counts_binding{
+    .binding = 10u,
+    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+    .descriptorCount = 1u,
+    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+  };
+  const VkDescriptorSetLayoutBinding l0_offsets_binding{
+    .binding = 11u,
+    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+    .descriptorCount = 1u,
+    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+  };
+  const VkDescriptorSetLayoutBinding l0_cursors_binding{
+    .binding = 12u,
+    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+    .descriptorCount = 1u,
+    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+  };
+  const VkDescriptorSetLayoutBinding l1_counts_binding{
+    .binding = 13u,
+    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+    .descriptorCount = 1u,
+    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+  };
+  const VkDescriptorSetLayoutBinding l1_offsets_binding{
+    .binding = 14u,
+    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+    .descriptorCount = 1u,
+    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+  };
+  const VkDescriptorSetLayoutBinding l1_cursors_binding{
+    .binding = 15u,
+    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+    .descriptorCount = 1u,
+    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+  };
+  const VkDescriptorSetLayoutBinding globals_binding{
+    .binding = 17u,
+    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+    .descriptorCount = 1u,
+    .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+  };
   const array layout_bindings{
     storage_binding,
     sampled_binding,
@@ -1448,7 +1361,14 @@ inline VkDescriptorSetLayout create_descriptor_set_layout(VkDevice device) {
     grid_l0_binding,
     grid_l1_binding,
     grid_indices_binding,
-    sobol_binding
+    sobol_binding,
+    l0_counts_binding,
+    l0_offsets_binding,
+    l0_cursors_binding,
+    l1_counts_binding,
+    l1_offsets_binding,
+    l1_cursors_binding,
+    globals_binding
   };
   const VkDescriptorSetLayoutCreateInfo info{
     .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
@@ -1472,11 +1392,11 @@ inline VkDescriptorPool create_descriptor_pool(VkDevice device) {
     },
     {
       .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-      .descriptorCount = 6u,
+      .descriptorCount = 16u,
     },
     {
       .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-      .descriptorCount = 2u,
+      .descriptorCount = 1u,
     },
   };
   const VkDescriptorPoolCreateInfo info{
@@ -1513,7 +1433,14 @@ inline void write_descriptor_set(
   const Buffer& grid_l0_buffer,
   const Buffer& grid_l1_buffer,
   const Buffer& grid_indices_buffer,
-  const Buffer& sobol_buffer
+  const Buffer& sobol_buffer,
+  const Buffer& l0_counts_buffer,
+  const Buffer& l0_offsets_buffer,
+  const Buffer& l0_cursors_buffer,
+  const Buffer& l1_counts_buffer,
+  const Buffer& l1_offsets_buffer,
+  const Buffer& l1_cursors_buffer,
+  const Buffer& globals_buffer
 ) {
   const VkDescriptorImageInfo storage_info{
     .sampler = VK_NULL_HANDLE,
@@ -1565,6 +1492,41 @@ inline void write_descriptor_set(
     .offset = 0u,
     .range = sobol_buffer.size,
   };
+  const VkDescriptorBufferInfo l0_counts_info{
+    .buffer = l0_counts_buffer.buffer,
+    .offset = 0u,
+    .range = l0_counts_buffer.size,
+  };
+  const VkDescriptorBufferInfo l0_offsets_info{
+    .buffer = l0_offsets_buffer.buffer,
+    .offset = 0u,
+    .range = l0_offsets_buffer.size,
+  };
+  const VkDescriptorBufferInfo l0_cursors_info{
+    .buffer = l0_cursors_buffer.buffer,
+    .offset = 0u,
+    .range = l0_cursors_buffer.size,
+  };
+  const VkDescriptorBufferInfo l1_counts_info{
+    .buffer = l1_counts_buffer.buffer,
+    .offset = 0u,
+    .range = l1_counts_buffer.size,
+  };
+  const VkDescriptorBufferInfo l1_offsets_info{
+    .buffer = l1_offsets_buffer.buffer,
+    .offset = 0u,
+    .range = l1_offsets_buffer.size,
+  };
+  const VkDescriptorBufferInfo l1_cursors_info{
+    .buffer = l1_cursors_buffer.buffer,
+    .offset = 0u,
+    .range = l1_cursors_buffer.size,
+  };
+  const VkDescriptorBufferInfo globals_info{
+    .buffer = globals_buffer.buffer,
+    .offset = 0u,
+    .range = globals_buffer.size,
+  };
   const VkWriteDescriptorSet writes[]{
     {
       .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
@@ -1611,7 +1573,7 @@ inline void write_descriptor_set(
       .dstSet = set,
       .dstBinding = 5u,
       .descriptorCount = 1u,
-      .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+      .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
       .pBufferInfo = &grid_params_info,
     },
     {
@@ -1645,6 +1607,62 @@ inline void write_descriptor_set(
       .descriptorCount = 1u,
       .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
       .pBufferInfo = &sobol_info,
+    },
+    {
+      .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+      .dstSet = set,
+      .dstBinding = 10u,
+      .descriptorCount = 1u,
+      .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+      .pBufferInfo = &l0_counts_info,
+    },
+    {
+      .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+      .dstSet = set,
+      .dstBinding = 11u,
+      .descriptorCount = 1u,
+      .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+      .pBufferInfo = &l0_offsets_info,
+    },
+    {
+      .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+      .dstSet = set,
+      .dstBinding = 12u,
+      .descriptorCount = 1u,
+      .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+      .pBufferInfo = &l0_cursors_info,
+    },
+    {
+      .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+      .dstSet = set,
+      .dstBinding = 13u,
+      .descriptorCount = 1u,
+      .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+      .pBufferInfo = &l1_counts_info,
+    },
+    {
+      .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+      .dstSet = set,
+      .dstBinding = 14u,
+      .descriptorCount = 1u,
+      .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+      .pBufferInfo = &l1_offsets_info,
+    },
+    {
+      .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+      .dstSet = set,
+      .dstBinding = 15u,
+      .descriptorCount = 1u,
+      .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+      .pBufferInfo = &l1_cursors_info,
+    },
+    {
+      .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+      .dstSet = set,
+      .dstBinding = 17u,
+      .descriptorCount = 1u,
+      .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+      .pBufferInfo = &globals_info,
     },
   };
   vkUpdateDescriptorSets(device, static_cast<u32>(std::size(writes)), writes, 0u, nullptr);
@@ -1981,45 +1999,110 @@ int main() {
     spheres_gpu.albedo.data()
   );
 
-  const GridGPUData grid_gpu = build_grid_structure(spheres_cpu, sphere_count);
-  runtime_assert(!grid_gpu.l0_headers.empty(), "Grid L0 headers cannot be empty");
-  runtime_assert(!grid_gpu.indices.empty(), "Grid indices cannot be empty");
+  const GridStaticConfig grid_config = build_grid_static_config(spheres_cpu, sphere_count);
+  runtime_assert(grid_config.cell_count > 0u, "Grid L0 cell count must be positive");
+  runtime_assert(grid_config.child_cell_count > 0u, "Grid L1 cell count must be positive");
+  const u32 child_cells_per_macro = GRID_CHILD_DIM * GRID_CHILD_DIM * GRID_CHILD_DIM;
+  runtime_assert(
+    grid_config.child_cell_count == grid_config.cell_count * child_cells_per_macro,
+    "Unexpected grid child cell count"
+  );
+
   Buffer grid_params_buffer = create_device_buffer_with_data(
     physical,
     device,
     upload_pool,
     queue,
     static_cast<VkDeviceSize>(sizeof(GridParamsGPU)),
-    VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-    &grid_gpu.params
+    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+    &grid_config.params
   );
-  Buffer grid_l0_buffer = create_device_buffer_with_data(
+
+  const u32 indices_capacity = SPHERE_COUNT * 16u;
+  const u32 sphere_group_count = (sphere_count + BUILDER_GROUP_SIZE - 1u) / BUILDER_GROUP_SIZE;
+  const u32 l0_group_count = (grid_config.cell_count + BUILDER_GROUP_SIZE - 1u) / BUILDER_GROUP_SIZE;
+  const u32 l1_group_count = (grid_config.child_cell_count + BUILDER_GROUP_SIZE - 1u) / BUILDER_GROUP_SIZE;
+  const VkDeviceSize grid_l0_size = static_cast<VkDeviceSize>(grid_config.cell_count) * sizeof(u32) * 4u;
+  const VkDeviceSize grid_l1_size = static_cast<VkDeviceSize>(grid_config.child_cell_count) * sizeof(u32) * 2u;
+  const VkDeviceSize l0_scalar_size = static_cast<VkDeviceSize>(grid_config.cell_count) * sizeof(u32);
+  const VkDeviceSize l1_scalar_size = static_cast<VkDeviceSize>(grid_config.child_cell_count) * sizeof(u32);
+  const VkDeviceSize indices_size = static_cast<VkDeviceSize>(indices_capacity) * sizeof(u32);
+
+  Buffer grid_l0_buffer = create_buffer(
     physical,
     device,
-    upload_pool,
-    queue,
-    static_cast<VkDeviceSize>(grid_gpu.l0_headers.size() * sizeof(grid_gpu.l0_headers[0])),
-    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-    grid_gpu.l0_headers.data()
+    grid_l0_size,
+    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
   );
-  Buffer grid_l1_buffer = create_device_buffer_with_data(
+  Buffer grid_l1_buffer = create_buffer(
     physical,
     device,
-    upload_pool,
-    queue,
-    static_cast<VkDeviceSize>(grid_gpu.l1_headers.size() * sizeof(grid_gpu.l1_headers[0])),
-    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-    grid_gpu.l1_headers.data()
+    grid_l1_size,
+    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
   );
-  Buffer grid_indices_buffer = create_device_buffer_with_data(
+  Buffer grid_indices_buffer = create_buffer(
     physical,
     device,
-    upload_pool,
-    queue,
-    static_cast<VkDeviceSize>(grid_gpu.indices.size() * sizeof(grid_gpu.indices[0])),
-    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-    grid_gpu.indices.data()
+    indices_size,
+    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
   );
+  Buffer l0_counts_buffer = create_buffer(
+    physical,
+    device,
+    l0_scalar_size,
+    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+  );
+  Buffer l0_offsets_buffer = create_buffer(
+    physical,
+    device,
+    l0_scalar_size,
+    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+  );
+  Buffer l0_cursors_buffer = create_buffer(
+    physical,
+    device,
+    l0_scalar_size,
+    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+  );
+  Buffer l1_counts_buffer = create_buffer(
+    physical,
+    device,
+    l1_scalar_size,
+    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+  );
+  Buffer l1_offsets_buffer = create_buffer(
+    physical,
+    device,
+    l1_scalar_size,
+    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+  );
+  Buffer l1_cursors_buffer = create_buffer(
+    physical,
+    device,
+    l1_scalar_size,
+    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+  );
+  Buffer globals_buffer = create_buffer(
+    physical,
+    device,
+    static_cast<VkDeviceSize>(sizeof(BuilderGlobals)),
+    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+  );
+  auto* builder_globals_ptr = static_cast<BuilderGlobals*>(map_buffer(device, globals_buffer, globals_buffer.size));
+  builder_globals_ptr->l0_total = 0u;
+  builder_globals_ptr->l1_total = 0u;
+  builder_globals_ptr->indices_capacity = indices_capacity;
+  builder_globals_ptr->overflow = 0u;
   const std::vector<u32> sobol_dirs_cpu = generate_sobol_directions(SOBOL_DIMENSIONS, SOBOL_BITS);
   Buffer sobol_dirs_buffer = create_device_buffer_with_data(
     physical,
@@ -2055,7 +2138,14 @@ int main() {
     grid_l0_buffer,
     grid_l1_buffer,
     grid_indices_buffer,
-    sobol_dirs_buffer
+    sobol_dirs_buffer,
+    l0_counts_buffer,
+    l0_offsets_buffer,
+    l0_cursors_buffer,
+    l1_counts_buffer,
+    l1_offsets_buffer,
+    l1_cursors_buffer,
+    globals_buffer
   );
 
   CameraState camera_state{};
@@ -2070,12 +2160,24 @@ int main() {
   const CameraUniform initial_camera_uniform = build_camera_uniform(camera_state, aspect_ratio, camera_forward, camera_right, camera_up);
   *camera_uniform_ptr = initial_camera_uniform;
 
+  VkShaderModule l0_count_module = load_shader_module(device, SHADER_PATH_L0_COUNT);
+  VkShaderModule l0_offsets_module = load_shader_module(device, SHADER_PATH_L0_OFFSETS);
+  VkShaderModule l0_fill_module = load_shader_module(device, SHADER_PATH_L0_FILL);
+  VkShaderModule l1_count_module = load_shader_module(device, SHADER_PATH_L1_COUNT);
+  VkShaderModule l1_offsets_module = load_shader_module(device, SHADER_PATH_L1_OFFSETS);
+  VkShaderModule l1_fill_module = load_shader_module(device, SHADER_PATH_L1_FILL);
   VkShaderModule compute_module = load_shader_module(device, SHADER_PATH_COMPUTE);
   VkShaderModule vert_module = load_shader_module(device, SHADER_PATH_VERT);
   VkShaderModule frag_module = load_shader_module(device, SHADER_PATH_FRAG);
 
   VkPipelineLayout compute_layout = create_compute_pipeline_layout(device, descriptor_layout);
   VkPipelineLayout graphics_layout = create_graphics_pipeline_layout(device, descriptor_layout);
+  VkPipeline l0_count_pipeline = create_compute_pipeline(device, compute_layout, l0_count_module);
+  VkPipeline l0_offsets_pipeline = create_compute_pipeline(device, compute_layout, l0_offsets_module);
+  VkPipeline l0_fill_pipeline = create_compute_pipeline(device, compute_layout, l0_fill_module);
+  VkPipeline l1_count_pipeline = create_compute_pipeline(device, compute_layout, l1_count_module);
+  VkPipeline l1_offsets_pipeline = create_compute_pipeline(device, compute_layout, l1_offsets_module);
+  VkPipeline l1_fill_pipeline = create_compute_pipeline(device, compute_layout, l1_fill_module);
   VkPipeline compute_pipeline = create_compute_pipeline(device, compute_layout, compute_module);
   VkRenderPass render_pass = create_render_pass(device, swapchain.format);
   VkPipeline graphics_pipeline = create_graphics_pipeline(device, graphics_layout, render_pass, vert_module, frag_module);
@@ -2087,6 +2189,12 @@ int main() {
   vkDestroyShaderModule(device, frag_module, nullptr);
   vkDestroyShaderModule(device, vert_module, nullptr);
   vkDestroyShaderModule(device, compute_module, nullptr);
+  vkDestroyShaderModule(device, l1_fill_module, nullptr);
+  vkDestroyShaderModule(device, l1_offsets_module, nullptr);
+  vkDestroyShaderModule(device, l1_count_module, nullptr);
+  vkDestroyShaderModule(device, l0_fill_module, nullptr);
+  vkDestroyShaderModule(device, l0_offsets_module, nullptr);
+  vkDestroyShaderModule(device, l0_count_module, nullptr);
 
   VkCommandPool command_pool = create_command_pool(device, static_cast<u32>(gfx_qf), VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT);
   array<VkCommandBuffer, FRAMES_IN_FLIGHT> command_buffers = allocate_command_buffers(device, command_pool);
@@ -2180,6 +2288,11 @@ int main() {
     FrameSync& frame = frames[frame_cursor];
     vk_assert(vkWaitForFences(device, 1u, &frame.in_flight, VK_TRUE, UINT64_MAX), "Failed waiting for fence");
     vk_assert(vkResetFences(device, 1u, &frame.in_flight), "Failed to reset fence");
+    runtime_assert(builder_globals_ptr->overflow == 0u, "Grid index buffer overflow; increase capacity");
+    builder_globals_ptr->l0_total = 0u;
+    builder_globals_ptr->l1_total = 0u;
+    builder_globals_ptr->indices_capacity = indices_capacity;
+    builder_globals_ptr->overflow = 0u;
 
     u32 image_index = 0;
     const VkResult acquire = vkAcquireNextImageKHR(device, swapchain.swapchain, UINT64_MAX, frame.image_available, VK_NULL_HANDLE, &image_index);
@@ -2226,7 +2339,6 @@ int main() {
     );
     first_compute = false;
 
-    vkCmdBindPipeline(frame.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, compute_pipeline);
     vkCmdBindDescriptorSets(frame.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, compute_layout, 0u, 1u, &descriptor_set, 0u, nullptr);
 
     ComputePushConstants push{};
@@ -2242,6 +2354,131 @@ int main() {
       sphere_count,
       1u
     };
+    vkCmdPushConstants(frame.cmd, compute_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0u, static_cast<u32>(sizeof(ComputePushConstants)), &push);
+
+    vkCmdFillBuffer(frame.cmd, l0_counts_buffer.buffer, 0u, l0_scalar_size, 0u);
+    vkCmdFillBuffer(frame.cmd, l0_offsets_buffer.buffer, 0u, l0_scalar_size, 0u);
+    vkCmdFillBuffer(frame.cmd, l0_cursors_buffer.buffer, 0u, l0_scalar_size, 0u);
+    vkCmdFillBuffer(frame.cmd, l1_counts_buffer.buffer, 0u, l1_scalar_size, 0u);
+    vkCmdFillBuffer(frame.cmd, l1_offsets_buffer.buffer, 0u, l1_scalar_size, 0u);
+    vkCmdFillBuffer(frame.cmd, l1_cursors_buffer.buffer, 0u, l1_scalar_size, 0u);
+
+    const VkMemoryBarrier fill_barrier{
+      .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+      .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+      .dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+    };
+    vkCmdPipelineBarrier(
+      frame.cmd,
+      VK_PIPELINE_STAGE_TRANSFER_BIT,
+      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+      0u,
+      1u,
+      &fill_barrier,
+      0u,
+      nullptr,
+      0u,
+      nullptr
+    );
+
+    const VkMemoryBarrier compute_barrier{
+      .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+      .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+      .dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+    };
+
+    vkCmdBindPipeline(frame.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, l0_count_pipeline);
+    vkCmdDispatch(frame.cmd, sphere_group_count, 1u, 1u);
+    vkCmdPipelineBarrier(
+      frame.cmd,
+      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+      0u,
+      1u,
+      &compute_barrier,
+      0u,
+      nullptr,
+      0u,
+      nullptr
+    );
+
+    vkCmdBindPipeline(frame.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, l0_offsets_pipeline);
+    vkCmdDispatch(frame.cmd, l0_group_count, 1u, 1u);
+    vkCmdPipelineBarrier(
+      frame.cmd,
+      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+      0u,
+      1u,
+      &compute_barrier,
+      0u,
+      nullptr,
+      0u,
+      nullptr
+    );
+
+    vkCmdBindPipeline(frame.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, l1_count_pipeline);
+    vkCmdDispatch(frame.cmd, sphere_group_count, 1u, 1u);
+    vkCmdPipelineBarrier(
+      frame.cmd,
+      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+      0u,
+      1u,
+      &compute_barrier,
+      0u,
+      nullptr,
+      0u,
+      nullptr
+    );
+
+    vkCmdBindPipeline(frame.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, l1_offsets_pipeline);
+    vkCmdDispatch(frame.cmd, l1_group_count, 1u, 1u);
+    vkCmdPipelineBarrier(
+      frame.cmd,
+      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+      0u,
+      1u,
+      &compute_barrier,
+      0u,
+      nullptr,
+      0u,
+      nullptr
+    );
+
+    vkCmdBindPipeline(frame.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, l0_fill_pipeline);
+    vkCmdDispatch(frame.cmd, sphere_group_count, 1u, 1u);
+    vkCmdPipelineBarrier(
+      frame.cmd,
+      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+      0u,
+      1u,
+      &compute_barrier,
+      0u,
+      nullptr,
+      0u,
+      nullptr
+    );
+
+    vkCmdBindPipeline(frame.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, l1_fill_pipeline);
+    vkCmdDispatch(frame.cmd, sphere_group_count, 1u, 1u);
+    vkCmdPipelineBarrier(
+      frame.cmd,
+      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+      0u,
+      1u,
+      &compute_barrier,
+      0u,
+      nullptr,
+      0u,
+      nullptr
+    );
+
+    vkCmdBindPipeline(frame.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, compute_pipeline);
+    vkCmdBindDescriptorSets(frame.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, compute_layout, 0u, 1u, &descriptor_set, 0u, nullptr);
     vkCmdPushConstants(frame.cmd, compute_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0u, static_cast<u32>(sizeof(ComputePushConstants)), &push);
 
     const u32 group_count_x = (swapchain.extent.width + LOCAL_SIZE_X - 1u) / LOCAL_SIZE_X;
@@ -2425,6 +2662,12 @@ int main() {
   vkDestroyCommandPool(device, command_pool, nullptr);
 
   vkDestroyPipeline(device, graphics_pipeline, nullptr);
+  vkDestroyPipeline(device, l1_fill_pipeline, nullptr);
+  vkDestroyPipeline(device, l1_offsets_pipeline, nullptr);
+  vkDestroyPipeline(device, l1_count_pipeline, nullptr);
+  vkDestroyPipeline(device, l0_fill_pipeline, nullptr);
+  vkDestroyPipeline(device, l0_offsets_pipeline, nullptr);
+  vkDestroyPipeline(device, l0_count_pipeline, nullptr);
   vkDestroyPipeline(device, compute_pipeline, nullptr);
   vkDestroyPipelineLayout(device, graphics_layout, nullptr);
   vkDestroyPipelineLayout(device, compute_layout, nullptr);
@@ -2439,7 +2682,15 @@ int main() {
   vkDestroyDescriptorSetLayout(device, descriptor_layout, nullptr);
 
   unmap_buffer(device, camera_buffer);
+  unmap_buffer(device, globals_buffer);
   destroy_buffer(device, camera_buffer);
+  destroy_buffer(device, globals_buffer);
+  destroy_buffer(device, l1_cursors_buffer);
+  destroy_buffer(device, l1_offsets_buffer);
+  destroy_buffer(device, l1_counts_buffer);
+  destroy_buffer(device, l0_cursors_buffer);
+  destroy_buffer(device, l0_offsets_buffer);
+  destroy_buffer(device, l0_counts_buffer);
   destroy_buffer(device, sobol_dirs_buffer);
   destroy_buffer(device, grid_indices_buffer);
   destroy_buffer(device, grid_l1_buffer);
