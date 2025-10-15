@@ -1,6 +1,7 @@
 ﻿#ifndef CALLANDOR_TYPES_CPP
 #define CALLANDOR_TYPES_CPP
 
+#include <cstddef>
 #include <cstdint>
 
 using namespace std;

@@ -1,9 +1,9 @@
 ﻿#ifndef CALLANDOR_VULKAN_INSTANCE_CPP
 #define CALLANDOR_VULKAN_INSTANCE_CPP
 
-#include "../types.cpp"
-#include "../assert.cpp"
-#include "headers.cpp"
+#include "types.cpp"
+#include "assert.cpp"
+#include "vulkan/headers.cpp"  // was: "headers.cpp" via ../
 
 #include <string_view>
 #include <array>

@@ -9,15 +9,17 @@
   #define WIN32_LEAN_AND_MEAN
   #endif
   #define VK_USE_PLATFORM_WIN32_KHR
-  #include <windows.h>              // brings in HINSTANCE, HWND, HANDLE
+  #include <windows.h>
 #endif
 
-#include <vulkan/vulkan.h>          // pulls vulkan_win32 when VK_USE_PLATFORM_WIN32_KHR is set
+#include <vulkan/vulkan.h>
 
-#include "../defer.cpp"
+#if defined(__APPLE__)
+#include <vulkan/vulkan_metal.h>
+#include <vulkan/vulkan_beta.h>
+#endif
 
 #if defined(_WIN32)
-// (optional) explicit Win32 header; safe since windows.h is already included
 #include <vulkan/vulkan_win32.h>
 #endif
 
