@@ -3,6 +3,7 @@
 #include "types.cpp"
 #include "assert.cpp"
 #include "vulkan/headers.cpp"
+#include "glfw/window.cpp"   // enumeratePlatformInstanceExtensions()
 
 #include <algorithm>
 #include <array>
@@ -17,69 +18,6 @@
 using namespace std;
 
 constexpr string_view APP_NAME = "callandor";
-
-#if defined(VK_USE_PLATFORM_WIN32_KHR)
-inline constexpr array<const char*, 2> platformExtensions{
-    VK_KHR_SURFACE_EXTENSION_NAME,
-    VK_KHR_WIN32_SURFACE_EXTENSION_NAME,
-};
-inline constexpr VkInstanceCreateFlags instanceFlags = 0;
-#elif defined(VK_USE_PLATFORM_XCB_KHR)
-inline constexpr array<const char*, 2> platformExtensions{
-    VK_KHR_SURFACE_EXTENSION_NAME,
-    VK_KHR_XCB_SURFACE_EXTENSION_NAME,
-};
-inline constexpr VkInstanceCreateFlags instanceFlags = 0;
-#elif defined(VK_USE_PLATFORM_XLIB_KHR)
-inline constexpr array<const char*, 2> platformExtensions{
-    VK_KHR_SURFACE_EXTENSION_NAME,
-    VK_KHR_XLIB_SURFACE_EXTENSION_NAME,
-};
-inline constexpr VkInstanceCreateFlags instanceFlags = 0;
-#elif defined(VK_USE_PLATFORM_WAYLAND_KHR)
-inline constexpr array<const char*, 2> platformExtensions{
-    VK_KHR_SURFACE_EXTENSION_NAME,
-    VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME,
-};
-inline constexpr VkInstanceCreateFlags instanceFlags = 0;
-#elif defined(VK_USE_PLATFORM_ANDROID_KHR)
-inline constexpr array<const char*, 2> platformExtensions{
-    VK_KHR_SURFACE_EXTENSION_NAME,
-    VK_KHR_ANDROID_SURFACE_EXTENSION_NAME,
-};
-inline constexpr VkInstanceCreateFlags instanceFlags = 0;
-#elif defined(VK_USE_PLATFORM_METAL_EXT)
-inline constexpr array<const char*, 3> platformExtensions{
-    VK_KHR_SURFACE_EXTENSION_NAME,
-    VK_EXT_METAL_SURFACE_EXTENSION_NAME,
-    VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME,
-};
-inline constexpr VkInstanceCreateFlags instanceFlags = VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
-#elif defined(__APPLE__)
-inline constexpr array<const char*, 3> platformExtensions{
-    VK_KHR_SURFACE_EXTENSION_NAME,
-    VK_EXT_METAL_SURFACE_EXTENSION_NAME,
-    VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME,
-};
-inline constexpr VkInstanceCreateFlags instanceFlags = VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
-#elif defined(_WIN32)
-inline constexpr array<const char*, 2> platformExtensions{
-    VK_KHR_SURFACE_EXTENSION_NAME,
-    VK_KHR_WIN32_SURFACE_EXTENSION_NAME,
-};
-inline constexpr VkInstanceCreateFlags instanceFlags = 0;
-#elif defined(__linux__)
-inline constexpr array<const char*, 2> platformExtensions{
-    VK_KHR_SURFACE_EXTENSION_NAME,
-    VK_KHR_XCB_SURFACE_EXTENSION_NAME,
-};
-inline constexpr VkInstanceCreateFlags instanceFlags = 0;
-#else
-inline constexpr array<const char*, 1> platformExtensions{
-    VK_KHR_SURFACE_EXTENSION_NAME,
-};
-inline constexpr VkInstanceCreateFlags instanceFlags = 0;
-#endif
 
 inline constexpr array<const char*, 1> debugExtensions{
     VK_EXT_DEBUG_UTILS_EXTENSION_NAME,
@@ -190,11 +128,23 @@ static std::pair<VkInstance, VkDebugUtilsMessengerEXT> createInstance(const Inst
         .apiVersion = VK_API_VERSION_1_3,
     };
 
-    // Extensions (platform + optional debug)
-    std::array<const char*, platformExtensions.size() + debugExtensions.size()> extensionNames{};
-    auto extOut = std::ranges::copy(platformExtensions, extensionNames.begin()).out;
-    if (config.enableDebug) extOut = std::ranges::copy(debugExtensions, extOut).out;
-    const usize extensionCount = static_cast<usize>(extOut - extensionNames.begin());
+    // Extensions (GLFW-required + optional debug + optional portability)
+    std::array<const char*, 16> extensionNames{};
+    auto out = std::ranges::copy(enumeratePlatformInstanceExtensions(), extensionNames.begin()).out;
+    if (config.enableDebug) out = std::ranges::copy(debugExtensions, out).out;
+
+    VkInstanceCreateFlags flags = 0;
+    const bool hasPortability = std::ranges::contains(
+        enumerateInstanceExtensionProperties(),
+        std::string_view{VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME},
+        [](const VkExtensionProperties& p) { return std::string_view{p.extensionName}; });
+
+    if (hasPortability) {
+        *out++ = VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME;
+        flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+    }
+
+    const usize extensionCount = static_cast<usize>(out - extensionNames.begin());
 
     // Validate extensions
     {
@@ -229,7 +179,7 @@ static std::pair<VkInstance, VkDebugUtilsMessengerEXT> createInstance(const Inst
     VkInstanceCreateInfo createInfo {
         .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
         .pNext = config.enableDebug ? &debugCreateInfo : nullptr,
-        .flags = instanceFlags,
+        .flags = flags,
         .pApplicationInfo = &appInfo,
         .enabledLayerCount = static_cast<u32>(layerCount),
         .ppEnabledLayerNames = layerCount ? layerNames.data() : nullptr,
