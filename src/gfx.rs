@@ -3,11 +3,11 @@ use std::{
     sync::Arc,
 };
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use bytemuck::{Pod, Zeroable};
 use pollster::FutureExt;
 use wgpu::{
-    include_wgsl, Backends, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
+    Backends, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
     BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType, Buffer,
     BufferBindingType, BufferDescriptor, BufferUsages, Color, ColorTargetState, ColorWrites,
     CommandEncoderDescriptor, ComputePassDescriptor, ComputePipeline, ComputePipelineDescriptor,
@@ -15,10 +15,11 @@ use wgpu::{
     InstanceDescriptor, Limits, LoadOp, MemoryHints, MultisampleState, Operations,
     PipelineCompilationOptions, PipelineLayoutDescriptor, PowerPreference, PresentMode,
     PrimitiveState, Queue, RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline,
-    RenderPipelineDescriptor, RequestAdapterOptions, Sampler, SamplerBindingType, SamplerDescriptor,
-    ShaderStages, StorageTextureAccess, StoreOp, Surface, SurfaceConfiguration, SurfaceError,
-    Texture, TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType, TextureUsages,
-    TextureView, TextureViewDescriptor, TextureViewDimension, Trace, VertexState,
+    RenderPipelineDescriptor, RequestAdapterOptions, Sampler, SamplerBindingType,
+    SamplerDescriptor, ShaderStages, StorageTextureAccess, StoreOp, Surface, SurfaceConfiguration,
+    SurfaceError, Texture, TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType,
+    TextureUsages, TextureView, TextureViewDescriptor, TextureViewDimension, Trace, VertexState,
+    include_wgsl,
 };
 use winit::{dpi::PhysicalSize, event_loop::ActiveEventLoop, window::Window};
 
@@ -27,7 +28,10 @@ fn ceil_div(x: u32, d: u32) -> u32 {
     (x + d - 1) / d
 }
 
-const SPHERE_COUNT: u32 = 128;
+const SPHERE_COUNT: u32 = 1_000_000;
+const MAX_R: f32 = 0.5;
+const GRID_CELL_SIZE: f32 = 1.0;
+const GRID_MAX_PER_CELL: u32 = 8;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -48,6 +52,12 @@ struct Params {
     _pad3: u32,
     light_color: [f32; 3],
     _pad4: u32,
+
+    // grid
+    grid_origin: [f32; 3],
+    grid_cell_size: f32,
+    grid_dims: [u32; 3],
+    grid_max_per_cell: u32,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -70,8 +80,18 @@ pub struct Gfx {
     _storage_tex: Texture,
     storage_view: TextureView,
 
+    // grid buffers
+    grid_counts_buf: Buffer,
+    grid_list_buf: Buffer,
+    grid_cells: u32,
+    grid_dims: [u32; 3],
+    grid_origin: [f32; 3],
+    grid_cell_size: f32,
+
     // compute
     gen_pip: ComputePipeline,
+    grid_clear_pip: ComputePipeline,
+    grid_build_pip: ComputePipeline,
     trace_pip: ComputePipeline,
     compute_bgl: BindGroupLayout,
     compute_bg: BindGroup,
@@ -166,6 +186,26 @@ impl Gfx {
         let (storage_tex, storage_view) =
             Self::make_storage(&device, surface_cfg.width, surface_cfg.height);
 
+        // --- Uniform grid covering generated spheres ---
+        // Sphere layout is a GN x GN grid with spacing = 2.2 * MAX_R and radii in [0.3, 0.5].
+        let gn = (SPHERE_COUNT as f32).sqrt().ceil() as u32;
+        let spacing = 2.2 * MAX_R;
+        let min_x = -0.5 * (gn.saturating_sub(1) as f32) * spacing - MAX_R;
+        let max_x = 0.5 * (gn.saturating_sub(1) as f32) * spacing + MAX_R;
+        let min_z = min_x;
+        let max_z = max_x;
+        let ground_y = 0.0f32;
+        let min_y = ground_y;
+        let max_y = ground_y + 2.0 * MAX_R; // spheres are [y=r..y=2r] above ground
+
+        let dim_x = ((max_x - min_x) / GRID_CELL_SIZE).ceil().max(1.0) as u32;
+        let dim_y = ((max_y - min_y) / GRID_CELL_SIZE).ceil().max(1.0) as u32;
+        let dim_z = ((max_z - min_z) / GRID_CELL_SIZE).ceil().max(1.0) as u32;
+
+        let grid_dims = [dim_x, dim_y, dim_z];
+        let grid_cells = dim_x.saturating_mul(dim_y).saturating_mul(dim_z);
+        let grid_origin = [min_x, min_y, min_z];
+
         // SoA buffers (filled on GPU by gen_main)
         let spheres_buf = device.create_buffer(&BufferDescriptor {
             label: Some("spheres (cx,cy,cz,r)"),
@@ -183,6 +223,18 @@ impl Gfx {
             label: Some("params uniform"),
             size: std::mem::size_of::<Params>() as u64,
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let grid_counts_buf = device.create_buffer(&BufferDescriptor {
+            label: Some("grid_counts (atomic u32 per cell)"),
+            size: (grid_cells as u64) * 4,
+            usage: BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let grid_list_buf = device.create_buffer(&BufferDescriptor {
+            label: Some("grid_list (indices)"),
+            size: (grid_cells as u64) * (GRID_MAX_PER_CELL as u64) * 4,
+            usage: BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
 
@@ -234,6 +286,28 @@ impl Gfx {
                     },
                     count: None,
                 },
+                // binding: 4 - grid_counts
+                BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // binding: 5 - grid_list
+                BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
         let compute_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
@@ -242,12 +316,28 @@ impl Gfx {
             push_constant_ranges: &[],
         });
 
-        // Two compute pipelines: generator + tracer
+        // Compute pipelines
         let gen_pip = device.create_compute_pipeline(&ComputePipelineDescriptor {
             label: Some("gen spheres pipeline"),
             layout: Some(&compute_layout),
             module: &cs,
             entry_point: Some("gen_main"),
+            compilation_options: PipelineCompilationOptions::default(),
+            cache: None,
+        });
+        let grid_clear_pip = device.create_compute_pipeline(&ComputePipelineDescriptor {
+            label: Some("grid clear pipeline"),
+            layout: Some(&compute_layout),
+            module: &cs,
+            entry_point: Some("grid_clear_main"),
+            compilation_options: PipelineCompilationOptions::default(),
+            cache: None,
+        });
+        let grid_build_pip = device.create_compute_pipeline(&ComputePipelineDescriptor {
+            label: Some("grid build pipeline"),
+            layout: Some(&compute_layout),
+            module: &cs,
+            entry_point: Some("grid_build_main"),
             compilation_options: PipelineCompilationOptions::default(),
             cache: None,
         });
@@ -279,6 +369,14 @@ impl Gfx {
                 BindGroupEntry {
                     binding: 3,
                     resource: params_buf.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 4,
+                    resource: grid_counts_buf.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 5,
+                    resource: grid_list_buf.as_entire_binding(),
                 },
             ],
         });
@@ -372,7 +470,15 @@ impl Gfx {
             _surface_format: surface_format,
             _storage_tex: storage_tex,
             storage_view,
+            grid_counts_buf,
+            grid_list_buf,
+            grid_cells,
+            grid_dims,
+            grid_origin,
+            grid_cell_size: GRID_CELL_SIZE,
             gen_pip,
+            grid_clear_pip,
+            grid_build_pip,
             trace_pip,
             compute_bgl,
             compute_bg,
@@ -508,6 +614,14 @@ impl Gfx {
                     binding: 3,
                     resource: self.params_buf.as_entire_binding(),
                 },
+                BindGroupEntry {
+                    binding: 4,
+                    resource: self.grid_counts_buf.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 5,
+                    resource: self.grid_list_buf.as_entire_binding(),
+                },
             ],
         });
 
@@ -554,6 +668,10 @@ impl Gfx {
             _pad3: 0,
             light_color: [1.0, 1.0, 1.0],
             _pad4: 0,
+            grid_origin: self.grid_origin,
+            grid_cell_size: self.grid_cell_size,
+            grid_dims: self.grid_dims,
+            grid_max_per_cell: GRID_MAX_PER_CELL,
         };
         self.queue
             .write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&params));
@@ -579,7 +697,7 @@ impl Gfx {
                 label: Some("encoder"),
             });
 
-        // Compute: 1) generate spheres (O(N)), 2) trace (O(W*H*N))
+        // Compute: 1) generate spheres, 2) clear grid, 3) build grid, 4) trace
         {
             let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
                 label: Some("compute pass"),
@@ -592,7 +710,16 @@ impl Gfx {
             pass.set_pipeline(&self.gen_pip);
             pass.dispatch_workgroups(gx, 1, 1);
 
-            // 2) trace
+            // 2) clear grid counts
+            let gc = ceil_div(self.grid_cells, 256);
+            pass.set_pipeline(&self.grid_clear_pip);
+            pass.dispatch_workgroups(gc, 1, 1);
+
+            // 3) build grid
+            pass.set_pipeline(&self.grid_build_pip);
+            pass.dispatch_workgroups(gx, 1, 1);
+
+            // 4) trace
             let [w, h] = [self.surface_cfg.width, self.surface_cfg.height];
             let tx = ceil_div(w, 16);
             let ty = ceil_div(h, 16);

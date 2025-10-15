@@ -146,8 +146,8 @@ impl ApplicationHandler for App {
         if self.input.is_pressed(KeyCode::KeyQ) {
             controls.ascend -= 1.0;
         }
-        controls.boost = self.input.is_pressed(KeyCode::ShiftLeft)
-            || self.input.is_pressed(KeyCode::ShiftRight);
+        controls.boost =
+            self.input.is_pressed(KeyCode::ShiftLeft) || self.input.is_pressed(KeyCode::ShiftRight);
 
         gfx.update_camera(dt, controls);
         gfx.window().request_redraw();
