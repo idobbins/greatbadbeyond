@@ -1,5 +1,4 @@
-﻿#ifndef CALLANDOR_VULKAN_HEADERS_CPP
-#define CALLANDOR_VULKAN_HEADERS_CPP
+﻿#pragma once
 
 #if defined(_WIN32)
   #ifndef NOMINMAX
@@ -8,8 +7,25 @@
   #ifndef WIN32_LEAN_AND_MEAN
   #define WIN32_LEAN_AND_MEAN
   #endif
+  #ifndef VK_USE_PLATFORM_WIN32_KHR
   #define VK_USE_PLATFORM_WIN32_KHR
+  #endif
   #include <windows.h>
+#endif
+
+#if defined(__APPLE__)
+  #ifndef VK_ENABLE_BETA_EXTENSIONS
+  #define VK_ENABLE_BETA_EXTENSIONS
+  #endif
+  #ifndef VK_USE_PLATFORM_METAL_EXT
+  #define VK_USE_PLATFORM_METAL_EXT
+  #endif
+#endif
+
+#if defined(__ANDROID__)
+  #ifndef VK_USE_PLATFORM_ANDROID_KHR
+  #define VK_USE_PLATFORM_ANDROID_KHR
+  #endif
 #endif
 
 #include <vulkan/vulkan.h>
@@ -22,5 +38,3 @@
 #if defined(_WIN32)
 #include <vulkan/vulkan_win32.h>
 #endif
-
-#endif //CALLCALLANDOR_VULKAN_HEADERS_CPP

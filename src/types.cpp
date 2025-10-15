@@ -1,5 +1,4 @@
-﻿#ifndef CALLANDOR_TYPES_CPP
-#define CALLANDOR_TYPES_CPP
+﻿#pragma once
 
 #include <cstddef>
 #include <cstdint>
@@ -23,5 +22,3 @@ using  usize = size_t;
 using  isize = ptrdiff_t;
 
 using cstr = const char *;
-
-#endif //CALLANDOR_TYPES_CPP

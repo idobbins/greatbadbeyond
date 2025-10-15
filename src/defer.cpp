@@ -1,5 +1,4 @@
-﻿#ifndef CALLANDOR_DEFER_CPP
-#define CALLANDOR_DEFER_CPP
+﻿#pragma once
 
 #ifndef defer
 struct defer_dummy {};
@@ -9,5 +8,3 @@ template <class F> deferrer<F> operator*(defer_dummy, F f) { return {f}; }
 #define DEFER(LINE) DEFER_(LINE)
 #define defer auto DEFER(__LINE__) = defer_dummy{} *[&]()
 #endif // defer
-
-#endif //CALLANDOR_DEFER_CPP

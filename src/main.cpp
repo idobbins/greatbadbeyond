@@ -7,8 +7,16 @@
 
 int main()
 {
-    VkInstance instance = createInstance();
-    defer { vkDestroyInstance(instance, nullptr); };
+    constexpr InstanceConfig instanceConfig{
+#if defined(NDEBUG)
+        .enableDebug = false,
+#else
+        .enableDebug = true,
+#endif
+    };
 
+    Instance instance = createInstance(instanceConfig);
+    defer { destroyInstance(instance); };
 
+    return 0;
 }
