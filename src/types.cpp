@@ -22,4 +22,6 @@ using  f64 = double;
 using  usize = size_t;
 using  isize = ptrdiff_t;
 
+using cstr = const char *;
+
 #endif //CALLANDOR_TYPES_CPP

@@ -1,12 +1,13 @@
-﻿#ifndef CALLANDOR_VULKAN_INSTANCE_CPP
-#define CALLANDOR_VULKAN_INSTANCE_CPP
+﻿#pragma once
 
 #include "types.cpp"
 #include "assert.cpp"
-#include "vulkan/headers.cpp"  // was: "headers.cpp" via ../
+#include "vulkan/headers.cpp"
 
-#include <string_view>
 #include <array>
+#include <mutex>
+#include <span>
+#include <string_view>
 #include <vector>
 
 using namespace std;
@@ -14,11 +15,12 @@ using namespace std;
 constexpr string_view APP_NAME = "callandor";
 
 #if defined(__APPLE__)
-constexpr array<const char*, 3> instanceExtensions{
+inline constexpr array<const char*, 3> instanceExtensions{
     VK_KHR_SURFACE_EXTENSION_NAME,
     VK_EXT_METAL_SURFACE_EXTENSION_NAME,
     VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME,
-  };
+};
+inline constexpr VkInstanceCreateFlags instanceFlags = VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
 #elif defined(_WIN32)
 constexpr array<const char*, 2> instanceExtensions{
     VK_KHR_SURFACE_EXTENSION_NAME,
@@ -35,15 +37,30 @@ constexpr array<const char*, 1> instance_exts{
   };
 #endif
 
-static vector<VkExtensionProperties> enumerateInstanceExtensionProperties() {
-    uint32_t count = 0;
-    vkEnumerateInstanceExtensionProperties(nullptr, &count, nullptr);
+static span<const VkExtensionProperties> enumerateInstanceExtensionProperties() {
+    static array<VkExtensionProperties, 64> cache{};
+    static u32 count = 0;
+    static once_flag once;
 
-    vector<VkExtensionProperties> exts(count);
+    call_once(once, [] {
+        vkEnumerateInstanceExtensionProperties(nullptr, &count, nullptr);
+        vkEnumerateInstanceExtensionProperties(nullptr, &count, cache.data());
+    });
 
-    vkEnumerateInstanceExtensionProperties(nullptr, &count, exts.data());
+    return {cache.data(), count};
+}
 
-    return exts;
+static span<const VkLayerProperties> enumerateInstanceLayerProperties() {
+    static array<VkLayerProperties, 64> cache{};
+    static u32 count = 0;
+    static once_flag once;
+
+    call_once(once, [] {
+        vkEnumerateInstanceLayerProperties(&count, nullptr);
+        vkEnumerateInstanceLayerProperties(&count, cache.data());
+    });
+
+    return {cache.data(), count};
 }
 
 static VkInstance createInstance()
@@ -57,9 +74,7 @@ static VkInstance createInstance()
 
     static constexpr VkInstanceCreateInfo create_info {
         .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
-#if defined(__APPLE__)
-        .flags = VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR,
-#endif
+        .flags = instanceFlags,
         .pApplicationInfo = &app_info,
         .enabledExtensionCount = static_cast<u32>(instanceExtensions.size()),
         .ppEnabledExtensionNames = instanceExtensions.data(),
@@ -71,4 +86,3 @@ static VkInstance createInstance()
     return inst;
 }
 
-#endif //CALLANDOR_VULKAN_INSTANCE_CPP
