@@ -1,11 +1,10 @@
 #include "types.cpp"
 #include "assert.cpp"
 #include "defer.cpp"
-
-#include "glfw/window.cpp"
-
 #include "vulkan/headers.cpp"
+#include "glfw/window.cpp"
 #include "vulkan/instance.cpp"
+#include "vulkan/device.cpp"
 
 int main()
 {
@@ -26,6 +25,12 @@ int main()
     const auto [instance, debugMessenger] = createInstance(instanceConfig);
     defer { destroyInstance(instance); };
     defer { destroyDebugMessenger(instance, debugMessenger); };
+
+    VkSurfaceKHR surface = createSurface(instance, window);
+    defer { destroySurface(instance, surface); };
+
+    Device device = createDevice(instance, surface);
+    defer { destroyDevice(device.logical); };
 
     while (!windowShouldClose(window)) {
         pollWindowEvents();
