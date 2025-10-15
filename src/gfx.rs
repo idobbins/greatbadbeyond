@@ -20,7 +20,7 @@ use wgpu::{
     Texture, TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType, TextureUsages,
     TextureView, TextureViewDescriptor, TextureViewDimension, Trace, VertexState,
 };
-use winit::{event_loop::ActiveEventLoop, window::Window};
+use winit::{dpi::PhysicalSize, event_loop::ActiveEventLoop, window::Window};
 
 #[inline]
 fn ceil_div(x: u32, d: u32) -> u32 {
@@ -97,9 +97,16 @@ pub struct Gfx {
 
 impl Gfx {
     pub fn new(event_loop: &ActiveEventLoop) -> Result<Self> {
-        let window = Arc::new(
-            event_loop.create_window(Window::default_attributes().with_title("callandor"))?,
-        );
+        let mut attrs = Window::default_attributes()
+            .with_title("callandor")
+            .with_inner_size(PhysicalSize::new(1920, 1080));
+        #[cfg(target_os = "macos")]
+        {
+            use winit::platform::macos::WindowAttributesExtMacOS;
+            attrs = attrs.with_disallow_hidpi(true);
+        }
+
+        let window = Arc::new(event_loop.create_window(attrs)?);
 
         let instance = Instance::new(&InstanceDescriptor {
             backends: Backends::all(),

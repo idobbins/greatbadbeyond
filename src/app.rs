@@ -1,5 +1,8 @@
 use crate::gfx::{CameraInput, Gfx};
-use std::{collections::HashSet, time::Instant};
+use std::{
+    collections::{HashSet, VecDeque},
+    time::{Duration, Instant},
+};
 use winit::{
     application::ApplicationHandler,
     event::{DeviceEvent, DeviceId, ElementState, MouseButton, WindowEvent},
@@ -12,12 +15,18 @@ pub struct App {
     gfx: Option<Gfx>,
     input: InputState,
     last_frame: Instant,
+    frame_times: VecDeque<f32>,
+    last_frame_log: Instant,
 }
+
+const FRAME_HISTORY: usize = 240;
 
 #[derive(Default)]
 struct InputState {
     pressed: HashSet<KeyCode>,
     mouse_captured: bool,
+    look_left_held: bool,
+    look_right_held: bool,
 }
 
 impl InputState {
@@ -40,6 +49,8 @@ impl App {
             gfx: None,
             input: InputState::default(),
             last_frame: Instant::now(),
+            frame_times: VecDeque::with_capacity(FRAME_HISTORY),
+            last_frame_log: Instant::now(),
         }
     }
 
@@ -49,6 +60,10 @@ impl App {
         };
 
         if capture == self.input.mouse_captured {
+            if !capture {
+                self.input.look_left_held = false;
+                self.input.look_right_held = false;
+            }
             return;
         }
 
@@ -68,7 +83,33 @@ impl App {
             let _ = window.set_cursor_grab(CursorGrabMode::None);
             window.set_cursor_visible(true);
             self.input.mouse_captured = false;
+            self.input.look_left_held = false;
+            self.input.look_right_held = false;
         }
+    }
+
+    fn percentile(sorted: &[f32], pct: f32) -> f32 {
+        debug_assert!(!sorted.is_empty());
+        let clamped = pct.clamp(0.0, 100.0);
+        let max_index = sorted.len().saturating_sub(1);
+        if max_index == 0 {
+            return sorted[0];
+        }
+        let idx = ((clamped / 100.0) * max_index as f32).round() as usize;
+        sorted[idx.min(max_index)]
+    }
+
+    fn log_frame_stats(&self) {
+        if self.frame_times.is_empty() {
+            return;
+        }
+
+        let mut sorted: Vec<f32> = self.frame_times.iter().copied().collect();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let p0 = Self::percentile(&sorted, 0.0);
+        let p50 = Self::percentile(&sorted, 50.0);
+        let p99 = Self::percentile(&sorted, 99.0);
+        println!("frame time ms: p0={p0:.2} p50={p50:.2} p99={p99:.2}");
     }
 }
 
@@ -80,6 +121,8 @@ impl ApplicationHandler for App {
         event_loop.set_control_flow(ControlFlow::Poll);
         event_loop.listen_device_events(DeviceEvents::Always);
         self.last_frame = Instant::now();
+        self.last_frame_log = Instant::now();
+        self.frame_times.clear();
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
@@ -138,8 +181,18 @@ impl ApplicationHandler for App {
             Resized(size) => gfx.resize(size),
             Focused(false) => self.set_cursor_capture(false),
             RedrawRequested => {
+                let frame_start = Instant::now();
                 if let Err(e) = gfx.render() {
                     eprintln!("render error: {e}");
+                }
+                let frame_time = frame_start.elapsed().as_secs_f32() * 1000.0;
+                self.frame_times.push_back(frame_time);
+                if self.frame_times.len() > FRAME_HISTORY {
+                    self.frame_times.pop_front();
+                }
+                if self.last_frame_log.elapsed() >= Duration::from_secs(1) {
+                    self.log_frame_stats();
+                    self.last_frame_log = Instant::now();
                 }
             }
             KeyboardInput { event, .. } => {
@@ -152,8 +205,18 @@ impl ApplicationHandler for App {
                 }
             }
             MouseInput { state, button, .. } => {
-                if button == MouseButton::Right{
-                    self.set_cursor_capture(state == ElementState::Pressed);
+                match button {
+                    MouseButton::Left => {
+                        self.input.look_left_held = state == ElementState::Pressed;
+                    }
+                    MouseButton::Right => {
+                        self.input.look_right_held = state == ElementState::Pressed;
+                    }
+                    _ => {}
+                }
+                if button == MouseButton::Left || button == MouseButton::Right {
+                    let capture = self.input.look_left_held || self.input.look_right_held;
+                    self.set_cursor_capture(capture);
                 }
             }
             _ => {}
