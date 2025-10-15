@@ -25,9 +25,7 @@ int main()
 
     const auto [instance, debugMessenger] = createInstance(instanceConfig);
     defer { destroyInstance(instance); };
-    if (debugMessenger != VK_NULL_HANDLE) {
-        defer { destroyDebugMessenger(instance, debugMessenger); };
-    }
+    defer { destroyDebugMessenger(instance, debugMessenger); };
 
     while (!windowShouldClose(window)) {
         pollWindowEvents();
