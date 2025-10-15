@@ -1,19 +1,20 @@
 use std::sync::Arc;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use pollster::FutureExt;
 use wgpu::{
-    include_wgsl, Backends, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
+    Backends, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
     BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType, Color,
-    ColorTargetState, ColorWrites, CommandEncoderDescriptor, ComputePassDescriptor, ComputePipeline,
-    ComputePipelineDescriptor, Device, DeviceDescriptor, ExperimentalFeatures, Extent3d, Features,
-    FragmentState, Instance, InstanceDescriptor, Limits, LoadOp, MemoryHints, MultisampleState,
-    Operations, PipelineCompilationOptions, PipelineLayoutDescriptor, PowerPreference, PresentMode,
-    PrimitiveState, Queue, RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline,
-    RenderPipelineDescriptor, RequestAdapterOptions, Sampler, SamplerBindingType, SamplerDescriptor,
-    ShaderStages, StorageTextureAccess, StoreOp, Surface, SurfaceConfiguration, SurfaceError,
-    Texture, TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType, TextureUsages,
-    TextureView, TextureViewDescriptor, TextureViewDimension, Trace, VertexState,
+    ColorTargetState, ColorWrites, CommandEncoderDescriptor, ComputePassDescriptor,
+    ComputePipeline, ComputePipelineDescriptor, Device, DeviceDescriptor, ExperimentalFeatures,
+    Extent3d, Features, FragmentState, Instance, InstanceDescriptor, Limits, LoadOp, MemoryHints,
+    MultisampleState, Operations, PipelineCompilationOptions, PipelineLayoutDescriptor,
+    PowerPreference, PresentMode, PrimitiveState, Queue, RenderPassColorAttachment,
+    RenderPassDescriptor, RenderPipeline, RenderPipelineDescriptor, RequestAdapterOptions, Sampler,
+    SamplerBindingType, SamplerDescriptor, ShaderStages, StorageTextureAccess, StoreOp, Surface,
+    SurfaceConfiguration, SurfaceError, Texture, TextureDescriptor, TextureDimension,
+    TextureFormat, TextureSampleType, TextureUsages, TextureView, TextureViewDescriptor,
+    TextureViewDimension, Trace, VertexState, include_wgsl,
 };
 use winit::{event_loop::ActiveEventLoop, window::Window};
 
@@ -99,7 +100,8 @@ impl Gfx {
         surface.configure(&device, &surface_cfg);
 
         let compute_shader = device.create_shader_module(include_wgsl!("../shaders/compute.wgsl"));
-        let render_shader = device.create_shader_module(include_wgsl!("../shaders/fullscreen.wgsl"));
+        let render_shader =
+            device.create_shader_module(include_wgsl!("../shaders/fullscreen.wgsl"));
 
         let (storage_tex, storage_view) =
             Self::make_storage(&device, surface_cfg.width, surface_cfg.height);
@@ -308,7 +310,9 @@ impl Gfx {
 
         let mut encoder = self
             .device
-            .create_command_encoder(&CommandEncoderDescriptor { label: Some("encoder") });
+            .create_command_encoder(&CommandEncoderDescriptor {
+                label: Some("encoder"),
+            });
 
         {
             let [w, h] = [self.surface_cfg.width, self.surface_cfg.height];
