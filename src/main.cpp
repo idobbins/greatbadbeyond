@@ -2,11 +2,19 @@
 #include "assert.cpp"
 #include "defer.cpp"
 
+#include "glfw/window.cpp"
+
 #include "vulkan/headers.cpp"
 #include "vulkan/instance.cpp"
 
 int main()
 {
+    GlfwContext glfw = createGlfwContext();
+    defer { destroyGlfwContext(glfw); };
+
+    Window window = createWindow(glfw);
+    defer { destroyWindow(window); };
+
     constexpr InstanceConfig instanceConfig{
 #if defined(NDEBUG)
         .enableDebug = false,
@@ -15,8 +23,15 @@ int main()
 #endif
     };
 
-    Instance instance = createInstance(instanceConfig);
+    const auto [instance, debugMessenger] = createInstance(instanceConfig);
     defer { destroyInstance(instance); };
+    if (debugMessenger != VK_NULL_HANDLE) {
+        defer { destroyDebugMessenger(instance, debugMessenger); };
+    }
 
-    return 0;
+    while (!windowShouldClose(window)) {
+        pollWindowEvents();
+    }
+
+    return EXIT_SUCCESS;
 }

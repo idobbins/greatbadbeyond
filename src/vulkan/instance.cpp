@@ -12,6 +12,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 
 using namespace std;
 
@@ -92,55 +93,50 @@ struct InstanceConfig {
     bool enableDebug = false;
 };
 
-struct Instance {
-    VkInstance handle = VK_NULL_HANDLE;
-    VkDebugUtilsMessengerEXT debugMessenger = VK_NULL_HANDLE;
-};
-
-static span<const VkExtensionProperties> enumerateInstanceExtensionProperties() {
-    static array<VkExtensionProperties, 256> cache{};
+static std::span<const VkExtensionProperties> enumerateInstanceExtensionProperties() {
+    static std::array<VkExtensionProperties, 256> cache{};
     static u32 count = 0;
-    static once_flag once;
+    static std::once_flag once;
 
-    call_once(once, [] {
+    std::call_once(once, [] {
         vkEnumerateInstanceExtensionProperties(nullptr, &count, nullptr);
+        runtime_assert(count <= cache.size(), "Too many instance extensions for cache");
         vkEnumerateInstanceExtensionProperties(nullptr, &count, cache.data());
     });
-
     return {cache.data(), count};
 }
 
-static span<const VkLayerProperties> enumerateInstanceLayerProperties() {
-    static array<VkLayerProperties, 64> cache{};
+static std::span<const VkLayerProperties> enumerateInstanceLayerProperties() {
+    static std::array<VkLayerProperties, 64> cache{};
     static u32 count = 0;
-    static once_flag once;
+    static std::once_flag once;
 
-    call_once(once, [] {
+    std::call_once(once, [] {
         vkEnumerateInstanceLayerProperties(&count, nullptr);
+        runtime_assert(count <= cache.size(), "Too many instance layers for cache");
         vkEnumerateInstanceLayerProperties(&count, cache.data());
     });
-
     return {cache.data(), count};
 }
 
-static const char* findMissingExtension(span<const char* const> required) {
+static const char* findMissingExtension(std::span<const char* const> required) {
     const auto supported = enumerateInstanceExtensionProperties();
-    const auto missing = std::ranges::find_if(required, [&](const char* requiredName) {
-        return !std::ranges::any_of(supported, [&](const VkExtensionProperties& property) {
-            return string_view(property.extensionName) == requiredName;
-        });
+    auto proj = [](const VkExtensionProperties& p) { return std::string_view{p.extensionName}; };
+
+    const auto it = std::ranges::find_if(required, [&](const char* r) {
+        return !std::ranges::contains(supported, std::string_view{r}, proj);
     });
-    return missing == required.end() ? nullptr : *missing;
+    return it == required.end() ? nullptr : *it;
 }
 
-static const char* findMissingLayer(span<const char* const> required) {
+static const char* findMissingLayer(std::span<const char* const> required) {
     const auto supported = enumerateInstanceLayerProperties();
-    const auto missing = std::ranges::find_if(required, [&](const char* requiredName) {
-        return !std::ranges::any_of(supported, [&](const VkLayerProperties& property) {
-            return string_view(property.layerName) == requiredName;
-        });
+    auto proj = [](const VkLayerProperties& p) { return std::string_view{p.layerName}; };
+
+    const auto it = std::ranges::find_if(required, [&](const char* r) {
+        return !std::ranges::contains(supported, std::string_view{r}, proj);
     });
-    return missing == required.end() ? nullptr : *missing;
+    return it == required.end() ? nullptr : *it;
 }
 
 static const char* toSeverityLabel(const VkDebugUtilsMessageSeverityFlagBitsEXT severity) {
@@ -185,7 +181,7 @@ static VkDebugUtilsMessengerCreateInfoEXT makeDebugMessengerCreateInfo() {
     };
 }
 
-static Instance createInstance(const InstanceConfig config = {})
+static std::pair<VkInstance, VkDebugUtilsMessengerEXT> createInstance(const InstanceConfig config = {})
 {
     static constexpr VkApplicationInfo appInfo {
         .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
@@ -194,37 +190,34 @@ static Instance createInstance(const InstanceConfig config = {})
         .apiVersion = VK_API_VERSION_1_3,
     };
 
-    array<const char*, platformExtensions.size() + debugExtensions.size()> extensionNames{};
-    usize extensionCount = 0;
-    const auto appendExtensions = [&](const auto& names) {
-        for (const char* name : names) {
-            extensionNames[extensionCount++] = name;
+    // Extensions (platform + optional debug)
+    std::array<const char*, platformExtensions.size() + debugExtensions.size()> extensionNames{};
+    auto extOut = std::ranges::copy(platformExtensions, extensionNames.begin()).out;
+    if (config.enableDebug) extOut = std::ranges::copy(debugExtensions, extOut).out;
+    const usize extensionCount = static_cast<usize>(extOut - extensionNames.begin());
+
+    // Validate extensions
+    {
+        const std::span<const char* const> requested{extensionNames.data(), extensionCount};
+        if (const char* missing = findMissingExtension(requested)) {
+            std::string msg = "Missing required instance extension: ";
+            msg += missing;
+            runtime_assert(false, msg);
         }
-    };
-    appendExtensions(platformExtensions);
-    if (config.enableDebug) {
-        appendExtensions(debugExtensions);
     }
 
-    const span<const char* const> requestedExtensions{extensionNames.data(), extensionCount};
-    if (const char* missingExt = findMissingExtension(requestedExtensions)) {
-        string message = "Missing required instance extension: ";
-        message += missingExt;
-        runtime_assert(false, message);
-    }
-
-    array<const char*, validationLayers.size()> layerNames{};
+    // Layers (only if debug)
+    std::array<const char*, validationLayers.size()> layerNames{};
     usize layerCount = 0;
     if (config.enableDebug) {
-        for (const char* layer : validationLayers) {
-            layerNames[layerCount++] = layer;
-        }
+        auto layerOut = std::ranges::copy(validationLayers, layerNames.begin()).out;
+        layerCount = static_cast<usize>(layerOut - layerNames.begin());
 
-        const span<const char* const> requestedLayers{layerNames.data(), layerCount};
-        if (const char* missingLayer = findMissingLayer(requestedLayers)) {
-            string message = "Missing required validation layer: ";
-            message += missingLayer;
-            runtime_assert(false, message);
+        const std::span<const char* const> requested{layerNames.data(), layerCount};
+        if (const char* missing = findMissingLayer(requested)) {
+            std::string msg = "Missing required validation layer: ";
+            msg += missing;
+            runtime_assert(false, msg);
         }
     }
 
@@ -244,35 +237,41 @@ static Instance createInstance(const InstanceConfig config = {})
         .ppEnabledExtensionNames = extensionNames.data(),
     };
 
-    Instance instance{};
-    const VkResult instanceResult = vkCreateInstance(&createInfo, nullptr, &instance.handle);
+    VkInstance instance = VK_NULL_HANDLE;
+    const VkResult instanceResult = vkCreateInstance(&createInfo, nullptr, &instance);
     runtime_assert(instanceResult == VK_SUCCESS, "Failed to create instance");
 
+    VkDebugUtilsMessengerEXT debugMessenger = VK_NULL_HANDLE;
     if (config.enableDebug) {
         auto createMessenger = reinterpret_cast<PFN_vkCreateDebugUtilsMessengerEXT>(
-            vkGetInstanceProcAddr(instance.handle, "vkCreateDebugUtilsMessengerEXT"));
+            vkGetInstanceProcAddr(instance, "vkCreateDebugUtilsMessengerEXT"));
         runtime_assert(createMessenger != nullptr, "Failed to load vkCreateDebugUtilsMessengerEXT");
 
-        const VkResult messengerResult = createMessenger(instance.handle, &debugCreateInfo, nullptr, &instance.debugMessenger);
+        const VkResult messengerResult = createMessenger(instance, &debugCreateInfo, nullptr, &debugMessenger);
         runtime_assert(messengerResult == VK_SUCCESS, "Failed to create debug messenger");
     }
 
-    return instance;
+    return {instance, debugMessenger};
 }
 
-static void destroyInstance(const Instance& instance)
+static void destroyDebugMessenger(VkInstance instance, VkDebugUtilsMessengerEXT messenger)
 {
-    if (instance.handle == VK_NULL_HANDLE) {
+    if (instance == VK_NULL_HANDLE || messenger == VK_NULL_HANDLE) {
         return;
     }
 
-    if (instance.debugMessenger != VK_NULL_HANDLE) {
-        auto destroyMessenger = reinterpret_cast<PFN_vkDestroyDebugUtilsMessengerEXT>(
-            vkGetInstanceProcAddr(instance.handle, "vkDestroyDebugUtilsMessengerEXT"));
-        if (destroyMessenger != nullptr) {
-            destroyMessenger(instance.handle, instance.debugMessenger, nullptr);
-        }
+    auto destroyMessenger = reinterpret_cast<PFN_vkDestroyDebugUtilsMessengerEXT>(
+        vkGetInstanceProcAddr(instance, "vkDestroyDebugUtilsMessengerEXT"));
+    if (destroyMessenger != nullptr) {
+        destroyMessenger(instance, messenger, nullptr);
+    }
+}
+
+static void destroyInstance(VkInstance instance)
+{
+    if (instance == VK_NULL_HANDLE) {
+        return;
     }
 
-    vkDestroyInstance(instance.handle, nullptr);
+    vkDestroyInstance(instance, nullptr);
 }
