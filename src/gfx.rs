@@ -27,7 +27,7 @@ fn ceil_div(x: u32, d: u32) -> u32 {
     (x + d - 1) / d
 }
 
-const SPHERE_COUNT: u32 = 256;
+const SPHERE_COUNT: u32 = 128;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]

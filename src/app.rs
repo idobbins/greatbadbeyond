@@ -25,8 +25,6 @@ const FRAME_HISTORY: usize = 240;
 struct InputState {
     pressed: HashSet<KeyCode>,
     mouse_captured: bool,
-    look_left_held: bool,
-    look_right_held: bool,
 }
 
 impl InputState {
@@ -60,10 +58,6 @@ impl App {
         };
 
         if capture == self.input.mouse_captured {
-            if !capture {
-                self.input.look_left_held = false;
-                self.input.look_right_held = false;
-            }
             return;
         }
 
@@ -83,8 +77,6 @@ impl App {
             let _ = window.set_cursor_grab(CursorGrabMode::None);
             window.set_cursor_visible(true);
             self.input.mouse_captured = false;
-            self.input.look_left_held = false;
-            self.input.look_right_held = false;
         }
     }
 
@@ -205,18 +197,11 @@ impl ApplicationHandler for App {
                 }
             }
             MouseInput { state, button, .. } => {
-                match button {
-                    MouseButton::Left => {
-                        self.input.look_left_held = state == ElementState::Pressed;
-                    }
-                    MouseButton::Right => {
-                        self.input.look_right_held = state == ElementState::Pressed;
-                    }
-                    _ => {}
-                }
-                if button == MouseButton::Left || button == MouseButton::Right {
-                    let capture = self.input.look_left_held || self.input.look_right_held;
-                    self.set_cursor_capture(capture);
+                if matches!(button, MouseButton::Left | MouseButton::Right)
+                    && state == ElementState::Pressed
+                    && !self.input.mouse_captured
+                {
+                    self.set_cursor_capture(true);
                 }
             }
             _ => {}
