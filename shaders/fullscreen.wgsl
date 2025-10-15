@@ -26,5 +26,7 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VsOut {
 
 @fragment
 fn fs_main(input: VsOut) -> @location(0) vec4<f32> {
-  return textureSample(src_tex, src_smp, input.uv);
+  // Flip Y so the storage image's top-left origin displays correctly.
+  let uv = vec2<f32>(input.uv.x, 1.0 - input.uv.y);
+  return textureSample(src_tex, src_smp, uv);
 }
