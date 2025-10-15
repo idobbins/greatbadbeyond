@@ -1,31 +1,18 @@
 use std::sync::Arc;
 
-use anyhow::anyhow;
-use vulkano::{
-    Validated, VulkanError, VulkanLibrary,
-    command_buffer::{
-        AutoCommandBufferBuilder, BlitImageInfo, CommandBufferUsage, CopyImageInfo,
-        allocator::{StandardCommandBufferAllocator, StandardCommandBufferAllocatorCreateInfo},
-    },
-    descriptor_set::{
-        DescriptorSet, WriteDescriptorSet,
-        allocator::{StandardDescriptorSetAllocator, StandardDescriptorSetAllocatorCreateInfo},
-    },
-    device::{
-        Device, DeviceCreateInfo, DeviceExtensions, Queue, QueueCreateInfo, QueueFlags,
-        physical::PhysicalDevice,
-    },
-    format::Format,
-    image::{Image, ImageCreateInfo, ImageLayout, ImageType, ImageUsage, view::ImageView},
-    instance::{Instance, InstanceCreateFlags, InstanceCreateInfo},
-    memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator},
-    pipeline::{
-        Pipeline, PipelineBindPoint, PipelineShaderStageCreateInfo,
-        compute::{ComputePipeline, ComputePipelineCreateInfo},
-        layout::{PipelineDescriptorSetLayoutCreateInfo, PipelineLayout},
-    },
-    swapchain::{self, PresentMode, Surface, Swapchain, SwapchainCreateInfo, SwapchainPresentInfo},
-    sync::{self, GpuFuture},
+use anyhow::{bail, Result};
+use wgpu::{
+    Backends, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
+    BindGroupLayoutEntry, BindingResource, BindingType, Color, ColorTargetState, ColorWrites,
+    CommandEncoderDescriptor, ComputePassDescriptor, ComputePipeline, ComputePipelineDescriptor,
+    Device, DeviceDescriptor, ExperimentalFeatures, Extent3d, Features, FragmentState, Instance,
+    InstanceDescriptor, Limits, LoadOp, MemoryHints, MultisampleState, Operations,
+    PipelineCompilationOptions, PipelineLayoutDescriptor, PowerPreference, PresentMode,
+    PrimitiveState, Queue, RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline,
+    RenderPipelineDescriptor, RequestAdapterOptions, Sampler, SamplerBindingType, SamplerDescriptor,
+    ShaderStages, StoreOp, Surface, SurfaceConfiguration, SurfaceError, Texture, TextureDescriptor,
+    TextureDimension, TextureFormat, TextureSampleType, TextureUsages, TextureView,
+    TextureViewDescriptor, TextureViewDimension, Trace, VertexState,
 };
 use winit::{
     application::ApplicationHandler,
@@ -34,224 +21,332 @@ use winit::{
     window::{Window, WindowId},
 };
 
-type AnyError = anyhow::Error;
-type Result<T = ()> = std::result::Result<T, AnyError>;
-
 #[inline]
 fn ceil_div(x: u32, d: u32) -> u32 {
     (x + d - 1) / d
 }
 
-const STORAGE_FORMAT: Format = Format::R8G8B8A8_UNORM;
-
-mod gradient_shader {
-    vulkano_shaders::shader! {
-        ty: "compute",
-        path: "shaders/gradient.comp",
-    }
-}
-
 struct Gfx {
-    _instance: Arc<Instance>,
-    device: Arc<Device>,
-    queue: Arc<Queue>,
-
     window: Arc<Window>,
-    _surface: Arc<Surface>,
-    swapchain: Arc<Swapchain>,
-    swapchain_images: Vec<Arc<Image>>,
-    swapchain_format: Format,
+    _instance: Instance,
+    surface: Surface<'static>,
+    device: Device,
+    queue: Queue,
+    surface_cfg: SurfaceConfiguration,
+    _surface_format: TextureFormat,
 
-    mem_alloc: Arc<StandardMemoryAllocator>,
-    set_alloc: Arc<StandardDescriptorSetAllocator>,
-    cmd_alloc: Arc<StandardCommandBufferAllocator>,
+    _storage_tex: Texture,
+    storage_view: TextureView,
 
-    pipeline: Arc<ComputePipeline>,
-    storage_image: Arc<Image>,
-    storage_set: Arc<DescriptorSet>,
-
-    recreate_swapchain: bool,
+    compute_pip: ComputePipeline,
+    compute_bgl: BindGroupLayout,
+    compute_bg: BindGroup,
+    render_pip: RenderPipeline,
+    render_bgl: BindGroupLayout,
+    render_bg: BindGroup,
+    sampler: Sampler,
 }
 
 impl Gfx {
     fn new(event_loop: &ActiveEventLoop) -> Result<Self> {
-        let library = VulkanLibrary::new()?;
-        let instance_ext = Surface::required_extensions(event_loop)?;
-        // On portability stacks, you must enumerate non-conformant devices (MoltenVK guidance).
-        let instance = Instance::new(
-            library.clone(),
-            InstanceCreateInfo {
-                enabled_extensions: instance_ext,
-                enabled_layers: {
-                    let mut layers = Vec::<String>::new();
-                    if cfg!(debug_assertions) {
-                        if library
-                            .layer_properties()?
-                            .any(|l| l.name() == "VK_LAYER_KHRONOS_validation")
-                        {
-                            layers.push("VK_LAYER_KHRONOS_validation".into());
-                        }
-                    }
-                    layers
-                },
-                flags: InstanceCreateFlags::ENUMERATE_PORTABILITY,
-                ..Default::default()
-            },
-        )?;
-
         let window = Arc::new(
             event_loop.create_window(Window::default_attributes().with_title("callandor"))?,
         );
-        let surface = Surface::from_window(instance.clone(), window.clone())?;
 
-        let (physical, queue_family_index) = pick_device(&instance, &surface)?;
-        let mut dev_ext = DeviceExtensions {
-            khr_swapchain: true,
-            ..DeviceExtensions::empty()
+        let instance = Instance::new(&InstanceDescriptor {
+            backends: Backends::all(),
+            ..Default::default()
+        });
+        let surface = instance.create_surface(window.clone())?;
+
+        let adapter = pollster::block_on(instance.request_adapter(&RequestAdapterOptions {
+            power_preference: PowerPreference::HighPerformance,
+            force_fallback_adapter: false,
+            compatible_surface: Some(&surface),
+        }))
+        .expect("No suitable GPU adapters found");
+        let device_desc = DeviceDescriptor {
+            label: None,
+            required_features: Features::empty(),
+            required_limits: Limits::default(),
+            experimental_features: ExperimentalFeatures::disabled(),
+            memory_hints: MemoryHints::Performance,
+            trace: Trace::default(),
         };
-        let supported = physical.supported_extensions();
-        if supported.khr_portability_subset {
-            dev_ext.khr_portability_subset = true;
-        }
-        let (device, mut queues) = Device::new(
-            physical.clone(),
-            DeviceCreateInfo {
-                enabled_extensions: dev_ext,
-                queue_create_infos: vec![QueueCreateInfo {
-                    queue_family_index,
-                    ..Default::default()
-                }],
-                ..Default::default()
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&device_desc))?;
+
+        let size = window.inner_size();
+        let caps = surface.get_capabilities(&adapter);
+        let surface_format = caps
+            .formats
+            .iter()
+            .copied()
+            .find(|f| {
+                matches!(
+                    f,
+                    TextureFormat::Bgra8UnormSrgb | TextureFormat::Rgba8UnormSrgb
+                )
+            })
+            .unwrap_or(caps.formats[0]);
+        let surface_cfg = SurfaceConfiguration {
+            usage: TextureUsages::RENDER_ATTACHMENT,
+            format: surface_format,
+            width: size.width.max(1),
+            height: size.height.max(1),
+            present_mode: PresentMode::Fifo,
+            alpha_mode: caps.alpha_modes[0],
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+        };
+        surface.configure(&device, &surface_cfg);
+
+        let compute_shader =
+            device.create_shader_module(wgpu::include_wgsl!("../shaders/compute.wgsl"));
+        let render_shader =
+            device.create_shader_module(wgpu::include_wgsl!("../shaders/fullscreen.wgsl"));
+
+        let (storage_tex, storage_view) =
+            Self::make_storage(&device, surface_cfg.width, surface_cfg.height);
+
+        let compute_bgl = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("compute layout"),
+            entries: &[BindGroupLayoutEntry {
+                binding: 0,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::StorageTexture {
+                    access: wgpu::StorageTextureAccess::WriteOnly,
+                    format: TextureFormat::Rgba8Unorm,
+                    view_dimension: TextureViewDimension::D2,
+                },
+                count: None,
+            }],
+        });
+        let compute_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+            label: Some("compute pipeline layout"),
+            bind_group_layouts: &[&compute_bgl],
+            push_constant_ranges: &[],
+        });
+        let compute_pip = device.create_compute_pipeline(&ComputePipelineDescriptor {
+            label: Some("compute pipeline"),
+            layout: Some(&compute_layout),
+            module: &compute_shader,
+            entry_point: Some("cs_main"),
+            compilation_options: PipelineCompilationOptions::default(),
+            cache: None,
+        });
+        let compute_bg = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("compute bind group"),
+            layout: &compute_bgl,
+            entries: &[BindGroupEntry {
+                binding: 0,
+                resource: BindingResource::TextureView(&storage_view),
+            }],
+        });
+
+        let render_bgl = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("render layout"),
+            entries: &[
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: TextureViewDimension::D2,
+                        sample_type: TextureSampleType::Float { filterable: true },
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Sampler(SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let sampler = device.create_sampler(&SamplerDescriptor {
+            label: Some("render sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            ..Default::default()
+        });
+        let render_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+            label: Some("render pipeline layout"),
+            bind_group_layouts: &[&render_bgl],
+            push_constant_ranges: &[],
+        });
+        let render_pip = device.create_render_pipeline(&RenderPipelineDescriptor {
+            label: Some("render pipeline"),
+            layout: Some(&render_layout),
+            vertex: VertexState {
+                module: &render_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
             },
-        )?;
-        let queue = queues.next().unwrap();
-
-        let mem_alloc = Arc::new(StandardMemoryAllocator::new_default(device.clone()));
-        let set_alloc = Arc::new(StandardDescriptorSetAllocator::new(
-            device.clone(),
-            StandardDescriptorSetAllocatorCreateInfo::default(),
-        ));
-        let cmd_alloc = Arc::new(StandardCommandBufferAllocator::new(
-            device.clone(),
-            StandardCommandBufferAllocatorCreateInfo::default(),
-        ));
-
-        let (swapchain, swapchain_images, swapchain_format) =
-            create_swapchain(&physical, &device, &surface, &window, queue_family_index)?;
-
-        let pipeline = create_compute_pipeline(device.clone())?;
-
-        let (storage_image, storage_set) =
-            create_storage_bindings(&mem_alloc, &set_alloc, &pipeline, swapchain.image_extent())?;
+            fragment: Some(FragmentState {
+                module: &render_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(ColorTargetState {
+                    format: surface_format,
+                    blend: None,
+                    write_mask: ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+        let render_bg = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("render bind group"),
+            layout: &render_bgl,
+            entries: &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: BindingResource::TextureView(&storage_view),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: BindingResource::Sampler(&sampler),
+                },
+            ],
+        });
 
         Ok(Self {
+            window,
             _instance: instance,
+            surface,
             device,
             queue,
-            window,
-            _surface: surface,
-            swapchain,
-            swapchain_images,
-            swapchain_format,
-            mem_alloc,
-            set_alloc,
-            cmd_alloc,
-            pipeline,
-            storage_image,
-            storage_set,
-            recreate_swapchain: false,
+            surface_cfg,
+            _surface_format: surface_format,
+            _storage_tex: storage_tex,
+            storage_view,
+            compute_pip,
+            compute_bgl,
+            compute_bg,
+            render_pip,
+            render_bgl,
+            render_bg,
+            sampler,
         })
     }
 
-    fn ensure_swapchain_current(&mut self) -> Result {
-        if !self.recreate_swapchain {
-            return Ok(());
-        }
-        self.recreate_swapchain = false;
-
-        let extent: [u32; 2] = self.window.inner_size().into();
-
-        let (swapchain, images) = self.swapchain.recreate(SwapchainCreateInfo {
-            image_extent: extent,
-            ..self.swapchain.create_info()
-        })?;
-
-        self.swapchain = swapchain;
-        self.swapchain_images = images;
-
-        let (img, set) =
-            create_storage_bindings(&self.mem_alloc, &self.set_alloc, &self.pipeline, extent)?;
-        self.storage_image = img;
-        self.storage_set = set;
-
-        Ok(())
+    fn make_storage(device: &Device, width: u32, height: u32) -> (Texture, TextureView) {
+        let tex = device.create_texture(&TextureDescriptor {
+            label: Some("storage texture"),
+            size: Extent3d {
+                width: width.max(1),
+                height: height.max(1),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::Rgba8Unorm,
+            usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = tex.create_view(&TextureViewDescriptor::default());
+        (tex, view)
     }
 
-    fn render(&mut self) -> Result {
-        self.ensure_swapchain_current()?;
-
-        let (image_i, suboptimal, acquire) =
-            match swapchain::acquire_next_image(self.swapchain.clone(), None)
-                .map_err(Validated::unwrap)
-            {
-                Ok(v) => v,
-                Err(VulkanError::OutOfDate) => {
-                    self.recreate_swapchain = true;
-                    return Ok(());
-                }
-                Err(e) => return Err(anyhow!("acquire_next_image: {e}")),
-            };
-        if suboptimal {
-            self.recreate_swapchain = true;
+    fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
+        if new_size.width == 0 || new_size.height == 0 {
+            return;
         }
+        self.surface_cfg.width = new_size.width;
+        self.surface_cfg.height = new_size.height;
+        self.surface.configure(&self.device, &self.surface_cfg);
 
-        let [w, h, _] = self.storage_image.extent();
-        let workgroups = [ceil_div(w, 16), ceil_div(h, 16), 1];
+        let (tex, view) = Self::make_storage(&self.device, new_size.width, new_size.height);
+        self._storage_tex = tex;
+        self.storage_view = view;
 
-        let mut builder = AutoCommandBufferBuilder::primary(
-            self.cmd_alloc.clone(),
-            self.queue.queue_family_index(),
-            CommandBufferUsage::OneTimeSubmit,
-        )?;
+        self.compute_bg = self.device.create_bind_group(&BindGroupDescriptor {
+            label: Some("compute bind group"),
+            layout: &self.compute_bgl,
+            entries: &[BindGroupEntry {
+                binding: 0,
+                resource: BindingResource::TextureView(&self.storage_view),
+            }],
+        });
+        self.render_bg = self.device.create_bind_group(&BindGroupDescriptor {
+            label: Some("render bind group"),
+            layout: &self.render_bgl,
+            entries: &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: BindingResource::TextureView(&self.storage_view),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: BindingResource::Sampler(&self.sampler),
+                },
+            ],
+        });
+    }
 
-        builder
-            .bind_pipeline_compute(self.pipeline.clone())?
-            .bind_descriptor_sets(
-                PipelineBindPoint::Compute,
-                self.pipeline.layout().clone(),
-                0,
-                self.storage_set.clone(),
-            )?;
-        unsafe { builder.dispatch(workgroups)?; }
-
-        let dst = self.swapchain_images[image_i as usize].clone();
-        if self.storage_image.format() == self.swapchain_format {
-            builder.copy_image(CopyImageInfo::images(self.storage_image.clone(), dst))?;
-        } else {
-            let mut blit = BlitImageInfo::images(self.storage_image.clone(), dst);
-            blit.src_image_layout = ImageLayout::General;
-            builder.blit_image(blit)?;
-        }
-
-        let cb = builder.build()?;
-
-        let presented = sync::now(self.device.clone())
-            .join(acquire)
-            .then_execute(self.queue.clone(), cb)?
-            .then_swapchain_present(
-                self.queue.clone(),
-                SwapchainPresentInfo::swapchain_image_index(self.swapchain.clone(), image_i),
-            )
-            .then_signal_fence_and_flush();
-
-        match presented.map_err(Validated::unwrap) {
-            Ok(f) => {
-                let _ = f.wait(None);
+    fn render(&mut self) -> Result<()> {
+        let output = match self.surface.get_current_texture() {
+            Ok(frame) => frame,
+            Err(SurfaceError::Outdated | SurfaceError::Lost) => {
+                self.surface.configure(&self.device, &self.surface_cfg);
+                return Ok(());
             }
-            Err(VulkanError::OutOfDate) => self.recreate_swapchain = true,
-            Err(e) => eprintln!("present error: {e}"),
+            Err(SurfaceError::OutOfMemory) => bail!("surface out of memory"),
+            Err(SurfaceError::Other) => bail!("surface acquisition failed"),
+            Err(SurfaceError::Timeout) => return Ok(()),
+        };
+        let surface_view = output
+            .texture
+            .create_view(&TextureViewDescriptor::default());
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&CommandEncoderDescriptor { label: Some("encoder") });
+
+        {
+            let [w, h] = [self.surface_cfg.width, self.surface_cfg.height];
+            let gx = ceil_div(w, 16);
+            let gy = ceil_div(h, 16);
+            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                label: Some("compute pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.compute_pip);
+            pass.set_bind_group(0, &self.compute_bg, &[]);
+            pass.dispatch_workgroups(gx, gy, 1);
         }
 
+        {
+            let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
+                label: Some("render pass"),
+                color_attachments: &[Some(RenderPassColorAttachment {
+                    view: &surface_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: Operations {
+                        load: LoadOp::Clear(Color::BLACK),
+                        store: StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.render_pip);
+            pass.set_bind_group(0, &self.render_bg, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        self.queue.submit([encoder.finish()]);
+        output.present();
         Ok(())
     }
 }
@@ -269,7 +364,7 @@ impl App {
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.gfx.is_none() {
-            self.gfx = Some(Gfx::new(event_loop).unwrap());
+            self.gfx = Some(Gfx::new(event_loop).expect("failed to init gfx"));
         }
         event_loop.set_control_flow(ControlFlow::Poll);
     }
@@ -291,7 +386,7 @@ impl ApplicationHandler for App {
         };
         match event {
             WindowEvent::CloseRequested => std::process::exit(0),
-            WindowEvent::Resized(_) => gfx.recreate_swapchain = true,
+            WindowEvent::Resized(size) => gfx.resize(size),
             WindowEvent::RedrawRequested => {
                 if let Err(e) = gfx.render() {
                     eprintln!("render error: {e}");
@@ -302,131 +397,9 @@ impl ApplicationHandler for App {
     }
 }
 
-fn main() -> Result {
+fn main() -> Result<()> {
     let event_loop = EventLoop::new()?;
     let mut app = App::new();
     event_loop.run_app(&mut app)?;
     Ok(())
-}
-
-fn pick_device(instance: &Arc<Instance>, surface: &Arc<Surface>) -> Result<(Arc<PhysicalDevice>, u32)> {
-    for physical in instance.enumerate_physical_devices()? {
-        if let Some(i) = first_usable_queue_family(&physical, surface)? {
-            return Ok((physical, i));
-        }
-    }
-    Err(anyhow!("no suitable physical device"))
-}
-
-fn first_usable_queue_family(p: &PhysicalDevice, surface: &Arc<Surface>) -> Result<Option<u32>> {
-    for (idx, fam) in p.queue_family_properties().iter().enumerate() {
-        let i = idx as u32;
-        if !fam.queue_flags.contains(QueueFlags::GRAPHICS | QueueFlags::COMPUTE) {
-            continue;
-        }
-        if !p.surface_support(i, surface)? {
-            continue;
-        }
-        if p.surface_formats(surface, Default::default())?.is_empty() {
-            continue;
-        }
-        if p.surface_present_modes(surface, Default::default())?.is_empty() {
-            continue;
-        }
-        return Ok(Some(i));
-    }
-    Ok(None)
-}
-
-fn create_swapchain(
-    physical: &Arc<PhysicalDevice>,
-    device: &Arc<Device>,
-    surface: &Arc<Surface>,
-    window: &Arc<Window>,
-    _queue_family_index: u32,
-) -> Result<(Arc<Swapchain>, Vec<Arc<Image>>, Format)> {
-    let formats = physical.surface_formats(surface, Default::default())?;
-    let (format, _colorspace) = formats
-        .iter()
-        .copied()
-        .find(|(f, _)| {
-            matches!(
-                f,
-                Format::B8G8R8A8_UNORM
-                    | Format::B8G8R8A8_SRGB
-                    | Format::R8G8B8A8_UNORM
-                    | Format::R8G8B8A8_SRGB
-            )
-        })
-        .unwrap_or(formats[0]);
-
-    let image_extent: [u32; 2] = window.inner_size().into();
-
-    let (swapchain, images) = Swapchain::new(
-        device.clone(),
-        surface.clone(),
-        SwapchainCreateInfo {
-            min_image_count: 3,
-            image_format: format,
-            image_extent,
-            image_usage: ImageUsage::TRANSFER_DST,
-            present_mode: PresentMode::Fifo,
-            ..Default::default()
-        },
-    )?;
-
-    Ok((swapchain, images, format))
-}
-
-fn create_compute_pipeline(device: Arc<Device>) -> Result<Arc<ComputePipeline>> {
-    let shader = gradient_shader::load(device.clone())?;
-
-    let cs_entry = shader.entry_point("main").unwrap();
-    let stage = PipelineShaderStageCreateInfo::new(cs_entry);
-    let layout = PipelineLayout::new(
-        device.clone(),
-        PipelineDescriptorSetLayoutCreateInfo::from_stages([&stage])
-            .into_pipeline_layout_create_info(device.clone())?,
-    )?;
-
-    Ok(ComputePipeline::new(
-        device,
-        None,
-        ComputePipelineCreateInfo::stage_layout(stage, layout),
-    )?)
-}
-
-fn create_storage_bindings(
-    mem_alloc: &Arc<StandardMemoryAllocator>,
-    set_alloc: &Arc<StandardDescriptorSetAllocator>,
-    pipeline: &Arc<ComputePipeline>,
-    extent: [u32; 2],
-) -> Result<(Arc<Image>, Arc<DescriptorSet>)> {
-    let storage_image = Image::new(
-        mem_alloc.clone(),
-        ImageCreateInfo {
-            image_type: ImageType::Dim2d,
-            format: STORAGE_FORMAT,
-            extent: [extent[0], extent[1], 1],
-            usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC,
-            ..Default::default()
-        },
-        AllocationCreateInfo {
-            memory_type_filter: MemoryTypeFilter::PREFER_DEVICE,
-            ..Default::default()
-        },
-    )?;
-
-    let layout0 = pipeline.layout().set_layouts().get(0).unwrap().clone();
-    let set = DescriptorSet::new(
-        set_alloc.clone(),
-        layout0,
-        [WriteDescriptorSet::image_view(
-            0,
-            ImageView::new_default(storage_image.clone())?,
-        )],
-        [],
-    )?;
-
-    Ok((storage_image, set))
 }
