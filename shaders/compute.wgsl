@@ -16,6 +16,12 @@ struct Params {
   grid_dims: vec3<u32>,     grid_max_per_cell: u32,
 };
 
+// --- Materials ---
+const MAT_DIFFUSE: f32 = 0.0;
+const MAT_METAL:   f32 = 1.0;
+const MAT_GLASS:   f32 = 2.0;
+const IOR_GLASS:   f32 = 1.5;
+
 @group(0) @binding(0)
 var out_img: texture_storage_2d<rgba8unorm, write>;
 
@@ -37,6 +43,15 @@ var<storage, read_write> grid_list: array<u32>;
 
 fn hash1(x: f32) -> f32 {
   return fract(sin(x * 12.9898) * 43758.5453);
+}
+
+fn reflect_vec(i: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
+  return i - 2.0 * dot(n, i) * n;
+}
+
+fn fresnel_schlick(cosTheta: f32, F0: f32) -> f32 {
+  let inv = 1.0 - cosTheta;
+  return F0 + (1.0 - F0) * inv * inv * inv * inv * inv;
 }
 
 fn intersect_sphere(ro: vec3<f32>, rd: vec3<f32>, c: vec3<f32>, r: f32) -> f32 {
@@ -196,6 +211,31 @@ fn shade_at(p: vec3<f32>, n: vec3<f32>, base: vec3<f32>, self_idx: u32) -> vec3<
   return base * params.ambient + base * params.light_color * ndotl * (1.0 - shadow);
 }
 
+// Matte-only trace (used for specular/refraction bounce). Ignores secondary materials.
+fn trace_matte(ro: vec3<f32>, rd: vec3<f32>, skip_idx: u32) -> vec3<f32> {
+  let t_plane = intersect_plane_y(ro, rd, params.ground_y);
+  let hit = traverse_grid_first_hit(ro, rd, t_plane, skip_idx);
+  if (hit.idx != 0xffffffffu) {
+    let s = spheres[hit.idx];
+    let p_hit = ro + rd * hit.t;
+    let n = normalize(p_hit - s.xyz);
+    let base = albedos[hit.idx].xyz;
+    return shade_at(p_hit, n, base, hit.idx);
+  }
+  if (t_plane < 1e30) {
+    let p_hit = ro + rd * t_plane;
+    let n = vec3<f32>(0.0, 1.0, 0.0);
+    let scale = 0.5;
+    let checker = (i32(floor(p_hit.x * scale) + floor(p_hit.z * scale)) & 1);
+    let base = select(vec3<f32>(0.92, 0.92, 0.92), vec3<f32>(0.15, 0.15, 0.15), checker != 0);
+    return shade_at(p_hit, n, base, 0xffffffffu);
+  }
+  let t = 0.5 * (rd.y + 1.0);
+  let c0 = vec3<f32>(0.60, 0.75, 1.00);
+  let c1 = vec3<f32>(0.05, 0.10, 0.20);
+  return c0 + t * (c1 - c0);
+}
+
 // --- Entry #0: clear per-cell counts ---
 @compute @workgroup_size(256, 1, 1)
 fn grid_clear_main(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -228,12 +268,36 @@ fn gen_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   spheres[i] = vec4<f32>(fx, cy, fz, r);
 
-  let c = vec3<f32>(
-    0.2 + 0.8 * hash1(f32(i) * 1.23),
-    0.2 + 0.8 * hash1(f32(i) * 2.34),
-    0.2 + 0.8 * hash1(f32(i) * 4.56)
-  );
-  albedos[i] = vec4<f32>(c, 1.0);
+  // Material selection (15% metal, 10% glass, rest diffuse)
+  let msel = fract(hash1(f32(i) * 5.67) + hash1(f32(i) * 7.89 + 3.14));
+  var mtype: f32 = MAT_DIFFUSE;
+  if (msel < 0.15) {
+    mtype = MAT_METAL;
+  } else if (msel < 0.25) {
+    mtype = MAT_GLASS;
+  }
+
+  var c = vec3<f32>(0.0, 0.0, 0.0);
+  if (mtype == MAT_METAL) {
+    c = vec3<f32>(
+      0.6 + 0.4 * hash1(f32(i) * 1.23),
+      0.6 + 0.4 * hash1(f32(i) * 2.34),
+      0.6 + 0.4 * hash1(f32(i) * 4.56)
+    );
+  } else if (mtype == MAT_GLASS) {
+    c = vec3<f32>(
+      0.15 + 0.3 * hash1(f32(i) * 1.23),
+      0.15 + 0.3 * hash1(f32(i) * 2.34),
+      0.30 + 0.4 * hash1(f32(i) * 4.56)
+    );
+  } else {
+    c = vec3<f32>(
+      0.2 + 0.8 * hash1(f32(i) * 1.23),
+      0.2 + 0.8 * hash1(f32(i) * 2.34),
+      0.2 + 0.8 * hash1(f32(i) * 4.56)
+    );
+  }
+  albedos[i] = vec4<f32>(c, mtype);
 }
 
 // --- Entry #2: build uniform grid (one pass, atomics) ---
@@ -288,7 +352,42 @@ fn trace_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let p_hit = ro + rd * hit.t;
     let n = normalize(p_hit - s.xyz);
     let base = albedos[hit.idx].xyz;
-    color = shade_at(p_hit, n, base, hit.idx);
+    let m = albedos[hit.idx].w;
+
+    if (m == MAT_DIFFUSE) {
+      color = shade_at(p_hit, n, base, hit.idx);
+    } else if (m == MAT_METAL) {
+      let R = normalize(reflect_vec(rd, n));
+      let rc = trace_matte(p_hit + R * 1e-3, R, hit.idx);
+      color = base * rc;
+    } else {
+      var N = n;
+      var etai = 1.0;
+      var etat = IOR_GLASS;
+      var cosi = dot(rd, N);
+      if (cosi > 0.0) {
+        N = -N;
+        let tmp = etai;
+        etai = etat;
+        etat = tmp;
+        cosi = dot(rd, N);
+      }
+      let cosTheta = -cosi;
+      let eta = etai / etat;
+      let F0 = ((etat - etai) / (etat + etai));
+      let Rf = fresnel_schlick(cosTheta, F0 * F0);
+
+      let Rdir = normalize(reflect_vec(rd, N));
+      let Rcol = trace_matte(p_hit + Rdir * 1e-3, Rdir, hit.idx);
+
+      var Tcol = vec3<f32>(0.0, 0.0, 0.0);
+      let k = 1.0 - eta * eta * (1.0 - cosTheta * cosTheta);
+      if (k > 0.0) {
+        let Tdir = normalize(eta * rd + (eta * cosTheta - sqrt(k)) * N);
+        Tcol = trace_matte(p_hit + Tdir * 1e-3, Tdir, hit.idx);
+      }
+      color = Rf * Rcol + (1.0 - Rf) * (base * Tcol);
+    }
   } else if (t_plane < 1e30) {
     let p_hit = ro + rd * t_plane;
     let n = vec3<f32>(0.0, 1.0, 0.0);

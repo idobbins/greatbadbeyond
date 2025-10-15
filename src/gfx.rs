@@ -28,7 +28,7 @@ fn ceil_div(x: u32, d: u32) -> u32 {
     (x + d - 1) / d
 }
 
-const SPHERE_COUNT: u32 = 1_000_000;
+const SPHERE_COUNT: u32 = 1_000;
 const MAX_R: f32 = 0.5;
 const GRID_CELL_SIZE: f32 = 1.0;
 const GRID_MAX_PER_CELL: u32 = 8;
