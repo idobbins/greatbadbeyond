@@ -7,7 +7,7 @@
 
 int main()
 {
-    VkInstance instance = create_instance();
+    VkInstance instance = createInstance();
     defer { vkDestroyInstance(instance, nullptr); };
 
 
