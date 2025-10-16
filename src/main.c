@@ -27,6 +27,15 @@ static const char *const VULKAN_VALIDATION_LAYERS[] = {
 #define VULKAN_MAX_ENUMERATED_EXTENSIONS 256
 #define VULKAN_MAX_ENUMERATED_LAYERS 64
 
+static const char *const VULKAN_REQUIRED_DEVICE_EXTENSIONS[] = {
+    VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+};
+
+#define VULKAN_MAX_PHYSICAL_DEVICES 16
+#define VULKAN_MAX_QUEUE_FAMILIES 16
+#define VULKAN_MAX_DEVICE_EXTENSIONS 256
+#define VULKAN_INVALID_QUEUE_FAMILY UINT32_MAX
+
 static const char *const APPLICATION_TITLE = "Callandor";
 
 static inline void Assert(bool condition, const char *message) {
@@ -68,12 +77,23 @@ typedef struct GlobalData {
         VkInstance instance;
         VkDebugUtilsMessengerEXT debugMessenger;
         VkSurfaceKHR surface;
+        VkPhysicalDevice physicalDevice;
+        VkDevice device;
+        VkQueue graphicsQueue;
+        VkQueue presentQueue;
+        uint32_t graphicsQueueFamily;
+        uint32_t presentQueueFamily;
+
         bool instanceReady;
         bool debugMessengerReady;
         bool surfaceReady;
+        bool physicalDeviceReady;
+        bool deviceReady;
+        bool queuesReady;
 
         bool ready;
         bool debugEnabled;
+        bool validationLayersEnabled;
 
     } Vulkan;
 } GlobalData;
@@ -199,6 +219,225 @@ static void PushUniqueString(const char **list, uint32_t *count, uint32_t capaci
     Assert(*count < capacity, "Too many Vulkan instance entries requested");
     list[(*count)++] = value;
 }
+
+static void PushUniqueUint32(uint32_t *list, uint32_t *count, uint32_t capacity, uint32_t value)
+{
+    for (uint32_t index = 0; index < *count; index++)
+    {
+        if (list[index] == value)
+        {
+            return;
+        }
+    }
+
+    Assert(*count < capacity, "Too many Vulkan queue families requested");
+    list[(*count)++] = value;
+}
+
+static uint32_t VulkanEnumeratePhysicalDevices(VkInstance instance, VkPhysicalDevice *buffer, uint32_t capacity)
+{
+    uint32_t count = 0;
+    VkResult result = vkEnumeratePhysicalDevices(instance, &count, NULL);
+    Assert(result == VK_SUCCESS, "Failed to query Vulkan physical devices");
+    Assert(count > 0, "No Vulkan physical devices available");
+    Assert(count <= capacity, "Too many Vulkan physical devices for buffer");
+
+    result = vkEnumeratePhysicalDevices(instance, &count, buffer);
+    Assert(result == VK_SUCCESS, "Failed to enumerate Vulkan physical devices");
+
+    return count;
+}
+
+static uint32_t VulkanEnumerateDeviceExtensions(VkPhysicalDevice device, VkExtensionProperties *buffer, uint32_t capacity)
+{
+    uint32_t count = 0;
+    VkResult result = vkEnumerateDeviceExtensionProperties(device, NULL, &count, NULL);
+    Assert((result == VK_SUCCESS) || (result == VK_INCOMPLETE), "Failed to query Vulkan device extensions");
+    Assert(count <= capacity, "Too many Vulkan device extensions for buffer");
+
+    result = vkEnumerateDeviceExtensionProperties(device, NULL, &count, buffer);
+    Assert(result == VK_SUCCESS, "Failed to enumerate Vulkan device extensions");
+
+    return count;
+}
+
+static uint32_t VulkanGetQueueFamilyProperties(VkPhysicalDevice device, VkQueueFamilyProperties *buffer, uint32_t capacity)
+{
+    uint32_t count = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(device, &count, NULL);
+    Assert(count > 0, "Vulkan physical device reports zero queue families");
+    Assert(count <= capacity, "Too many Vulkan queue families for buffer");
+
+    vkGetPhysicalDeviceQueueFamilyProperties(device, &count, buffer);
+    return count;
+}
+
+static bool VulkanCheckDeviceExtensionSupport(VkPhysicalDevice device)
+{
+    VkExtensionProperties extensions[VULKAN_MAX_DEVICE_EXTENSIONS];
+    const uint32_t extensionCount = VulkanEnumerateDeviceExtensions(device, extensions, ARRAY_SIZE(extensions));
+
+    for (uint32_t requiredIndex = 0; requiredIndex < ARRAY_SIZE(VULKAN_REQUIRED_DEVICE_EXTENSIONS); requiredIndex++)
+    {
+        const char *name = VULKAN_REQUIRED_DEVICE_EXTENSIONS[requiredIndex];
+        bool found = false;
+        for (uint32_t availableIndex = 0; availableIndex < extensionCount; availableIndex++)
+        {
+            if (strcmp(extensions[availableIndex].extensionName, name) == 0)
+            {
+                found = true;
+                break;
+            }
+        }
+
+        if (!found)
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static bool VulkanFindQueueFamilies(VkPhysicalDevice device, VkSurfaceKHR surface, uint32_t *graphicsFamily, uint32_t *presentFamily)
+{
+    VkQueueFamilyProperties queueFamilies[VULKAN_MAX_QUEUE_FAMILIES];
+    const uint32_t queueFamilyCount = VulkanGetQueueFamilyProperties(device, queueFamilies, ARRAY_SIZE(queueFamilies));
+
+    bool graphicsFound = false;
+    bool presentFound = false;
+
+    for (uint32_t index = 0; index < queueFamilyCount; index++)
+    {
+        const VkQueueFamilyProperties *family = &queueFamilies[index];
+
+        if (!graphicsFound && (family->queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0 && family->queueCount > 0)
+        {
+            *graphicsFamily = index;
+            graphicsFound = true;
+        }
+
+        if (!presentFound && family->queueCount > 0)
+        {
+            VkBool32 supported = VK_FALSE;
+            VkResult presentResult = vkGetPhysicalDeviceSurfaceSupportKHR(device, index, surface, &supported);
+            Assert(presentResult == VK_SUCCESS, "Failed to query Vulkan surface support");
+            if (supported == VK_TRUE)
+            {
+                *presentFamily = index;
+                presentFound = true;
+            }
+        }
+
+        if (graphicsFound && presentFound)
+        {
+            return true;
+        }
+    }
+
+    return (graphicsFound && presentFound);
+}
+
+static void VulkanSelectPhysicalDevice(void)
+{
+    if (GLOBAL.Vulkan.physicalDeviceReady)
+    {
+        return;
+    }
+
+    VkPhysicalDevice devices[VULKAN_MAX_PHYSICAL_DEVICES];
+    const uint32_t deviceCount = VulkanEnumeratePhysicalDevices(GLOBAL.Vulkan.instance, devices, ARRAY_SIZE(devices));
+
+    for (uint32_t index = 0; index < deviceCount; index++)
+    {
+        VkPhysicalDevice candidate = devices[index];
+        if (!VulkanCheckDeviceExtensionSupport(candidate))
+        {
+            continue;
+        }
+
+        uint32_t graphicsFamily = VULKAN_INVALID_QUEUE_FAMILY;
+        uint32_t presentFamily = VULKAN_INVALID_QUEUE_FAMILY;
+        if (!VulkanFindQueueFamilies(candidate, GLOBAL.Vulkan.surface, &graphicsFamily, &presentFamily))
+        {
+            continue;
+        }
+
+        GLOBAL.Vulkan.physicalDevice = candidate;
+        GLOBAL.Vulkan.graphicsQueueFamily = graphicsFamily;
+        GLOBAL.Vulkan.presentQueueFamily = presentFamily;
+        GLOBAL.Vulkan.physicalDeviceReady = true;
+
+        VkPhysicalDeviceProperties properties;
+        vkGetPhysicalDeviceProperties(candidate, &properties);
+        fprintf(stdout, "info : Selected Vulkan physical device: %s\n", properties.deviceName);
+        return;
+    }
+
+    Assert(false, "Failed to find a suitable Vulkan physical device");
+}
+
+static void VulkanCreateLogicalDevice(void)
+{
+    if (GLOBAL.Vulkan.deviceReady)
+    {
+        return;
+    }
+
+    Assert(GLOBAL.Vulkan.physicalDeviceReady, "Vulkan physical device is not selected");
+    Assert(GLOBAL.Vulkan.graphicsQueueFamily != VULKAN_INVALID_QUEUE_FAMILY, "Vulkan graphics queue family is invalid");
+    Assert(GLOBAL.Vulkan.presentQueueFamily != VULKAN_INVALID_QUEUE_FAMILY, "Vulkan presentation queue family is invalid");
+
+    uint32_t queueFamilies[2] = { 0 };
+    uint32_t queueFamilyCount = 0;
+    PushUniqueUint32(queueFamilies, &queueFamilyCount, ARRAY_SIZE(queueFamilies), GLOBAL.Vulkan.graphicsQueueFamily);
+    PushUniqueUint32(queueFamilies, &queueFamilyCount, ARRAY_SIZE(queueFamilies), GLOBAL.Vulkan.presentQueueFamily);
+    Assert(queueFamilyCount > 0, "No queue families selected for Vulkan logical device");
+
+    VkDeviceQueueCreateInfo queueCreateInfos[ARRAY_SIZE(queueFamilies)];
+    memset(queueCreateInfos, 0, sizeof(queueCreateInfos));
+    const float queuePriority = 1.0f;
+    for (uint32_t index = 0; index < queueFamilyCount; index++)
+    {
+        queueCreateInfos[index].sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+        queueCreateInfos[index].queueFamilyIndex = queueFamilies[index];
+        queueCreateInfos[index].queueCount = 1;
+        queueCreateInfos[index].pQueuePriorities = &queuePriority;
+    }
+
+    VkPhysicalDeviceFeatures deviceFeatures = { 0 };
+
+    VkDeviceCreateInfo createInfo = {
+        .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+        .queueCreateInfoCount = queueFamilyCount,
+        .pQueueCreateInfos = queueCreateInfos,
+        .enabledExtensionCount = ARRAY_SIZE(VULKAN_REQUIRED_DEVICE_EXTENSIONS),
+        .ppEnabledExtensionNames = VULKAN_REQUIRED_DEVICE_EXTENSIONS,
+        .pEnabledFeatures = &deviceFeatures,
+    };
+
+    if (GLOBAL.Vulkan.validationLayersEnabled)
+    {
+        createInfo.enabledLayerCount = ARRAY_SIZE(VULKAN_VALIDATION_LAYERS);
+        createInfo.ppEnabledLayerNames = VULKAN_VALIDATION_LAYERS;
+    }
+    else
+    {
+        createInfo.enabledLayerCount = 0;
+        createInfo.ppEnabledLayerNames = NULL;
+    }
+
+    VkResult result = vkCreateDevice(GLOBAL.Vulkan.physicalDevice, &createInfo, NULL, &GLOBAL.Vulkan.device);
+    Assert(result == VK_SUCCESS, "Failed to create Vulkan logical device");
+
+    vkGetDeviceQueue(GLOBAL.Vulkan.device, GLOBAL.Vulkan.graphicsQueueFamily, 0, &GLOBAL.Vulkan.graphicsQueue);
+    vkGetDeviceQueue(GLOBAL.Vulkan.device, GLOBAL.Vulkan.presentQueueFamily, 0, &GLOBAL.Vulkan.presentQueue);
+
+    GLOBAL.Vulkan.deviceReady = true;
+    GLOBAL.Vulkan.queuesReady = true;
+
+    LogInfo("Vulkan logical device ready");
+}
 void InitGlfwContext(void)
 {
     glfwSetErrorCallback(GlfwErrorCallback);
@@ -268,7 +507,7 @@ bool WindowShouldClose(void)
 
 void InitVulkan(void)
 {
-    if (GLOBAL.Vulkan.instanceReady)
+    if (GLOBAL.Vulkan.ready)
     {
         return;
     }
@@ -281,7 +520,21 @@ void InitVulkan(void)
     GLOBAL.Vulkan.debugEnabled = false;
     GLOBAL.Vulkan.debugMessengerReady = false;
     GLOBAL.Vulkan.surfaceReady = false;
+    GLOBAL.Vulkan.physicalDeviceReady = false;
+    GLOBAL.Vulkan.deviceReady = false;
+    GLOBAL.Vulkan.queuesReady = false;
     GLOBAL.Vulkan.ready = false;
+    GLOBAL.Vulkan.validationLayersEnabled = false;
+
+    GLOBAL.Vulkan.instance = VK_NULL_HANDLE;
+    GLOBAL.Vulkan.debugMessenger = VK_NULL_HANDLE;
+    GLOBAL.Vulkan.surface = VK_NULL_HANDLE;
+    GLOBAL.Vulkan.physicalDevice = VK_NULL_HANDLE;
+    GLOBAL.Vulkan.device = VK_NULL_HANDLE;
+    GLOBAL.Vulkan.graphicsQueue = VK_NULL_HANDLE;
+    GLOBAL.Vulkan.presentQueue = VK_NULL_HANDLE;
+    GLOBAL.Vulkan.graphicsQueueFamily = VULKAN_INVALID_QUEUE_FAMILY;
+    GLOBAL.Vulkan.presentQueueFamily = VULKAN_INVALID_QUEUE_FAMILY;
 
     const char *enabledExtensions[VULKAN_MAX_ENABLED_EXTENSIONS] = { 0 };
     uint32_t extensionCount = 0;
@@ -349,6 +602,8 @@ void InitVulkan(void)
         }
     }
 
+    GLOBAL.Vulkan.validationLayersEnabled = debugLayerAvailable;
+
     const char *applicationTitle = (GLOBAL.Window.title != NULL) ? GLOBAL.Window.title : APPLICATION_TITLE;
 
     VkApplicationInfo appInfo = {
@@ -408,17 +663,43 @@ void InitVulkan(void)
 
     GLOBAL.Vulkan.surfaceReady = true;
     GLOBAL.Vulkan.instanceReady = true;
-    GLOBAL.Vulkan.ready = (GLOBAL.Vulkan.instanceReady && GLOBAL.Vulkan.surfaceReady);
 
-    LogInfo("Vulkan instance and surface ready");
+    VulkanSelectPhysicalDevice();
+    VulkanCreateLogicalDevice();
+
+    GLOBAL.Vulkan.ready =
+        (GLOBAL.Vulkan.instanceReady &&
+        GLOBAL.Vulkan.surfaceReady &&
+        GLOBAL.Vulkan.deviceReady &&
+        GLOBAL.Vulkan.queuesReady);
+    Assert(GLOBAL.Vulkan.ready, "Vulkan initialization incomplete");
+
+    LogInfo("Vulkan initialization complete");
 }
 
 void CloseVulkan(void)
 {
-    if (!GLOBAL.Vulkan.instanceReady)
+    if (!GLOBAL.Vulkan.instanceReady && !GLOBAL.Vulkan.deviceReady && !GLOBAL.Vulkan.surfaceReady)
     {
         return;
     }
+
+    if (GLOBAL.Vulkan.deviceReady)
+    {
+        vkDeviceWaitIdle(GLOBAL.Vulkan.device);
+        vkDestroyDevice(GLOBAL.Vulkan.device, NULL);
+        GLOBAL.Vulkan.device = VK_NULL_HANDLE;
+        GLOBAL.Vulkan.deviceReady = false;
+    }
+
+    GLOBAL.Vulkan.queuesReady = false;
+    GLOBAL.Vulkan.graphicsQueue = VK_NULL_HANDLE;
+    GLOBAL.Vulkan.presentQueue = VK_NULL_HANDLE;
+    GLOBAL.Vulkan.graphicsQueueFamily = VULKAN_INVALID_QUEUE_FAMILY;
+    GLOBAL.Vulkan.presentQueueFamily = VULKAN_INVALID_QUEUE_FAMILY;
+
+    GLOBAL.Vulkan.physicalDevice = VK_NULL_HANDLE;
+    GLOBAL.Vulkan.physicalDeviceReady = false;
 
     if (GLOBAL.Vulkan.surfaceReady)
     {
@@ -445,6 +726,7 @@ void CloseVulkan(void)
     GLOBAL.Vulkan.instanceReady = false;
     GLOBAL.Vulkan.ready = false;
     GLOBAL.Vulkan.debugEnabled = false;
+    GLOBAL.Vulkan.validationLayersEnabled = false;
 }
 
 int main(void)
