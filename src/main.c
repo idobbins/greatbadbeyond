@@ -38,6 +38,9 @@ static const char *const VULKAN_REQUIRED_DEVICE_EXTENSIONS[] = {
 #define VULKAN_MAX_PHYSICAL_DEVICES 16
 #define VULKAN_MAX_QUEUE_FAMILIES 16
 #define VULKAN_MAX_DEVICE_EXTENSIONS 256
+#define VULKAN_MAX_SWAPCHAIN_IMAGES 8
+#define VULKAN_MAX_SURFACE_FORMATS 64
+#define VULKAN_MAX_PRESENT_MODES 16
 #define VULKAN_INVALID_QUEUE_FAMILY UINT32_MAX
 
 static const char *const APPLICATION_TITLE = "Callandor";
@@ -110,6 +113,12 @@ typedef struct GlobalData {
         uint32_t graphicsQueueFamily;
         uint32_t presentQueueFamily;
         uint32_t computeQueueFamily;
+        VkSwapchainKHR swapchain;
+        VkImage swapchainImages[VULKAN_MAX_SWAPCHAIN_IMAGES];
+        VkImageView swapchainImageViews[VULKAN_MAX_SWAPCHAIN_IMAGES];
+        uint32_t swapchainImageCount;
+        VkFormat swapchainImageFormat;
+        VkExtent2D swapchainExtent;
 
         bool instanceReady;
         bool debugMessengerReady;
@@ -117,6 +126,7 @@ typedef struct GlobalData {
         bool physicalDeviceReady;
         bool deviceReady;
         bool queuesReady;
+        bool swapchainReady;
 
         bool ready;
         bool debugEnabled;
@@ -494,6 +504,13 @@ static void VulkanResetState(void)
     GLOBAL.Vulkan.graphicsQueueFamily = VULKAN_INVALID_QUEUE_FAMILY;
     GLOBAL.Vulkan.presentQueueFamily = VULKAN_INVALID_QUEUE_FAMILY;
     GLOBAL.Vulkan.computeQueueFamily = VULKAN_INVALID_QUEUE_FAMILY;
+    GLOBAL.Vulkan.swapchain = VK_NULL_HANDLE;
+    memset(GLOBAL.Vulkan.swapchainImages, 0, sizeof(GLOBAL.Vulkan.swapchainImages));
+    memset(GLOBAL.Vulkan.swapchainImageViews, 0, sizeof(GLOBAL.Vulkan.swapchainImageViews));
+    GLOBAL.Vulkan.swapchainImageCount = 0;
+    GLOBAL.Vulkan.swapchainImageFormat = VK_FORMAT_UNDEFINED;
+    GLOBAL.Vulkan.swapchainExtent.width = 0;
+    GLOBAL.Vulkan.swapchainExtent.height = 0;
 
     GLOBAL.Vulkan.instanceReady = false;
     GLOBAL.Vulkan.debugMessengerReady = false;
@@ -501,6 +518,7 @@ static void VulkanResetState(void)
     GLOBAL.Vulkan.physicalDeviceReady = false;
     GLOBAL.Vulkan.deviceReady = false;
     GLOBAL.Vulkan.queuesReady = false;
+    GLOBAL.Vulkan.swapchainReady = false;
 
     GLOBAL.Vulkan.ready = false;
     GLOBAL.Vulkan.debugEnabled = false;
@@ -784,6 +802,340 @@ static void VulkanCreateLogicalDevice(void)
     LogInfo("Vulkan logical device ready");
 }
 
+// Vulkan Swapchain -----------------------------------------------------------
+
+typedef struct VulkanSwapchainSupport {
+    VkSurfaceCapabilitiesKHR capabilities;
+    VkSurfaceFormatKHR formats[VULKAN_MAX_SURFACE_FORMATS];
+    VkPresentModeKHR presentModes[VULKAN_MAX_PRESENT_MODES];
+    uint32_t formatCount;
+    uint32_t presentModeCount;
+} VulkanSwapchainSupport;
+
+static void VulkanRefreshReadyState(void)
+{
+    GLOBAL.Vulkan.ready =
+        (GLOBAL.Vulkan.instanceReady &&
+        GLOBAL.Vulkan.surfaceReady &&
+        GLOBAL.Vulkan.deviceReady &&
+        GLOBAL.Vulkan.queuesReady &&
+        GLOBAL.Vulkan.swapchainReady);
+}
+
+static void VulkanQuerySwapchainSupport(VkPhysicalDevice device, VkSurfaceKHR surface, VulkanSwapchainSupport *support)
+{
+    Assert(support != NULL, "Vulkan swapchain support pointer is null");
+
+    memset(support, 0, sizeof(*support));
+
+    VkResult capabilitiesResult = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device, surface, &support->capabilities);
+    Assert(capabilitiesResult == VK_SUCCESS, "Failed to query Vulkan surface capabilities");
+
+    uint32_t formatCount = 0;
+    VkResult formatResult = vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, &formatCount, NULL);
+    Assert(formatResult == VK_SUCCESS, "Failed to query Vulkan surface formats");
+    if (formatCount > ARRAY_SIZE(support->formats))
+    {
+        LogWarn("Truncating Vulkan surface formats (%u > %u)", formatCount, (uint32_t)ARRAY_SIZE(support->formats));
+        formatCount = (uint32_t)ARRAY_SIZE(support->formats);
+    }
+    if (formatCount > 0)
+    {
+        support->formatCount = formatCount;
+        formatResult = vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, &support->formatCount, support->formats);
+        Assert(formatResult == VK_SUCCESS, "Failed to enumerate Vulkan surface formats");
+    }
+
+    uint32_t presentModeCount = 0;
+    VkResult presentModeResult = vkGetPhysicalDeviceSurfacePresentModesKHR(device, surface, &presentModeCount, NULL);
+    Assert(presentModeResult == VK_SUCCESS, "Failed to query Vulkan surface present modes");
+    if (presentModeCount > ARRAY_SIZE(support->presentModes))
+    {
+        LogWarn("Truncating Vulkan present modes (%u > %u)", presentModeCount, (uint32_t)ARRAY_SIZE(support->presentModes));
+        presentModeCount = (uint32_t)ARRAY_SIZE(support->presentModes);
+    }
+    if (presentModeCount > 0)
+    {
+        support->presentModeCount = presentModeCount;
+        presentModeResult = vkGetPhysicalDeviceSurfacePresentModesKHR(device, surface, &support->presentModeCount, support->presentModes);
+        Assert(presentModeResult == VK_SUCCESS, "Failed to enumerate Vulkan surface present modes");
+    }
+}
+
+static VkSurfaceFormatKHR VulkanChooseSurfaceFormat(const VkSurfaceFormatKHR *formats, uint32_t count)
+{
+    Assert(count > 0, "No Vulkan surface formats available");
+
+    for (uint32_t index = 0; index < count; index++)
+    {
+        if (formats[index].format == VK_FORMAT_B8G8R8A8_UNORM &&
+            formats[index].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
+        {
+            return formats[index];
+        }
+    }
+
+    return formats[0];
+}
+
+static VkPresentModeKHR VulkanChoosePresentMode(const VkPresentModeKHR *presentModes, uint32_t count)
+{
+    Assert(count > 0, "No Vulkan present modes available");
+
+    for (uint32_t index = 0; index < count; index++)
+    {
+        if (presentModes[index] == VK_PRESENT_MODE_MAILBOX_KHR)
+        {
+            return VK_PRESENT_MODE_MAILBOX_KHR;
+        }
+    }
+
+    for (uint32_t index = 0; index < count; index++)
+    {
+        if (presentModes[index] == VK_PRESENT_MODE_IMMEDIATE_KHR)
+        {
+            return VK_PRESENT_MODE_IMMEDIATE_KHR;
+        }
+    }
+
+    return VK_PRESENT_MODE_FIFO_KHR;
+}
+
+static VkExtent2D VulkanChooseExtent(const VkSurfaceCapabilitiesKHR *capabilities)
+{
+    if (capabilities->currentExtent.width != UINT32_MAX)
+    {
+        return capabilities->currentExtent;
+    }
+
+    int32_t width = 0;
+    int32_t height = 0;
+    glfwGetFramebufferSize(GLOBAL.Window.window, &width, &height);
+    Assert(width > 0 && height > 0, "Vulkan framebuffer has invalid size");
+
+    VkExtent2D extent = {
+        .width = (uint32_t)width,
+        .height = (uint32_t)height,
+    };
+
+    if (extent.width < capabilities->minImageExtent.width)
+    {
+        extent.width = capabilities->minImageExtent.width;
+    }
+    else if (extent.width > capabilities->maxImageExtent.width)
+    {
+        extent.width = capabilities->maxImageExtent.width;
+    }
+
+    if (extent.height < capabilities->minImageExtent.height)
+    {
+        extent.height = capabilities->minImageExtent.height;
+    }
+    else if (extent.height > capabilities->maxImageExtent.height)
+    {
+        extent.height = capabilities->maxImageExtent.height;
+    }
+
+    return extent;
+}
+
+static VkCompositeAlphaFlagBitsKHR VulkanChooseCompositeAlpha(VkCompositeAlphaFlagsKHR supported)
+{
+    const VkCompositeAlphaFlagBitsKHR preferred[] = {
+        VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+        VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR,
+        VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR,
+        VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR,
+    };
+
+    for (uint32_t index = 0; index < ARRAY_SIZE(preferred); index++)
+    {
+        if ((supported & preferred[index]) != 0)
+        {
+            return preferred[index];
+        }
+    }
+
+    for (uint32_t bit = 0; bit < 32; bit++)
+    {
+        VkCompositeAlphaFlagBitsKHR alpha = (VkCompositeAlphaFlagBitsKHR)(1u << bit);
+        if ((supported & alpha) != 0)
+        {
+            return alpha;
+        }
+    }
+
+    return VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+}
+
+static void VulkanDestroySwapchain(void)
+{
+    if (!GLOBAL.Vulkan.swapchainReady)
+    {
+        return;
+    }
+
+    for (uint32_t index = 0; index < GLOBAL.Vulkan.swapchainImageCount; index++)
+    {
+        if (GLOBAL.Vulkan.swapchainImageViews[index] != VK_NULL_HANDLE)
+        {
+            vkDestroyImageView(GLOBAL.Vulkan.device, GLOBAL.Vulkan.swapchainImageViews[index], NULL);
+            GLOBAL.Vulkan.swapchainImageViews[index] = VK_NULL_HANDLE;
+        }
+        GLOBAL.Vulkan.swapchainImages[index] = VK_NULL_HANDLE;
+    }
+
+    GLOBAL.Vulkan.swapchainImageCount = 0;
+    memset(GLOBAL.Vulkan.swapchainImages, 0, sizeof(GLOBAL.Vulkan.swapchainImages));
+    memset(GLOBAL.Vulkan.swapchainImageViews, 0, sizeof(GLOBAL.Vulkan.swapchainImageViews));
+
+    if (GLOBAL.Vulkan.swapchain != VK_NULL_HANDLE)
+    {
+        vkDestroySwapchainKHR(GLOBAL.Vulkan.device, GLOBAL.Vulkan.swapchain, NULL);
+        GLOBAL.Vulkan.swapchain = VK_NULL_HANDLE;
+    }
+
+    GLOBAL.Vulkan.swapchainExtent.width = 0;
+    GLOBAL.Vulkan.swapchainExtent.height = 0;
+    GLOBAL.Vulkan.swapchainImageFormat = VK_FORMAT_UNDEFINED;
+    GLOBAL.Vulkan.swapchainReady = false;
+    VulkanRefreshReadyState();
+
+    LogInfo("Vulkan swapchain destroyed");
+}
+
+static void VulkanCreateSwapchain(void)
+{
+    Assert(GLOBAL.Vulkan.deviceReady, "Vulkan logical device is not ready");
+    Assert(GLOBAL.Vulkan.surfaceReady, "Vulkan surface is not created");
+    Assert(GLOBAL.Window.ready, "Window is not created");
+
+    VulkanSwapchainSupport support;
+    VulkanQuerySwapchainSupport(GLOBAL.Vulkan.physicalDevice, GLOBAL.Vulkan.surface, &support);
+    Assert(support.formatCount > 0, "No Vulkan surface formats available");
+    Assert(support.presentModeCount > 0, "No Vulkan present modes available");
+
+    VkSurfaceFormatKHR surfaceFormat = VulkanChooseSurfaceFormat(support.formats, support.formatCount);
+    VkPresentModeKHR presentMode = VulkanChoosePresentMode(support.presentModes, support.presentModeCount);
+    VkExtent2D extent = VulkanChooseExtent(&support.capabilities);
+
+    uint32_t imageCount = support.capabilities.minImageCount + 1;
+    if (support.capabilities.maxImageCount > 0 && imageCount > support.capabilities.maxImageCount)
+    {
+        imageCount = support.capabilities.maxImageCount;
+    }
+    Assert(imageCount <= VULKAN_MAX_SWAPCHAIN_IMAGES, "Vulkan swapchain image count exceeds capacity");
+
+    VkSurfaceTransformFlagBitsKHR transform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+    if ((support.capabilities.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR) == 0)
+    {
+        transform = support.capabilities.currentTransform;
+    }
+
+    VkCompositeAlphaFlagBitsKHR compositeAlpha = VulkanChooseCompositeAlpha(support.capabilities.supportedCompositeAlpha);
+
+    uint32_t queueFamilyIndices[2] = {
+        GLOBAL.Vulkan.graphicsQueueFamily,
+        GLOBAL.Vulkan.presentQueueFamily,
+    };
+
+    VkSwapchainCreateInfoKHR createInfo = {
+        .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
+        .surface = GLOBAL.Vulkan.surface,
+        .minImageCount = imageCount,
+        .imageFormat = surfaceFormat.format,
+        .imageColorSpace = surfaceFormat.colorSpace,
+        .imageExtent = extent,
+        .imageArrayLayers = 1,
+        .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+        .preTransform = transform,
+        .compositeAlpha = compositeAlpha,
+        .presentMode = presentMode,
+        .clipped = VK_TRUE,
+        .oldSwapchain = VK_NULL_HANDLE,
+    };
+
+    if (GLOBAL.Vulkan.graphicsQueueFamily != GLOBAL.Vulkan.presentQueueFamily)
+    {
+        createInfo.imageSharingMode = VK_SHARING_MODE_CONCURRENT;
+        createInfo.queueFamilyIndexCount = 2;
+        createInfo.pQueueFamilyIndices = queueFamilyIndices;
+    }
+    else
+    {
+        createInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    }
+
+    VkResult swapchainResult = vkCreateSwapchainKHR(GLOBAL.Vulkan.device, &createInfo, NULL, &GLOBAL.Vulkan.swapchain);
+    Assert(swapchainResult == VK_SUCCESS, "Failed to create Vulkan swapchain");
+
+    uint32_t retrievedImageCount = 0;
+    VkResult imageCountResult = vkGetSwapchainImagesKHR(GLOBAL.Vulkan.device, GLOBAL.Vulkan.swapchain, &retrievedImageCount, NULL);
+    Assert(imageCountResult == VK_SUCCESS, "Failed to query Vulkan swapchain images");
+    Assert(retrievedImageCount <= VULKAN_MAX_SWAPCHAIN_IMAGES, "Vulkan swapchain images exceed capacity");
+    Assert(retrievedImageCount > 0, "Vulkan swapchain returned no images");
+    VkResult imagesResult = vkGetSwapchainImagesKHR(GLOBAL.Vulkan.device, GLOBAL.Vulkan.swapchain, &retrievedImageCount, GLOBAL.Vulkan.swapchainImages);
+    Assert(imagesResult == VK_SUCCESS, "Failed to enumerate Vulkan swapchain images");
+    GLOBAL.Vulkan.swapchainImageCount = retrievedImageCount;
+
+    memset(GLOBAL.Vulkan.swapchainImageViews, 0, sizeof(GLOBAL.Vulkan.swapchainImageViews));
+
+    for (uint32_t index = 0; index < GLOBAL.Vulkan.swapchainImageCount; index++)
+    {
+        VkImageViewCreateInfo viewInfo = {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .image = GLOBAL.Vulkan.swapchainImages[index],
+            .viewType = VK_IMAGE_VIEW_TYPE_2D,
+            .format = surfaceFormat.format,
+            .components = {
+                .r = VK_COMPONENT_SWIZZLE_IDENTITY,
+                .g = VK_COMPONENT_SWIZZLE_IDENTITY,
+                .b = VK_COMPONENT_SWIZZLE_IDENTITY,
+                .a = VK_COMPONENT_SWIZZLE_IDENTITY,
+            },
+            .subresourceRange = {
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+        };
+
+        VkResult viewResult = vkCreateImageView(GLOBAL.Vulkan.device, &viewInfo, NULL, &GLOBAL.Vulkan.swapchainImageViews[index]);
+        Assert(viewResult == VK_SUCCESS, "Failed to create Vulkan swapchain image view");
+    }
+
+    GLOBAL.Vulkan.swapchainImageFormat = surfaceFormat.format;
+    GLOBAL.Vulkan.swapchainExtent = extent;
+    GLOBAL.Vulkan.swapchainReady = true;
+    VulkanRefreshReadyState();
+
+    LogInfo("Vulkan swapchain ready: %u images (%ux%u)", GLOBAL.Vulkan.swapchainImageCount, extent.width, extent.height);
+}
+
+void VulkanRecreateSwapchain(void)
+{
+    if (!GLOBAL.Vulkan.deviceReady || !GLOBAL.Vulkan.surfaceReady)
+    {
+        return;
+    }
+
+    int32_t width = 0;
+    int32_t height = 0;
+    glfwGetFramebufferSize(GLOBAL.Window.window, &width, &height);
+    if (width <= 0 || height <= 0)
+    {
+        return;
+    }
+
+    LogInfo("Recreating Vulkan swapchain");
+
+    vkDeviceWaitIdle(GLOBAL.Vulkan.device);
+    VulkanDestroySwapchain();
+    VulkanCreateSwapchain();
+}
+
 // Vulkan Lifecycle -----------------------------------------------------------
 
 void InitVulkan(void)
@@ -817,12 +1169,9 @@ void InitVulkan(void)
     VulkanCreateSurface();
     VulkanSelectPhysicalDevice();
     VulkanCreateLogicalDevice();
+    VulkanCreateSwapchain();
 
-    GLOBAL.Vulkan.ready =
-        (GLOBAL.Vulkan.instanceReady &&
-        GLOBAL.Vulkan.surfaceReady &&
-        GLOBAL.Vulkan.deviceReady &&
-        GLOBAL.Vulkan.queuesReady);
+    VulkanRefreshReadyState();
     Assert(GLOBAL.Vulkan.ready, "Vulkan initialization incomplete");
 
     LogInfo("Vulkan initialization complete");
@@ -841,6 +1190,7 @@ void CloseVulkan(void)
     if (GLOBAL.Vulkan.deviceReady)
     {
         vkDeviceWaitIdle(GLOBAL.Vulkan.device);
+        VulkanDestroySwapchain();
         vkDestroyDevice(GLOBAL.Vulkan.device, NULL);
         GLOBAL.Vulkan.device = VK_NULL_HANDLE;
         GLOBAL.Vulkan.deviceReady = false;
