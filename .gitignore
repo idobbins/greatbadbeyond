@@ -1,6 +1,9 @@
 /.idea
 /.vscode
+/.zed
 
 /.cache*
 
 /build
+/cmake-build-debug
+/cmake-build-release
