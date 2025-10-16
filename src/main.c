@@ -1,114 +1,15 @@
-#if defined(_WIN32)
-    #ifndef NOMINMAX
-        #define NOMINMAX
-    #endif
-    #ifndef WIN32_LEAN_AND_MEAN
-        #define WIN32_LEAN_AND_MEAN
-    #endif
-    #ifndef VK_USE_PLATFORM_WIN32_KHR
-        #define VK_USE_PLATFORM_WIN32_KHR
-    #endif
-    #include <windows.h>
-#endif
-
-#if defined(__APPLE__)
-    #ifndef VK_ENABLE_BETA_EXTENSIONS
-        #define VK_ENABLE_BETA_EXTENSIONS
-    #endif
-    #ifndef VK_USE_PLATFORM_MACOS_MVK
-        #define VK_USE_PLATFORM_MACOS_MVK
-    #endif
-    #ifndef VK_USE_PLATFORM_METAL_EXT
-        #define VK_USE_PLATFORM_METAL_EXT
-    #endif
-#endif
-
-#if defined(__linux__)
-    #ifndef VK_USE_PLATFORM_XCB_KHR
-        #define VK_USE_PLATFORM_XCB_KHR
-    #endif
-#endif
-#if defined(__ANDROID__)
-    #ifndef VK_USE_PLATFORM_ANDROID_KHR
-        #define VK_USE_PLATFORM_ANDROID_KHR
-    #endif
-#endif
-
-#include <vulkan/vulkan.h>
-
-#if defined(__APPLE__)
-    #include <vulkan/vulkan_metal.h>
-    #include <vulkan/vulkan_beta.h>
-#endif
-
-#if defined(_WIN32)
-    #include <vulkan/vulkan_win32.h>
-#endif
-
-#if defined(__linux__)
-    #include <vulkan/vulkan_xcb.h>
-#endif
-
-#include <GLFW/glfw3.h>
-
+#define _CRT_SECURE_NO_WARNINGS
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include <vulkan/vulkan.h>
+#include <GLFW/glfw3.h>
+
 #ifndef ARRAY_SIZE
     #define ARRAY_SIZE(array) (sizeof(array) / sizeof((array)[0]))
-#endif
-
-#if defined(VK_USE_PLATFORM_WIN32_KHR)
-static const char *const VULKAN_PLATFORM_EXTENSIONS[] = {
-    VK_KHR_SURFACE_EXTENSION_NAME,
-    VK_KHR_WIN32_SURFACE_EXTENSION_NAME,
-};
-static const VkInstanceCreateFlags VULKAN_INSTANCE_FLAGS = 0;
-#elif defined(VK_USE_PLATFORM_XCB_KHR)
-static const char *const VULKAN_PLATFORM_EXTENSIONS[] = {
-    VK_KHR_SURFACE_EXTENSION_NAME,
-    VK_KHR_XCB_SURFACE_EXTENSION_NAME,
-};
-static const VkInstanceCreateFlags VULKAN_INSTANCE_FLAGS = 0;
-#elif defined(VK_USE_PLATFORM_XLIB_KHR)
-static const char *const VULKAN_PLATFORM_EXTENSIONS[] = {
-    VK_KHR_SURFACE_EXTENSION_NAME,
-    VK_KHR_XLIB_SURFACE_EXTENSION_NAME,
-};
-static const VkInstanceCreateFlags VULKAN_INSTANCE_FLAGS = 0;
-#elif defined(VK_USE_PLATFORM_WAYLAND_KHR)
-static const char *const VULKAN_PLATFORM_EXTENSIONS[] = {
-    VK_KHR_SURFACE_EXTENSION_NAME,
-    VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME,
-};
-static const VkInstanceCreateFlags VULKAN_INSTANCE_FLAGS = 0;
-#elif defined(VK_USE_PLATFORM_ANDROID_KHR)
-static const char *const VULKAN_PLATFORM_EXTENSIONS[] = {
-    VK_KHR_SURFACE_EXTENSION_NAME,
-    VK_KHR_ANDROID_SURFACE_EXTENSION_NAME,
-};
-static const VkInstanceCreateFlags VULKAN_INSTANCE_FLAGS = 0;
-#elif defined(VK_USE_PLATFORM_MACOS_MVK) || defined(VK_USE_PLATFORM_METAL_EXT)
-static const char *const VULKAN_PLATFORM_EXTENSIONS[] = {
-    VK_KHR_SURFACE_EXTENSION_NAME,
-    VK_EXT_METAL_SURFACE_EXTENSION_NAME,
-    VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME,
-};
-static const VkInstanceCreateFlags VULKAN_INSTANCE_FLAGS = VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
-#elif defined(__APPLE__)
-static const char *const VULKAN_PLATFORM_EXTENSIONS[] = {
-    VK_KHR_SURFACE_EXTENSION_NAME,
-    VK_EXT_METAL_SURFACE_EXTENSION_NAME,
-    VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME,
-};
-static const VkInstanceCreateFlags VULKAN_INSTANCE_FLAGS = VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
-#else
-static const char *const VULKAN_PLATFORM_EXTENSIONS[] = {
-    VK_KHR_SURFACE_EXTENSION_NAME,
-};
-static const VkInstanceCreateFlags VULKAN_INSTANCE_FLAGS = 0;
 #endif
 
 #if !defined(NDEBUG)
@@ -117,15 +18,11 @@ static const VkInstanceCreateFlags VULKAN_INSTANCE_FLAGS = 0;
     #define VULKAN_ENABLE_DEBUG 0
 #endif
 
-static const char *const VULKAN_DEBUG_EXTENSIONS[] = {
-    VK_EXT_DEBUG_UTILS_EXTENSION_NAME,
-};
-
 static const char *const VULKAN_VALIDATION_LAYERS[] = {
     "VK_LAYER_KHRONOS_validation",
 };
 
-#define VULKAN_MAX_ENABLED_EXTENSIONS (ARRAY_SIZE(VULKAN_PLATFORM_EXTENSIONS) + ARRAY_SIZE(VULKAN_DEBUG_EXTENSIONS))
+#define VULKAN_MAX_ENABLED_EXTENSIONS 16
 #define VULKAN_MAX_ENABLED_LAYERS ARRAY_SIZE(VULKAN_VALIDATION_LAYERS)
 #define VULKAN_MAX_ENUMERATED_EXTENSIONS 256
 #define VULKAN_MAX_ENUMERATED_LAYERS 64
@@ -137,6 +34,21 @@ static inline void Assert(bool condition, const char *message) {
         fprintf(stderr, "Runtime assertion failed: %s\n", message);
         exit(EXIT_FAILURE);
     }
+}
+
+static void LogError(const char *message)
+{
+    fprintf(stderr, "error: %s\n", message);
+}
+
+static void LogWarn(const char *message)
+{
+    fprintf(stderr, "warn : %s\n", message);
+}
+
+static void LogInfo(const char *message)
+{
+    fprintf(stdout, "info : %s\n", message);
 }
 
 // Global state
@@ -155,8 +67,10 @@ typedef struct GlobalData {
     struct {
         VkInstance instance;
         VkDebugUtilsMessengerEXT debugMessenger;
+        VkSurfaceKHR surface;
         bool instanceReady;
         bool debugMessengerReady;
+        bool surfaceReady;
 
         bool ready;
         bool debugEnabled;
@@ -248,54 +162,42 @@ static uint32_t VulkanEnumerateInstanceLayers(VkLayerProperties *buffer, uint32_
     return count;
 }
 
-static void VulkanValidateInstanceExtensions(uint32_t requiredCount, const char *const *required)
+static bool VulkanExtensionListHas(const VkExtensionProperties *extensions, uint32_t count, const char *name)
 {
-    VkExtensionProperties available[VULKAN_MAX_ENUMERATED_EXTENSIONS];
-    const uint32_t availableCount = VulkanEnumerateInstanceExtensions(available, ARRAY_SIZE(available));
-
-    for (uint32_t index = 0; index < requiredCount; index++)
+    for (uint32_t index = 0; index < count; index++)
     {
-        bool found = false;
-        for (uint32_t search = 0; search < availableCount; search++)
+        if (strcmp(extensions[index].extensionName, name) == 0)
         {
-            if (strcmp(required[index], available[search].extensionName) == 0)
-            {
-                found = true;
-                break;
-            }
-        }
-
-        if (!found)
-        {
-            fprintf(stderr, "Missing required Vulkan instance extension: %s\n", required[index]);
-            Assert(false, "Missing required Vulkan instance extension");
+            return true;
         }
     }
+    return false;
 }
 
-static void VulkanValidateInstanceLayers(uint32_t requiredCount, const char *const *required)
+static bool VulkanLayerListHas(const VkLayerProperties *layers, uint32_t count, const char *name)
 {
-    VkLayerProperties available[VULKAN_MAX_ENUMERATED_LAYERS];
-    const uint32_t availableCount = VulkanEnumerateInstanceLayers(available, ARRAY_SIZE(available));
-
-    for (uint32_t index = 0; index < requiredCount; index++)
+    for (uint32_t index = 0; index < count; index++)
     {
-        bool found = false;
-        for (uint32_t search = 0; search < availableCount; search++)
+        if (strcmp(layers[index].layerName, name) == 0)
         {
-            if (strcmp(required[index], available[search].layerName) == 0)
-            {
-                found = true;
-                break;
-            }
-        }
-
-        if (!found)
-        {
-            fprintf(stderr, "Missing required Vulkan instance layer: %s\n", required[index]);
-            Assert(false, "Missing required Vulkan instance layer");
+            return true;
         }
     }
+    return false;
+}
+
+static void PushUniqueString(const char **list, uint32_t *count, uint32_t capacity, const char *value)
+{
+    for (uint32_t index = 0; index < *count; index++)
+    {
+        if (strcmp(list[index], value) == 0)
+        {
+            return;
+        }
+    }
+
+    Assert(*count < capacity, "Too many Vulkan instance entries requested");
+    list[(*count)++] = value;
 }
 void InitGlfwContext(void)
 {
@@ -306,6 +208,8 @@ void InitGlfwContext(void)
 
     GLOBAL.Glfw.ready = true;
     GLOBAL.Glfw.vulkanSupported = true;
+
+    LogInfo("GLFW initialized (Vulkan supported)");
 }
 
 void CloseGlfwContext(void)
@@ -371,42 +275,78 @@ void InitVulkan(void)
 
     Assert(GLOBAL.Glfw.ready, "GLFW is not initialized");
     Assert(GLOBAL.Glfw.vulkanSupported, "Vulkan is not supported");
+    Assert(GLOBAL.Window.ready, "Window is not created");
 
-    const bool enableDebug = (VULKAN_ENABLE_DEBUG != 0);
-    GLOBAL.Vulkan.debugEnabled = enableDebug;
+    const bool requestDebug = (VULKAN_ENABLE_DEBUG != 0);
+    GLOBAL.Vulkan.debugEnabled = false;
     GLOBAL.Vulkan.debugMessengerReady = false;
-
-    const uint32_t platformExtensionCount = (uint32_t)ARRAY_SIZE(VULKAN_PLATFORM_EXTENSIONS);
-    const uint32_t debugExtensionCount = enableDebug ? (uint32_t)ARRAY_SIZE(VULKAN_DEBUG_EXTENSIONS) : 0;
-    const uint32_t extensionsCount = platformExtensionCount + debugExtensionCount;
-    Assert(extensionsCount > 0, "No Vulkan instance extensions configured");
+    GLOBAL.Vulkan.surfaceReady = false;
+    GLOBAL.Vulkan.ready = false;
 
     const char *enabledExtensions[VULKAN_MAX_ENABLED_EXTENSIONS] = { 0 };
-    uint32_t extensionIndex = 0;
-    for (uint32_t index = 0; index < platformExtensionCount; index++)
+    uint32_t extensionCount = 0;
+
+    uint32_t requiredExtensionCount = 0;
+    const char **requiredExtensions = glfwGetRequiredInstanceExtensions(&requiredExtensionCount);
+    Assert(requiredExtensions != NULL, "glfwGetRequiredInstanceExtensions returned NULL");
+    Assert(requiredExtensionCount > 0, "GLFW did not report any required Vulkan instance extensions");
+
+    VkExtensionProperties availableExtensions[VULKAN_MAX_ENUMERATED_EXTENSIONS];
+    const uint32_t availableExtensionCount = VulkanEnumerateInstanceExtensions(availableExtensions, ARRAY_SIZE(availableExtensions));
+
+    for (uint32_t index = 0; index < requiredExtensionCount; index++)
     {
-        enabledExtensions[extensionIndex++] = VULKAN_PLATFORM_EXTENSIONS[index];
-    }
-    if (enableDebug)
-    {
-        for (uint32_t index = 0; index < ARRAY_SIZE(VULKAN_DEBUG_EXTENSIONS); index++)
+        const char *name = requiredExtensions[index];
+        if (!VulkanExtensionListHas(availableExtensions, availableExtensionCount, name))
         {
-            enabledExtensions[extensionIndex++] = VULKAN_DEBUG_EXTENSIONS[index];
+            fprintf(stderr, "Missing required Vulkan instance extension reported by GLFW: %s\n", name);
+            Assert(false, "Missing GLFW-required Vulkan instance extension");
+        }
+        PushUniqueString(enabledExtensions, &extensionCount, ARRAY_SIZE(enabledExtensions), name);
+    }
+
+    bool debugExtensionAvailable = false;
+    if (requestDebug)
+    {
+        debugExtensionAvailable = VulkanExtensionListHas(availableExtensions, availableExtensionCount, VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+        if (debugExtensionAvailable)
+        {
+            PushUniqueString(enabledExtensions, &extensionCount, ARRAY_SIZE(enabledExtensions), VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+        }
+        else
+        {
+            LogWarn("VK_EXT_debug_utils not available; continuing without debug messenger");
         }
     }
-    Assert(extensionIndex == extensionsCount, "Mismatch in Vulkan extension count");
 
-    VulkanValidateInstanceExtensions(extensionsCount, enabledExtensions);
+    VkInstanceCreateFlags instanceFlags = 0;
+    const bool portabilityExtensionAvailable = VulkanExtensionListHas(availableExtensions, availableExtensionCount, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+    if (portabilityExtensionAvailable)
+    {
+        PushUniqueString(enabledExtensions, &extensionCount, ARRAY_SIZE(enabledExtensions), VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+        instanceFlags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+    }
+
+    Assert(extensionCount > 0, "No Vulkan instance extensions configured");
 
     const char *enabledLayers[VULKAN_MAX_ENABLED_LAYERS] = { 0 };
     uint32_t layersCount = 0;
-    if (enableDebug)
+
+    bool debugLayerAvailable = false;
+    if (requestDebug)
     {
-        for (uint32_t index = 0; index < ARRAY_SIZE(VULKAN_VALIDATION_LAYERS); index++)
+        VkLayerProperties availableLayers[VULKAN_MAX_ENUMERATED_LAYERS];
+        const uint32_t availableLayerCount = VulkanEnumerateInstanceLayers(availableLayers, ARRAY_SIZE(availableLayers));
+
+        debugLayerAvailable = VulkanLayerListHas(availableLayers, availableLayerCount, VULKAN_VALIDATION_LAYERS[0]);
+        if (debugLayerAvailable)
         {
-            enabledLayers[layersCount++] = VULKAN_VALIDATION_LAYERS[index];
+            enabledLayers[layersCount++] = VULKAN_VALIDATION_LAYERS[0];
         }
-        VulkanValidateInstanceLayers(layersCount, enabledLayers);
+        else
+        {
+            LogWarn("Vulkan validation layer not available; continuing without validation");
+        }
     }
 
     const char *applicationTitle = (GLOBAL.Window.title != NULL) ? GLOBAL.Window.title : APPLICATION_TITLE;
@@ -414,43 +354,63 @@ void InitVulkan(void)
     VkApplicationInfo appInfo = {
         .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
         .pApplicationName = applicationTitle,
+        .applicationVersion = VK_MAKE_VERSION(0, 0, 1),
         .pEngineName = "",
+        .engineVersion = VK_MAKE_VERSION(0, 0, 0),
+        .apiVersion = VK_API_VERSION_1_1,
     };
 
     VkDebugUtilsMessengerCreateInfoEXT debugCreateInfo = { 0 };
-    if (enableDebug)
+    if (debugExtensionAvailable)
     {
         debugCreateInfo = VulkanMakeDebugMessengerCreateInfo();
     }
 
     VkInstanceCreateInfo createInfo = {
         .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
-        .pNext = enableDebug ? &debugCreateInfo : NULL,
+        .pNext = debugExtensionAvailable ? &debugCreateInfo : NULL,
         .pApplicationInfo = &appInfo,
-        .flags = VULKAN_INSTANCE_FLAGS,
+        .flags = instanceFlags,
         .enabledLayerCount = layersCount,
         .ppEnabledLayerNames = (layersCount > 0) ? enabledLayers : NULL,
-        .enabledExtensionCount = extensionsCount,
+        .enabledExtensionCount = extensionCount,
         .ppEnabledExtensionNames = enabledExtensions,
     };
 
     VkResult result = vkCreateInstance(&createInfo, NULL, &GLOBAL.Vulkan.instance);
     Assert(result == VK_SUCCESS, "Failed to create Vulkan instance");
 
-    if (enableDebug)
+    if (debugExtensionAvailable)
     {
         PFN_vkCreateDebugUtilsMessengerEXT createMessenger = (PFN_vkCreateDebugUtilsMessengerEXT)
             vkGetInstanceProcAddr(GLOBAL.Vulkan.instance, "vkCreateDebugUtilsMessengerEXT");
-        Assert(createMessenger != NULL, "Failed to load vkCreateDebugUtilsMessengerEXT");
-
-        VkResult debugResult = createMessenger(GLOBAL.Vulkan.instance, &debugCreateInfo, NULL, &GLOBAL.Vulkan.debugMessenger);
-        Assert(debugResult == VK_SUCCESS, "Failed to create Vulkan debug messenger");
-
-        GLOBAL.Vulkan.debugMessengerReady = true;
+        if (createMessenger != NULL)
+        {
+            VkResult debugResult = createMessenger(GLOBAL.Vulkan.instance, &debugCreateInfo, NULL, &GLOBAL.Vulkan.debugMessenger);
+            if (debugResult == VK_SUCCESS)
+            {
+                GLOBAL.Vulkan.debugMessengerReady = true;
+                GLOBAL.Vulkan.debugEnabled = true;
+            }
+            else
+            {
+                fprintf(stderr, "Failed to create Vulkan debug messenger (error %d)\n", debugResult);
+            }
+        }
+        else
+        {
+            LogWarn("vkCreateDebugUtilsMessengerEXT not available; debug messenger disabled");
+        }
     }
 
+    VkResult surfaceResult = glfwCreateWindowSurface(GLOBAL.Vulkan.instance, GLOBAL.Window.window, NULL, &GLOBAL.Vulkan.surface);
+    Assert(surfaceResult == VK_SUCCESS, "Failed to create Vulkan surface");
+
+    GLOBAL.Vulkan.surfaceReady = true;
     GLOBAL.Vulkan.instanceReady = true;
-    GLOBAL.Vulkan.ready = true;
+    GLOBAL.Vulkan.ready = (GLOBAL.Vulkan.instanceReady && GLOBAL.Vulkan.surfaceReady);
+
+    LogInfo("Vulkan instance and surface ready");
 }
 
 void CloseVulkan(void)
@@ -458,6 +418,13 @@ void CloseVulkan(void)
     if (!GLOBAL.Vulkan.instanceReady)
     {
         return;
+    }
+
+    if (GLOBAL.Vulkan.surfaceReady)
+    {
+        vkDestroySurfaceKHR(GLOBAL.Vulkan.instance, GLOBAL.Vulkan.surface, NULL);
+        GLOBAL.Vulkan.surface = VK_NULL_HANDLE;
+        GLOBAL.Vulkan.surfaceReady = false;
     }
 
     if (GLOBAL.Vulkan.debugMessengerReady)
