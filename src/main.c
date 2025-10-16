@@ -1,6 +1,4 @@
-#include "vulkan/vulkan_core.h"
 #include <GLFW/glfw3.h>
-#include <cstdlib>
 #include <vulkan/vulkan.h>
 
 #include <stdbool.h>
@@ -24,6 +22,7 @@ typedef struct GlobalData {
     struct {
         const char *title;
         bool ready;
+        GLFWwindow *window;
 
     } Window;
     struct {
@@ -46,6 +45,7 @@ void InitGlfwContext(void)
     Assert(glfwVulkanSupported() == true, "Vulkan is not supported");
 
     GLOBAL.Glfw.ready = true;
+    GLOBAL.Glfw.vulkanSupported = true;
 }
 
 void CloseGlfwContext(void)
@@ -63,18 +63,50 @@ void CloseGlfwContext(void)
 
 void InitWindow(void)
 {
+    // apply window hints
+    glfwDefaultWindowHints();
+    glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+    glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
+#if defined(__APPLE__)
+    glfwWindowHint(GLFW_COCOA_RETINA_FRAMEBUFFER, GLFW_FALSE);
+#endif
 
+    GLOBAL.Window.window = glfwCreateWindow(1280, 720, "Callandor", NULL, NULL);
+    Assert(GLOBAL.Window.window != NULL, "Failed to create window");
+
+    GLOBAL.Window.ready = true;
 }
 
 void CloseWindow(void)
 {
+    if (!GLOBAL.Window.ready)
+    {
+        return;
+    }
 
+    glfwDestroyWindow(GLOBAL.Window.window);
+    GLOBAL.Window.window = NULL;
+
+    GLOBAL.Window.ready = false;
+}
+
+bool IsWindowReady(void)
+{
+    return GLOBAL.Window.ready;
 }
 
 int main(void)
 {
     InitGlfwContext();
+    InitWindow();
 
+// Main loop
+    while (!glfwWindowShouldClose(GLOBAL.Window.window))
+    {
+        glfwPollEvents();
+    }
+
+    CloseWindow();
     CloseGlfwContext();
 
     return 0;
