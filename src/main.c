@@ -106,8 +106,10 @@ typedef struct GlobalData {
         VkDevice device;
         VkQueue graphicsQueue;
         VkQueue presentQueue;
+        VkQueue computeQueue;
         uint32_t graphicsQueueFamily;
         uint32_t presentQueueFamily;
+        uint32_t computeQueueFamily;
 
         bool instanceReady;
         bool debugMessengerReady;
@@ -488,8 +490,10 @@ static void VulkanResetState(void)
     GLOBAL.Vulkan.device = VK_NULL_HANDLE;
     GLOBAL.Vulkan.graphicsQueue = VK_NULL_HANDLE;
     GLOBAL.Vulkan.presentQueue = VK_NULL_HANDLE;
+    GLOBAL.Vulkan.computeQueue = VK_NULL_HANDLE;
     GLOBAL.Vulkan.graphicsQueueFamily = VULKAN_INVALID_QUEUE_FAMILY;
     GLOBAL.Vulkan.presentQueueFamily = VULKAN_INVALID_QUEUE_FAMILY;
+    GLOBAL.Vulkan.computeQueueFamily = VULKAN_INVALID_QUEUE_FAMILY;
 
     GLOBAL.Vulkan.instanceReady = false;
     GLOBAL.Vulkan.debugMessengerReady = false;
@@ -599,13 +603,15 @@ static bool VulkanCheckDeviceExtensions(VkPhysicalDevice device, bool *requiresP
     return true;
 }
 
-static bool VulkanFindQueueFamilies(VkPhysicalDevice device, VkSurfaceKHR surface, uint32_t *graphicsFamily, uint32_t *presentFamily)
+static bool VulkanFindQueueFamilies(VkPhysicalDevice device, VkSurfaceKHR surface, uint32_t *graphicsFamily, uint32_t *presentFamily, uint32_t *computeFamily)
 {
     VkQueueFamilyProperties queueFamilies[VULKAN_MAX_QUEUE_FAMILIES];
     const uint32_t queueFamilyCount = VulkanGetQueueFamilyProperties(device, queueFamilies, ARRAY_SIZE(queueFamilies));
 
     bool graphicsFound = false;
     bool presentFound = false;
+    bool computeFound = false;
+    bool computeDedicated = false;
 
     for (uint32_t index = 0; index < queueFamilyCount; index++)
     {
@@ -629,13 +635,27 @@ static bool VulkanFindQueueFamilies(VkPhysicalDevice device, VkSurfaceKHR surfac
             }
         }
 
+        if (family->queueCount > 0 && (family->queueFlags & VK_QUEUE_COMPUTE_BIT) != 0)
+        {
+            const bool familyHasGraphics = (family->queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0;
+            if (!computeFound || (!familyHasGraphics && !computeDedicated))
+            {
+                *computeFamily = index;
+                computeFound = true;
+                computeDedicated = !familyHasGraphics;
+            }
+        }
+
         if (graphicsFound && presentFound)
         {
-            return true;
+            if (computeFound && computeDedicated)
+            {
+                break;
+            }
         }
     }
 
-    return (graphicsFound && presentFound);
+    return (graphicsFound && presentFound && computeFound);
 }
 
 static void VulkanSelectPhysicalDevice(void)
@@ -663,15 +683,17 @@ static void VulkanSelectPhysicalDevice(void)
 
         uint32_t graphicsFamily = VULKAN_INVALID_QUEUE_FAMILY;
         uint32_t presentFamily = VULKAN_INVALID_QUEUE_FAMILY;
-        if (!VulkanFindQueueFamilies(candidate, GLOBAL.Vulkan.surface, &graphicsFamily, &presentFamily))
+        uint32_t computeFamily = VULKAN_INVALID_QUEUE_FAMILY;
+        if (!VulkanFindQueueFamilies(candidate, GLOBAL.Vulkan.surface, &graphicsFamily, &presentFamily, &computeFamily))
         {
-            LogWarn("Skipping Vulkan physical device: %s (missing graphics/present queues)", properties.deviceName);
+            LogWarn("Skipping Vulkan physical device: %s (missing graphics/present/compute queues)", properties.deviceName);
             continue;
         }
 
         GLOBAL.Vulkan.physicalDevice = candidate;
         GLOBAL.Vulkan.graphicsQueueFamily = graphicsFamily;
         GLOBAL.Vulkan.presentQueueFamily = presentFamily;
+        GLOBAL.Vulkan.computeQueueFamily = computeFamily;
         GLOBAL.Vulkan.physicalDeviceReady = true;
         GLOBAL.Vulkan.portabilitySubsetRequired = requiresPortabilitySubset;
 
@@ -692,11 +714,13 @@ static void VulkanCreateLogicalDevice(void)
     Assert(GLOBAL.Vulkan.physicalDeviceReady, "Vulkan physical device is not selected");
     Assert(GLOBAL.Vulkan.graphicsQueueFamily != VULKAN_INVALID_QUEUE_FAMILY, "Vulkan graphics queue family is invalid");
     Assert(GLOBAL.Vulkan.presentQueueFamily != VULKAN_INVALID_QUEUE_FAMILY, "Vulkan presentation queue family is invalid");
+    Assert(GLOBAL.Vulkan.computeQueueFamily != VULKAN_INVALID_QUEUE_FAMILY, "Vulkan compute queue family is invalid");
 
-    uint32_t queueFamilies[2] = { 0 };
+    uint32_t queueFamilies[3] = { 0 };
     uint32_t queueFamilyCount = 0;
     PushUniqueUint32(queueFamilies, &queueFamilyCount, ARRAY_SIZE(queueFamilies), GLOBAL.Vulkan.graphicsQueueFamily);
     PushUniqueUint32(queueFamilies, &queueFamilyCount, ARRAY_SIZE(queueFamilies), GLOBAL.Vulkan.presentQueueFamily);
+    PushUniqueUint32(queueFamilies, &queueFamilyCount, ARRAY_SIZE(queueFamilies), GLOBAL.Vulkan.computeQueueFamily);
     Assert(queueFamilyCount > 0, "No queue families selected for Vulkan logical device");
 
     VkDeviceQueueCreateInfo queueCreateInfos[ARRAY_SIZE(queueFamilies)];
@@ -752,6 +776,7 @@ static void VulkanCreateLogicalDevice(void)
 
     vkGetDeviceQueue(GLOBAL.Vulkan.device, GLOBAL.Vulkan.graphicsQueueFamily, 0, &GLOBAL.Vulkan.graphicsQueue);
     vkGetDeviceQueue(GLOBAL.Vulkan.device, GLOBAL.Vulkan.presentQueueFamily, 0, &GLOBAL.Vulkan.presentQueue);
+    vkGetDeviceQueue(GLOBAL.Vulkan.device, GLOBAL.Vulkan.computeQueueFamily, 0, &GLOBAL.Vulkan.computeQueue);
 
     GLOBAL.Vulkan.deviceReady = true;
     GLOBAL.Vulkan.queuesReady = true;
@@ -824,8 +849,10 @@ void CloseVulkan(void)
     GLOBAL.Vulkan.queuesReady = false;
     GLOBAL.Vulkan.graphicsQueue = VK_NULL_HANDLE;
     GLOBAL.Vulkan.presentQueue = VK_NULL_HANDLE;
+    GLOBAL.Vulkan.computeQueue = VK_NULL_HANDLE;
     GLOBAL.Vulkan.graphicsQueueFamily = VULKAN_INVALID_QUEUE_FAMILY;
     GLOBAL.Vulkan.presentQueueFamily = VULKAN_INVALID_QUEUE_FAMILY;
+    GLOBAL.Vulkan.computeQueueFamily = VULKAN_INVALID_QUEUE_FAMILY;
 
     GLOBAL.Vulkan.physicalDevice = VK_NULL_HANDLE;
     GLOBAL.Vulkan.physicalDeviceReady = false;
