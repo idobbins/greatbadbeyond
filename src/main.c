@@ -11,6 +11,8 @@
 #include <vulkan/vulkan.h>
 #include <GLFW/glfw3.h>
 
+#include "vk_mem_alloc.h"
+
 #ifndef ARRAY_SIZE
     #define ARRAY_SIZE(array) (sizeof(array) / sizeof((array)[0]))
 #endif
@@ -43,7 +45,6 @@ static const char *const vulkanRequiredDeviceExtensions[] = {
 #define VULKAN_MAX_SWAPCHAIN_IMAGES 8
 #define VULKAN_MAX_SURFACE_FORMATS 64
 #define VULKAN_MAX_PRESENT_MODES 16
-#define VULKAN_MAX_FRAMEBUFFERS VULKAN_MAX_SWAPCHAIN_IMAGES
 #define VULKAN_MAX_SHADER_SIZE (1024 * 1024)
 #define VULKAN_COMPUTE_LOCAL_SIZE 16
 #define VULKAN_MAX_PATH_LENGTH 512
@@ -127,6 +128,7 @@ typedef struct GlobalData {
         VkImage swapchainImages[VULKAN_MAX_SWAPCHAIN_IMAGES];
         VkImageView swapchainImageViews[VULKAN_MAX_SWAPCHAIN_IMAGES];
         uint32_t swapchainImageCount;
+        bool swapchainImagePresented[VULKAN_MAX_SWAPCHAIN_IMAGES];
         VkFormat swapchainImageFormat;
         VkExtent2D swapchainExtent;
         VkShaderModule computeShaderModule;
@@ -139,14 +141,13 @@ typedef struct GlobalData {
         VkPipelineLayout blitPipelineLayout;
         VkPipeline computePipeline;
         VkPipeline blitPipeline;
-        VkRenderPass renderPass;
-        VkFramebuffer framebuffers[VULKAN_MAX_FRAMEBUFFERS];
+        VmaAllocator vma;
         VkCommandPool computeCommandPool;
         VkCommandPool graphicsCommandPool;
         VkCommandBuffer computeCommandBuffer;
         VkCommandBuffer graphicsCommandBuffer;
         VkImage gradientImage;
-        VkDeviceMemory gradientImageMemory;
+        VmaAllocation gradientAlloc;
         VkImageView gradientImageView;
         VkSampler gradientSampler;
         VkSemaphore imageAvailableSemaphore;
@@ -165,9 +166,7 @@ typedef struct GlobalData {
         bool descriptorPoolReady;
         bool descriptorSetReady;
         bool descriptorSetUpdated;
-        bool renderPassReady;
         bool pipelinesReady;
-        bool framebuffersReady;
         bool commandPoolsReady;
         bool commandBuffersReady;
         bool gradientReady;
@@ -615,6 +614,7 @@ static void VulkanResetState(void)
     GLOBAL.Vulkan.swapchain = VK_NULL_HANDLE;
     memset(GLOBAL.Vulkan.swapchainImages, 0, sizeof(GLOBAL.Vulkan.swapchainImages));
     memset(GLOBAL.Vulkan.swapchainImageViews, 0, sizeof(GLOBAL.Vulkan.swapchainImageViews));
+    memset(GLOBAL.Vulkan.swapchainImagePresented, 0, sizeof(GLOBAL.Vulkan.swapchainImagePresented));
     GLOBAL.Vulkan.swapchainImageCount = 0;
     GLOBAL.Vulkan.swapchainImageFormat = VK_FORMAT_UNDEFINED;
     GLOBAL.Vulkan.swapchainExtent.width = 0;
@@ -629,14 +629,13 @@ static void VulkanResetState(void)
     GLOBAL.Vulkan.blitPipelineLayout = VK_NULL_HANDLE;
     GLOBAL.Vulkan.computePipeline = VK_NULL_HANDLE;
     GLOBAL.Vulkan.blitPipeline = VK_NULL_HANDLE;
-    GLOBAL.Vulkan.renderPass = VK_NULL_HANDLE;
-    memset(GLOBAL.Vulkan.framebuffers, 0, sizeof(GLOBAL.Vulkan.framebuffers));
+    GLOBAL.Vulkan.vma = NULL;
     GLOBAL.Vulkan.computeCommandPool = VK_NULL_HANDLE;
     GLOBAL.Vulkan.graphicsCommandPool = VK_NULL_HANDLE;
     GLOBAL.Vulkan.computeCommandBuffer = VK_NULL_HANDLE;
     GLOBAL.Vulkan.graphicsCommandBuffer = VK_NULL_HANDLE;
     GLOBAL.Vulkan.gradientImage = VK_NULL_HANDLE;
-    GLOBAL.Vulkan.gradientImageMemory = VK_NULL_HANDLE;
+    GLOBAL.Vulkan.gradientAlloc = NULL;
     GLOBAL.Vulkan.gradientImageView = VK_NULL_HANDLE;
     GLOBAL.Vulkan.gradientSampler = VK_NULL_HANDLE;
     GLOBAL.Vulkan.imageAvailableSemaphore = VK_NULL_HANDLE;
@@ -655,9 +654,7 @@ static void VulkanResetState(void)
     GLOBAL.Vulkan.descriptorPoolReady = false;
     GLOBAL.Vulkan.descriptorSetReady = false;
     GLOBAL.Vulkan.descriptorSetUpdated = false;
-    GLOBAL.Vulkan.renderPassReady = false;
     GLOBAL.Vulkan.pipelinesReady = false;
-    GLOBAL.Vulkan.framebuffersReady = false;
     GLOBAL.Vulkan.commandPoolsReady = false;
     GLOBAL.Vulkan.commandBuffersReady = false;
     GLOBAL.Vulkan.gradientReady = false;
@@ -684,25 +681,6 @@ static uint32_t VulkanEnumeratePhysicalDevices(VkInstance instance, VkPhysicalDe
     Assert(result == VK_SUCCESS, "Failed to enumerate Vulkan physical devices");
 
     return count;
-}
-
-static uint32_t VulkanFindMemoryType(uint32_t typeBits, VkMemoryPropertyFlags properties)
-{
-    VkPhysicalDeviceMemoryProperties memoryProperties;
-    vkGetPhysicalDeviceMemoryProperties(GLOBAL.Vulkan.physicalDevice, &memoryProperties);
-
-    for (uint32_t index = 0; index < memoryProperties.memoryTypeCount; index++)
-    {
-        const bool typeSupported = (typeBits & (1u << index)) != 0;
-        const bool propertiesMatch = (memoryProperties.memoryTypes[index].propertyFlags & properties) == properties;
-        if (typeSupported && propertiesMatch)
-        {
-            return index;
-        }
-    }
-
-    Assert(false, "Failed to find suitable Vulkan memory type");
-    return 0;
 }
 
 static uint32_t VulkanEnumerateDeviceExtensions(VkPhysicalDevice device, VkExtensionProperties *buffer, uint32_t capacity)
@@ -917,6 +895,20 @@ static void VulkanCreateLogicalDevice(void)
 
     VkPhysicalDeviceFeatures deviceFeatures = { 0 };
 
+    VkPhysicalDeviceVulkan13Features features13 = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
+        .dynamicRendering = VK_TRUE,
+        .synchronization2 = VK_TRUE,
+    };
+
+    VkPhysicalDeviceFeatures2 features2 = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+        .pNext = &features13,
+    };
+
+    vkGetPhysicalDeviceFeatures2(GLOBAL.Vulkan.physicalDevice, &features2);
+    Assert((features13.dynamicRendering == VK_TRUE) && (features13.synchronization2 == VK_TRUE), "Vulkan 1.3 features missing");
+
     const char *enabledDeviceExtensions[VULKAN_MAX_ENABLED_EXTENSIONS] = { 0 };
     uint32_t enabledDeviceExtensionCount = 0;
     for (uint32_t index = 0; index < ARRAY_SIZE(vulkanRequiredDeviceExtensions); index++)
@@ -939,6 +931,7 @@ static void VulkanCreateLogicalDevice(void)
         .enabledExtensionCount = enabledDeviceExtensionCount,
         .ppEnabledExtensionNames = enabledDeviceExtensions,
         .pEnabledFeatures = &deviceFeatures,
+        .pNext = &features13,
     };
 
     if (GLOBAL.Vulkan.validationLayersEnabled)
@@ -1484,6 +1477,7 @@ static void VulkanCreateGradientResources(void)
     Assert(GLOBAL.Vulkan.deviceReady, "Vulkan logical device is not ready");
     Assert(GLOBAL.Vulkan.swapchainReady, "Vulkan swapchain is not ready");
     Assert(GLOBAL.Vulkan.descriptorSetReady, "Vulkan descriptor set is not ready");
+    Assert(GLOBAL.Vulkan.vma != NULL, "VMA allocator is not ready");
 
     const VkExtent2D extent = GLOBAL.Vulkan.swapchainExtent;
     Assert(extent.width > 0 && extent.height > 0, "Vulkan swapchain extent is invalid");
@@ -1521,23 +1515,18 @@ static void VulkanCreateGradientResources(void)
         imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     }
 
-    VkResult imageResult = vkCreateImage(GLOBAL.Vulkan.device, &imageInfo, NULL, &GLOBAL.Vulkan.gradientImage);
-    Assert(imageResult == VK_SUCCESS, "Failed to create Vulkan gradient image");
-
-    VkMemoryRequirements requirements;
-    vkGetImageMemoryRequirements(GLOBAL.Vulkan.device, GLOBAL.Vulkan.gradientImage, &requirements);
-
-    VkMemoryAllocateInfo allocateInfo = {
-        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-        .allocationSize = requirements.size,
-        .memoryTypeIndex = VulkanFindMemoryType(requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT),
+    VmaAllocationCreateInfo allocInfo = {
+        .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
     };
 
-    VkResult memoryResult = vkAllocateMemory(GLOBAL.Vulkan.device, &allocateInfo, NULL, &GLOBAL.Vulkan.gradientImageMemory);
-    Assert(memoryResult == VK_SUCCESS, "Failed to allocate Vulkan gradient image memory");
-
-    VkResult bindResult = vkBindImageMemory(GLOBAL.Vulkan.device, GLOBAL.Vulkan.gradientImage, GLOBAL.Vulkan.gradientImageMemory, 0);
-    Assert(bindResult == VK_SUCCESS, "Failed to bind Vulkan gradient image memory");
+    VkResult imageResult = vmaCreateImage(
+        GLOBAL.Vulkan.vma,
+        &imageInfo,
+        &allocInfo,
+        &GLOBAL.Vulkan.gradientImage,
+        &GLOBAL.Vulkan.gradientAlloc,
+        NULL);
+    Assert(imageResult == VK_SUCCESS, "Failed to create Vulkan gradient image via VMA");
 
     VkImageViewCreateInfo viewInfo = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
@@ -1605,134 +1594,17 @@ static void VulkanDestroyGradientResources(void)
 
     if (GLOBAL.Vulkan.gradientImage != VK_NULL_HANDLE)
     {
-        vkDestroyImage(GLOBAL.Vulkan.device, GLOBAL.Vulkan.gradientImage, NULL);
+        if (GLOBAL.Vulkan.vma != NULL)
+        {
+            vmaDestroyImage(GLOBAL.Vulkan.vma, GLOBAL.Vulkan.gradientImage, GLOBAL.Vulkan.gradientAlloc);
+        }
         GLOBAL.Vulkan.gradientImage = VK_NULL_HANDLE;
-    }
-
-    if (GLOBAL.Vulkan.gradientImageMemory != VK_NULL_HANDLE)
-    {
-        vkFreeMemory(GLOBAL.Vulkan.device, GLOBAL.Vulkan.gradientImageMemory, NULL);
-        GLOBAL.Vulkan.gradientImageMemory = VK_NULL_HANDLE;
+        GLOBAL.Vulkan.gradientAlloc = NULL;
     }
 
     GLOBAL.Vulkan.gradientReady = false;
     GLOBAL.Vulkan.gradientInitialized = false;
     GLOBAL.Vulkan.descriptorSetUpdated = false;
-}
-
-static void VulkanCreateRenderPass(void)
-{
-    if (GLOBAL.Vulkan.renderPassReady)
-    {
-        return;
-    }
-
-    Assert(GLOBAL.Vulkan.swapchainReady, "Vulkan swapchain is not ready");
-
-    VkAttachmentDescription colorAttachment = {
-        .format = GLOBAL.Vulkan.swapchainImageFormat,
-        .samples = VK_SAMPLE_COUNT_1_BIT,
-        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
-        .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-        .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-        .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
-        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-        .finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-    };
-
-    VkAttachmentReference colorReference = {
-        .attachment = 0,
-        .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-    };
-
-    VkSubpassDescription subpass = {
-        .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
-        .colorAttachmentCount = 1,
-        .pColorAttachments = &colorReference,
-    };
-
-    VkSubpassDependency dependency = {
-        .srcSubpass = VK_SUBPASS_EXTERNAL,
-        .dstSubpass = 0,
-        .srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-        .dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-        .srcAccessMask = 0,
-        .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-    };
-
-    VkRenderPassCreateInfo renderPassInfo = {
-        .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
-        .attachmentCount = 1,
-        .pAttachments = &colorAttachment,
-        .subpassCount = 1,
-        .pSubpasses = &subpass,
-        .dependencyCount = 1,
-        .pDependencies = &dependency,
-    };
-
-    VkResult result = vkCreateRenderPass(GLOBAL.Vulkan.device, &renderPassInfo, NULL, &GLOBAL.Vulkan.renderPass);
-    Assert(result == VK_SUCCESS, "Failed to create Vulkan render pass");
-
-    GLOBAL.Vulkan.renderPassReady = true;
-
-    LogInfo("Vulkan render pass ready");
-}
-
-static void VulkanDestroyRenderPass(void)
-{
-    if (GLOBAL.Vulkan.renderPass != VK_NULL_HANDLE)
-    {
-        vkDestroyRenderPass(GLOBAL.Vulkan.device, GLOBAL.Vulkan.renderPass, NULL);
-        GLOBAL.Vulkan.renderPass = VK_NULL_HANDLE;
-    }
-
-    GLOBAL.Vulkan.renderPassReady = false;
-}
-
-static void VulkanCreateFramebuffers(void)
-{
-    if (GLOBAL.Vulkan.framebuffersReady)
-    {
-        return;
-    }
-
-    Assert(GLOBAL.Vulkan.renderPassReady, "Vulkan render pass is not ready");
-    Assert(GLOBAL.Vulkan.swapchainReady, "Vulkan swapchain is not ready");
-
-    for (uint32_t index = 0; index < GLOBAL.Vulkan.swapchainImageCount; index++)
-    {
-        VkImageView attachment = GLOBAL.Vulkan.swapchainImageViews[index];
-        VkFramebufferCreateInfo framebufferInfo = {
-            .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
-            .renderPass = GLOBAL.Vulkan.renderPass,
-            .attachmentCount = 1,
-            .pAttachments = &attachment,
-            .width = GLOBAL.Vulkan.swapchainExtent.width,
-            .height = GLOBAL.Vulkan.swapchainExtent.height,
-            .layers = 1,
-        };
-
-        VkResult result = vkCreateFramebuffer(GLOBAL.Vulkan.device, &framebufferInfo, NULL, &GLOBAL.Vulkan.framebuffers[index]);
-        Assert(result == VK_SUCCESS, "Failed to create Vulkan framebuffer");
-    }
-
-    GLOBAL.Vulkan.framebuffersReady = true;
-
-    LogInfo("Vulkan framebuffers ready");
-}
-
-static void VulkanDestroyFramebuffers(void)
-{
-    for (uint32_t index = 0; index < ARRAY_SIZE(GLOBAL.Vulkan.framebuffers); index++)
-    {
-        if (GLOBAL.Vulkan.framebuffers[index] != VK_NULL_HANDLE)
-        {
-            vkDestroyFramebuffer(GLOBAL.Vulkan.device, GLOBAL.Vulkan.framebuffers[index], NULL);
-            GLOBAL.Vulkan.framebuffers[index] = VK_NULL_HANDLE;
-        }
-    }
-
-    GLOBAL.Vulkan.framebuffersReady = false;
 }
 
 static void VulkanCreatePipelines(void)
@@ -1744,7 +1616,6 @@ static void VulkanCreatePipelines(void)
 
     Assert(GLOBAL.Vulkan.shaderModulesReady, "Vulkan shader modules are not ready");
     Assert(GLOBAL.Vulkan.descriptorSetLayoutReady, "Vulkan descriptor set layout is not ready");
-    Assert(GLOBAL.Vulkan.renderPassReady, "Vulkan render pass is not ready");
 
     VkPushConstantRange pushRange = {
         .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
@@ -1868,8 +1739,15 @@ static void VulkanCreatePipelines(void)
         .pAttachments = &colorAttachment,
     };
 
+    VkPipelineRenderingCreateInfo renderingInfo = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
+        .colorAttachmentCount = 1,
+        .pColorAttachmentFormats = &GLOBAL.Vulkan.swapchainImageFormat,
+    };
+
     VkGraphicsPipelineCreateInfo graphicsInfo = {
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        .pNext = &renderingInfo,
         .stageCount = ARRAY_SIZE(shaderStages),
         .pStages = shaderStages,
         .pVertexInputState = &vertexInput,
@@ -1881,7 +1759,7 @@ static void VulkanCreatePipelines(void)
         .pColorBlendState = &colorBlend,
         .pDynamicState = NULL,
         .layout = GLOBAL.Vulkan.blitPipelineLayout,
-        .renderPass = GLOBAL.Vulkan.renderPass,
+        .renderPass = VK_NULL_HANDLE,
         .subpass = 0,
     };
 
@@ -1925,18 +1803,14 @@ static void VulkanDestroyPipelines(void)
 static void VulkanDestroySwapchainResources(void)
 {
     VulkanDestroyPipelines();
-    VulkanDestroyFramebuffers();
     VulkanDestroyGradientResources();
-    VulkanDestroyRenderPass();
 }
 
 static void VulkanCreateSwapchainResources(void)
 {
     Assert(GLOBAL.Vulkan.swapchainReady, "Vulkan swapchain is not ready");
 
-    VulkanCreateRenderPass();
     VulkanCreateGradientResources();
-    VulkanCreateFramebuffers();
     VulkanCreatePipelines();
 }
 
@@ -1949,6 +1823,19 @@ static void VulkanCreateDeviceResources(void)
     VulkanCreateDescriptorSetLayout();
     VulkanCreateDescriptorPool();
     VulkanAllocateDescriptorSet();
+
+    if (GLOBAL.Vulkan.vma == NULL)
+    {
+        VmaAllocatorCreateInfo vmaInfo = {
+            .physicalDevice = GLOBAL.Vulkan.physicalDevice,
+            .device = GLOBAL.Vulkan.device,
+            .instance = GLOBAL.Vulkan.instance,
+            .vulkanApiVersion = VK_API_VERSION_1_3,
+        };
+
+        VkResult allocatorResult = vmaCreateAllocator(&vmaInfo, &GLOBAL.Vulkan.vma);
+        Assert(allocatorResult == VK_SUCCESS, "Failed to create VMA allocator");
+    }
 }
 
 static void VulkanDestroyDeviceResources(void)
@@ -1958,6 +1845,13 @@ static void VulkanDestroyDeviceResources(void)
     VulkanDestroyDescriptorSetLayout();
     VulkanDestroyShaderModules();
     VulkanDestroyCommandPools();
+
+    if (GLOBAL.Vulkan.vma != NULL)
+    {
+        vmaDestroyAllocator(GLOBAL.Vulkan.vma);
+        GLOBAL.Vulkan.vma = NULL;
+        GLOBAL.Vulkan.gradientAlloc = NULL;
+    }
 }
 
 static void VulkanRecordComputeCommands(uint32_t width, uint32_t height)
@@ -1977,8 +1871,12 @@ static void VulkanRecordComputeCommands(uint32_t width, uint32_t height)
     VkResult beginResult = vkBeginCommandBuffer(GLOBAL.Vulkan.computeCommandBuffer, &beginInfo);
     Assert(beginResult == VK_SUCCESS, "Failed to begin Vulkan compute command buffer");
 
-    VkImageMemoryBarrier toGeneral = {
-        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+    VkImageMemoryBarrier2 toGeneral = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+        .srcStageMask = GLOBAL.Vulkan.gradientInitialized ? VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT : VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+        .srcAccessMask = GLOBAL.Vulkan.gradientInitialized ? VK_ACCESS_2_SHADER_SAMPLED_READ_BIT : 0,
+        .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+        .dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
         .oldLayout = GLOBAL.Vulkan.gradientInitialized ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
         .newLayout = VK_IMAGE_LAYOUT_GENERAL,
         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
@@ -1991,20 +1889,15 @@ static void VulkanRecordComputeCommands(uint32_t width, uint32_t height)
             .baseArrayLayer = 0,
             .layerCount = 1,
         },
-        .srcAccessMask = GLOBAL.Vulkan.gradientInitialized ? VK_ACCESS_SHADER_READ_BIT : 0,
-        .dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
     };
 
-    VkPipelineStageFlags srcStage = GLOBAL.Vulkan.gradientInitialized ? VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+    VkDependencyInfo toGeneralDependency = {
+        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+        .imageMemoryBarrierCount = 1,
+        .pImageMemoryBarriers = &toGeneral,
+    };
 
-    vkCmdPipelineBarrier(
-        GLOBAL.Vulkan.computeCommandBuffer,
-        srcStage,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        0,
-        0, NULL,
-        0, NULL,
-        1, &toGeneral);
+    vkCmdPipelineBarrier2(GLOBAL.Vulkan.computeCommandBuffer, &toGeneralDependency);
 
     vkCmdBindPipeline(GLOBAL.Vulkan.computeCommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, GLOBAL.Vulkan.computePipeline);
     vkCmdBindDescriptorSets(
@@ -2035,8 +1928,12 @@ static void VulkanRecordComputeCommands(uint32_t width, uint32_t height)
 
     vkCmdDispatch(GLOBAL.Vulkan.computeCommandBuffer, groupCountX, groupCountY, 1);
 
-    VkImageMemoryBarrier toRead = {
-        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+    VkImageMemoryBarrier2 toRead = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+        .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+        .srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+        .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+        .dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
         .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
         .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
@@ -2049,18 +1946,15 @@ static void VulkanRecordComputeCommands(uint32_t width, uint32_t height)
             .baseArrayLayer = 0,
             .layerCount = 1,
         },
-        .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
-        .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
     };
 
-    vkCmdPipelineBarrier(
-        GLOBAL.Vulkan.computeCommandBuffer,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-        0,
-        0, NULL,
-        0, NULL,
-        1, &toRead);
+    VkDependencyInfo toReadDependency = {
+        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+        .imageMemoryBarrierCount = 1,
+        .pImageMemoryBarriers = &toRead,
+    };
+
+    vkCmdPipelineBarrier2(GLOBAL.Vulkan.computeCommandBuffer, &toReadDependency);
 
     VkResult endResult = vkEndCommandBuffer(GLOBAL.Vulkan.computeCommandBuffer);
     Assert(endResult == VK_SUCCESS, "Failed to record Vulkan compute command buffer");
@@ -2072,7 +1966,6 @@ static void VulkanRecordGraphicsCommands(uint32_t imageIndex)
 {
     Assert(GLOBAL.Vulkan.commandBuffersReady, "Vulkan command buffers are not ready");
     Assert(GLOBAL.Vulkan.pipelinesReady, "Vulkan pipelines are not ready");
-    Assert(GLOBAL.Vulkan.framebuffersReady, "Vulkan framebuffers are not ready");
     Assert(imageIndex < GLOBAL.Vulkan.swapchainImageCount, "Vulkan swapchain image index out of range");
 
     VkResult resetResult = vkResetCommandBuffer(GLOBAL.Vulkan.graphicsCommandBuffer, 0);
@@ -2086,23 +1979,60 @@ static void VulkanRecordGraphicsCommands(uint32_t imageIndex)
     VkResult beginResult = vkBeginCommandBuffer(GLOBAL.Vulkan.graphicsCommandBuffer, &beginInfo);
     Assert(beginResult == VK_SUCCESS, "Failed to begin Vulkan graphics command buffer");
 
+    const bool imagePresented = (imageIndex < GLOBAL.Vulkan.swapchainImageCount) ?
+        GLOBAL.Vulkan.swapchainImagePresented[imageIndex] : false;
+
+    VkImageMemoryBarrier2 preBarrier = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+        .srcStageMask = imagePresented ? VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT : VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+        .srcAccessMask = 0,
+        .dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+        .dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+        .oldLayout = imagePresented ? VK_IMAGE_LAYOUT_PRESENT_SRC_KHR : VK_IMAGE_LAYOUT_UNDEFINED,
+        .newLayout = VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
+        .image = GLOBAL.Vulkan.swapchainImages[imageIndex],
+        .subresourceRange = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        },
+    };
+
+    VkDependencyInfo preDependency = {
+        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+        .imageMemoryBarrierCount = 1,
+        .pImageMemoryBarriers = &preBarrier,
+    };
+
+    vkCmdPipelineBarrier2(GLOBAL.Vulkan.graphicsCommandBuffer, &preDependency);
+
     VkClearValue clearColor = {
         .color = { { 0.0f, 0.0f, 0.0f, 1.0f } },
     };
 
-    VkRenderPassBeginInfo renderPassInfo = {
-        .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
-        .renderPass = GLOBAL.Vulkan.renderPass,
-        .framebuffer = GLOBAL.Vulkan.framebuffers[imageIndex],
+    VkRenderingAttachmentInfo colorAttachment = {
+        .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+        .imageView = GLOBAL.Vulkan.swapchainImageViews[imageIndex],
+        .imageLayout = VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
+        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+        .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+        .clearValue = clearColor,
+    };
+
+    VkRenderingInfo renderingInfo = {
+        .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
         .renderArea = {
             .offset = { 0, 0 },
             .extent = GLOBAL.Vulkan.swapchainExtent,
         },
-        .clearValueCount = 1,
-        .pClearValues = &clearColor,
+        .layerCount = 1,
+        .colorAttachmentCount = 1,
+        .pColorAttachments = &colorAttachment,
     };
 
-    vkCmdBeginRenderPass(GLOBAL.Vulkan.graphicsCommandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdBeginRendering(GLOBAL.Vulkan.graphicsCommandBuffer, &renderingInfo);
     vkCmdBindPipeline(GLOBAL.Vulkan.graphicsCommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, GLOBAL.Vulkan.blitPipeline);
     vkCmdBindDescriptorSets(
         GLOBAL.Vulkan.graphicsCommandBuffer,
@@ -2115,7 +2045,33 @@ static void VulkanRecordGraphicsCommands(uint32_t imageIndex)
         NULL);
 
     vkCmdDraw(GLOBAL.Vulkan.graphicsCommandBuffer, 3, 1, 0, 0);
-    vkCmdEndRenderPass(GLOBAL.Vulkan.graphicsCommandBuffer);
+    vkCmdEndRendering(GLOBAL.Vulkan.graphicsCommandBuffer);
+
+    VkImageMemoryBarrier2 postBarrier = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+        .srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+        .srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+        .dstStageMask = VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT,
+        .dstAccessMask = 0,
+        .oldLayout = VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
+        .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+        .image = GLOBAL.Vulkan.swapchainImages[imageIndex],
+        .subresourceRange = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        },
+    };
+
+    VkDependencyInfo postDependency = {
+        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+        .imageMemoryBarrierCount = 1,
+        .pImageMemoryBarriers = &postBarrier,
+    };
+
+    vkCmdPipelineBarrier2(GLOBAL.Vulkan.graphicsCommandBuffer, &postDependency);
 
     VkResult endResult = vkEndCommandBuffer(GLOBAL.Vulkan.graphicsCommandBuffer);
     Assert(endResult == VK_SUCCESS, "Failed to record Vulkan graphics command buffer");
@@ -2212,6 +2168,10 @@ static void VulkanDrawFrame(void)
     }
 
     Assert(presentResult == VK_SUCCESS, "Failed to present Vulkan swapchain image");
+    if (imageIndex < GLOBAL.Vulkan.swapchainImageCount)
+    {
+        GLOBAL.Vulkan.swapchainImagePresented[imageIndex] = true;
+    }
 }
 
 static void VulkanDestroySwapchain(void)
@@ -2236,6 +2196,7 @@ static void VulkanDestroySwapchain(void)
     GLOBAL.Vulkan.swapchainImageCount = 0;
     memset(GLOBAL.Vulkan.swapchainImages, 0, sizeof(GLOBAL.Vulkan.swapchainImages));
     memset(GLOBAL.Vulkan.swapchainImageViews, 0, sizeof(GLOBAL.Vulkan.swapchainImageViews));
+    memset(GLOBAL.Vulkan.swapchainImagePresented, 0, sizeof(GLOBAL.Vulkan.swapchainImagePresented));
 
     if (GLOBAL.Vulkan.swapchain != VK_NULL_HANDLE)
     {
@@ -2327,6 +2288,7 @@ static void VulkanCreateSwapchain(void)
     GLOBAL.Vulkan.swapchainImageCount = retrievedImageCount;
 
     memset(GLOBAL.Vulkan.swapchainImageViews, 0, sizeof(GLOBAL.Vulkan.swapchainImageViews));
+    memset(GLOBAL.Vulkan.swapchainImagePresented, 0, sizeof(GLOBAL.Vulkan.swapchainImagePresented));
 
     for (uint32_t index = 0; index < GLOBAL.Vulkan.swapchainImageCount; index++)
     {
@@ -2410,7 +2372,7 @@ static void InitVulkan(void)
         .applicationVersion = VK_MAKE_VERSION(0, 0, 1),
         .pEngineName = "",
         .engineVersion = VK_MAKE_VERSION(0, 0, 0),
-        .apiVersion = VK_API_VERSION_1_1,
+        .apiVersion = VK_API_VERSION_1_3,
     };
 
     VulkanCreateInstance(&instanceConfig, &appInfo);

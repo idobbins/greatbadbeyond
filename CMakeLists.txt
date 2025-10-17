@@ -5,12 +5,16 @@ if(WIN32)
       CACHE FILEPATH "LLVM resource compiler" FORCE)
 endif()
 
-project(callandor LANGUAGES C)
+project(callandor LANGUAGES C CXX)
 
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
 
 include(FetchContent)
 
@@ -25,6 +29,13 @@ FetchContent_Declare(
   GIT_TAG        3.4
 )
 FetchContent_MakeAvailable(glfw)
+
+FetchContent_Declare(
+  vma
+  GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git
+  GIT_TAG        v3.1.0
+)
+FetchContent_MakeAvailable(vma)
 
 find_package(Vulkan REQUIRED)
 
@@ -79,6 +90,7 @@ add_custom_target(compile_shaders
 
 add_executable(${PROJECT_NAME}
   src/main.c
+  src/vma_impl.cpp
 )
 
 add_dependencies(${PROJECT_NAME} compile_shaders)
@@ -89,6 +101,21 @@ target_link_libraries(${PROJECT_NAME}
     Vulkan::Vulkan
 )
 
+target_include_directories(${PROJECT_NAME}
+  PRIVATE
+    ${vma_SOURCE_DIR}/include
+)
+
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    set_source_files_properties(src/vma_impl.cpp
+      PROPERTIES
+        COMPILE_OPTIONS "-Wno-unused-parameter;-Wno-unused-variable;-Wno-missing-field-initializers;-Wno-unused-function")
+elseif(MSVC)
+    set_source_files_properties(src/vma_impl.cpp
+      PROPERTIES
+        COMPILE_OPTIONS "/wd4100;/wd4189;/wd4505")
+endif()
+
 if(MSVC)
     target_compile_options(${PROJECT_NAME} PRIVATE /W4 /permissive-)
 else()
@@ -98,4 +125,8 @@ endif()
 target_compile_definitions(${PROJECT_NAME}
   PRIVATE
     VULKAN_SHADER_DIRECTORY="${SHADER_OUTPUT_DIR}"
+    VMA_NULLABLE=
+    VMA_NOT_NULL=
+    VMA_NULLABLE_NON_DISPATCHABLE=
+    VMA_NOT_NULL_NON_DISPATCHABLE=
 )
