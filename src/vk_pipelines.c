@@ -189,6 +189,23 @@ void CreateComputePipelines(void)
 
     EnsureComputePipelineLayout();
 
+    uint32_t workgroupSpecialization[2] = {
+        (GLOBAL.Vulkan.computeLocalSizeX > 0u) ? GLOBAL.Vulkan.computeLocalSizeX : VULKAN_COMPUTE_LOCAL_SIZE,
+        (GLOBAL.Vulkan.computeLocalSizeY > 0u) ? GLOBAL.Vulkan.computeLocalSizeY : VULKAN_COMPUTE_LOCAL_SIZE,
+    };
+
+    const VkSpecializationMapEntry specializationEntries[2] = {
+        { 0, 0, sizeof(uint32_t) },
+        { 1, sizeof(uint32_t), sizeof(uint32_t) },
+    };
+
+    VkSpecializationInfo specializationInfo = {
+        .mapEntryCount = ARRAY_SIZE(specializationEntries),
+        .pMapEntries = specializationEntries,
+        .dataSize = sizeof(workgroupSpecialization),
+        .pData = workgroupSpecialization,
+    };
+
     if (GLOBAL.Vulkan.primaryIntersectPipe == VK_NULL_HANDLE)
     {
         VkPipelineShaderStageCreateInfo stage = {
@@ -196,6 +213,7 @@ void CreateComputePipelines(void)
             .stage = VK_SHADER_STAGE_COMPUTE_BIT,
             .module = GLOBAL.Vulkan.primaryIntersectSM,
             .pName = "main",
+            .pSpecializationInfo = &specializationInfo,
         };
 
         VkComputePipelineCreateInfo info = {
@@ -215,6 +233,7 @@ void CreateComputePipelines(void)
             .stage = VK_SHADER_STAGE_COMPUTE_BIT,
             .module = GLOBAL.Vulkan.shadeShadowSM,
             .pName = "main",
+            .pSpecializationInfo = &specializationInfo,
         };
 
         VkComputePipelineCreateInfo info = {

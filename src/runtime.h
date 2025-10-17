@@ -131,6 +131,11 @@ typedef struct GlobalData {
         float worldMaxX;
         float worldMaxZ;
 
+        uint32_t vendorId;
+        uint32_t subgroupSize;
+        uint32_t computeLocalSizeX;
+        uint32_t computeLocalSizeY;
+
         Camera cam;
         uint32_t frameIndex;
 

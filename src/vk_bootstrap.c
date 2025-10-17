@@ -230,6 +230,10 @@ static void VulkanResetState(void)
     GLOBAL.Vulkan.rt = (VulkanBuffers){ 0 };
     memset(GLOBAL.Vulkan.sphereCRHost, 0, sizeof(GLOBAL.Vulkan.sphereCRHost));
     memset(GLOBAL.Vulkan.sphereAlbHost, 0, sizeof(GLOBAL.Vulkan.sphereAlbHost));
+    GLOBAL.Vulkan.vendorId = 0;
+    GLOBAL.Vulkan.subgroupSize = 0;
+    GLOBAL.Vulkan.computeLocalSizeX = VULKAN_COMPUTE_LOCAL_SIZE;
+    GLOBAL.Vulkan.computeLocalSizeY = VULKAN_COMPUTE_LOCAL_SIZE;
     GLOBAL.Vulkan.gradientInitialized = false;
     GLOBAL.Vulkan.sceneInitialized = false;
     GLOBAL.Vulkan.frameIndex = 0;
@@ -283,6 +287,95 @@ static bool FindUniversalQueue(VkPhysicalDevice device, VkSurfaceKHR surface, ui
     return false;
 }
 
+static void VulkanCacheDeviceCapabilities(VkPhysicalDevice device)
+{
+    VkPhysicalDeviceSubgroupProperties subgroup = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES,
+    };
+
+    VkPhysicalDeviceProperties2 properties = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+        .pNext = &subgroup,
+    };
+
+    vkGetPhysicalDeviceProperties2(device, &properties);
+
+    GLOBAL.Vulkan.vendorId = properties.properties.vendorID;
+    GLOBAL.Vulkan.subgroupSize = subgroup.subgroupSize;
+
+    uint32_t sizeX = VULKAN_COMPUTE_LOCAL_SIZE;
+    uint32_t sizeY = VULKAN_COMPUTE_LOCAL_SIZE;
+
+    switch (GLOBAL.Vulkan.vendorId)
+    {
+        case 0x10DEu: /* NVIDIA */
+        case 0x1002u: /* AMD */
+        case 0x1022u: /* AMD (older PCI IDs) */
+        case 0x106Bu: /* Apple */
+            sizeX = 16u;
+            sizeY = 8u;
+            break;
+        default:
+            break;
+    }
+
+    const VkPhysicalDeviceLimits *limits = &properties.properties.limits;
+    if (sizeX > limits->maxComputeWorkGroupSize[0])
+    {
+        sizeX = limits->maxComputeWorkGroupSize[0];
+    }
+    if (sizeY > limits->maxComputeWorkGroupSize[1])
+    {
+        sizeY = limits->maxComputeWorkGroupSize[1];
+    }
+
+    const uint32_t maxInvocations = limits->maxComputeWorkGroupInvocations;
+    while ((sizeX * sizeY) > maxInvocations)
+    {
+        if (sizeY > 1u)
+        {
+            sizeY >>= 1;
+        }
+        else if (sizeX > 1u)
+        {
+            sizeX >>= 1;
+        }
+        else
+        {
+            break;
+        }
+    }
+
+    if (sizeX == 0u)
+    {
+        sizeX = 1u;
+    }
+    if (sizeY == 0u)
+    {
+        sizeY = 1u;
+    }
+
+    const uint32_t totalInvocations = sizeX * sizeY;
+    if ((GLOBAL.Vulkan.subgroupSize > 0u) && ((totalInvocations % GLOBAL.Vulkan.subgroupSize) != 0u))
+    {
+        LogWarn(
+            "Selected compute workgroup size %ux%u is not aligned to subgroup size %u",
+            sizeX,
+            sizeY,
+            GLOBAL.Vulkan.subgroupSize);
+    }
+
+    GLOBAL.Vulkan.computeLocalSizeX = sizeX;
+    GLOBAL.Vulkan.computeLocalSizeY = sizeY;
+
+    LogInfo(
+        "Compute workgroup configured as %ux%u (subgroup %u, vendor 0x%04X)",
+        sizeX,
+        sizeY,
+        GLOBAL.Vulkan.subgroupSize,
+        GLOBAL.Vulkan.vendorId);
+}
+
 static void VulkanSelectPhysicalDevice(void)
 {
     if (GLOBAL.Vulkan.physicalDevice != VK_NULL_HANDLE)
@@ -308,6 +401,8 @@ static void VulkanSelectPhysicalDevice(void)
 
         GLOBAL.Vulkan.physicalDevice = candidate;
         GLOBAL.Vulkan.queueFamily = universalQueueFamily;
+
+        VulkanCacheDeviceCapabilities(candidate);
 
         LogInfo("Selected Vulkan physical device: %s", properties.deviceName);
         return;

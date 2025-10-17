@@ -83,23 +83,47 @@ static VkPresentModeKHR VulkanChoosePresentMode(const VkPresentModeKHR *presentM
 {
     Assert(count > 0, "No Vulkan present modes available");
 
-    for (uint32_t index = 0; index < count; index++)
-    {
-        if (presentModes[index] == VK_PRESENT_MODE_MAILBOX_KHR)
-        {
-            return VK_PRESENT_MODE_MAILBOX_KHR;
-        }
-    }
+    bool hasFifo = false;
+    bool hasMailbox = false;
+    bool hasImmediate = false;
 
     for (uint32_t index = 0; index < count; index++)
     {
-        if (presentModes[index] == VK_PRESENT_MODE_IMMEDIATE_KHR)
+        if (presentModes[index] == VK_PRESENT_MODE_FIFO_KHR)
         {
-            return VK_PRESENT_MODE_IMMEDIATE_KHR;
+            hasFifo = true;
+        }
+        else if (presentModes[index] == VK_PRESENT_MODE_MAILBOX_KHR)
+        {
+            hasMailbox = true;
+        }
+        else if (presentModes[index] == VK_PRESENT_MODE_IMMEDIATE_KHR)
+        {
+            hasImmediate = true;
         }
     }
 
-    return VK_PRESENT_MODE_FIFO_KHR;
+#if defined(__APPLE__)
+    if (hasFifo)
+    {
+        return VK_PRESENT_MODE_FIFO_KHR;
+    }
+#else
+    if (hasFifo)
+    {
+        return VK_PRESENT_MODE_FIFO_KHR;
+    }
+    if (hasMailbox)
+    {
+        return VK_PRESENT_MODE_MAILBOX_KHR;
+    }
+    if (hasImmediate)
+    {
+        return VK_PRESENT_MODE_IMMEDIATE_KHR;
+    }
+#endif
+
+    return presentModes[0];
 }
 
 static VkExtent2D VulkanChooseExtent(const VkSurfaceCapabilitiesKHR *capabilities)

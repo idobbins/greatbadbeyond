@@ -316,8 +316,14 @@ void RtRecordFrame(uint32_t imageIndex, VkExtent2D extent)
         ._pad3 = { 0.0f, 0.0f, 0.0f },
     };
 
-    const uint32_t groupCountX = (pc.width + VULKAN_COMPUTE_LOCAL_SIZE - 1u) / VULKAN_COMPUTE_LOCAL_SIZE;
-    const uint32_t groupCountY = (pc.height + VULKAN_COMPUTE_LOCAL_SIZE - 1u) / VULKAN_COMPUTE_LOCAL_SIZE;
+    const uint32_t localSizeX = (GLOBAL.Vulkan.computeLocalSizeX > 0u) ? GLOBAL.Vulkan.computeLocalSizeX : VULKAN_COMPUTE_LOCAL_SIZE;
+    const uint32_t localSizeY = (GLOBAL.Vulkan.computeLocalSizeY > 0u) ? GLOBAL.Vulkan.computeLocalSizeY : VULKAN_COMPUTE_LOCAL_SIZE;
+
+    Assert(localSizeX > 0u, "Compute local size X is zero");
+    Assert(localSizeY > 0u, "Compute local size Y is zero");
+
+    const uint32_t groupCountX = (pc.width + localSizeX - 1u) / localSizeX;
+    const uint32_t groupCountY = (pc.height + localSizeY - 1u) / localSizeY;
 
     vkCmdBindPipeline(GLOBAL.Vulkan.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, GLOBAL.Vulkan.primaryIntersectPipe);
     vkCmdBindDescriptorSets(

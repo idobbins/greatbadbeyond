@@ -2,7 +2,9 @@
 
 #include "bindings.inc.glsl"
 
-layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+layout(constant_id = 0) const uint WG_X = 16u;
+layout(constant_id = 1) const uint WG_Y = 16u;
+layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z = 1) in;
 
 layout(binding = B_TARGET, rgba8) uniform writeonly image2D uTarget;
 
