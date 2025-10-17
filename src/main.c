@@ -1,4 +1,5 @@
 #define _CRT_SECURE_NO_WARNINGS
+
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -20,11 +21,11 @@
     #define VULKAN_ENABLE_DEBUG 0
 #endif
 
-static const char *const VULKAN_VALIDATION_LAYERS[] = {
+static const char *const vulkanValidationLayers[] = {
     "VK_LAYER_KHRONOS_validation",
 };
 
-static const char *const VULKAN_REQUIRED_DEVICE_EXTENSIONS[] = {
+static const char *const vulkanRequiredDeviceExtensions[] = {
     VK_KHR_SWAPCHAIN_EXTENSION_NAME,
 };
 
@@ -33,7 +34,7 @@ static const char *const VULKAN_REQUIRED_DEVICE_EXTENSIONS[] = {
 #endif
 
 #define VULKAN_MAX_ENABLED_EXTENSIONS 16
-#define VULKAN_MAX_ENABLED_LAYERS ARRAY_SIZE(VULKAN_VALIDATION_LAYERS)
+#define VULKAN_MAX_ENABLED_LAYERS ARRAY_SIZE(vulkanValidationLayers)
 #define VULKAN_MAX_ENUMERATED_EXTENSIONS 256
 #define VULKAN_MAX_ENUMERATED_LAYERS 64
 #define VULKAN_MAX_PHYSICAL_DEVICES 16
@@ -52,9 +53,9 @@ static const char *const VULKAN_REQUIRED_DEVICE_EXTENSIONS[] = {
     #define VULKAN_SHADER_DIRECTORY "./shaders"
 #endif
 
-static const char *const APPLICATION_TITLE = "Callandor";
+static const char *const defaultApplicationTitle = "Callandor";
 
-// Logging --------------------------------------------------------------------
+// Provide logging helpers
 
 static void LogWrite(FILE *stream, const char *prefix, const char *format, va_list args)
 {
@@ -96,7 +97,7 @@ static inline void Assert(bool condition, const char *message)
     }
 }
 
-// Global State ---------------------------------------------------------------
+// Track global renderer state
 
 typedef struct GlobalData {
     struct {
@@ -183,7 +184,7 @@ typedef struct GlobalData {
 
 static GlobalData GLOBAL = { 0 };
 
-// GLFW / Window --------------------------------------------------------------
+// Manage GLFW and window lifecycle
 
 static void GlfwErrorCallback(int32_t code, const char *desc)
 {
@@ -191,7 +192,7 @@ static void GlfwErrorCallback(int32_t code, const char *desc)
     LogError("[glfw][%d] %s", code, message);
 }
 
-void InitGlfwContext(void)
+static void InitGlfwContext(void)
 {
     glfwSetErrorCallback(GlfwErrorCallback);
 
@@ -204,7 +205,7 @@ void InitGlfwContext(void)
     LogInfo("GLFW initialized (Vulkan supported)");
 }
 
-void CloseGlfwContext(void)
+static void CloseGlfwContext(void)
 {
     if (!GLOBAL.Glfw.ready)
     {
@@ -218,7 +219,7 @@ void CloseGlfwContext(void)
     GLOBAL.Glfw.vulkanSupported = false;
 }
 
-void InitWindow(void)
+static void InitWindow(void)
 {
     glfwDefaultWindowHints();
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
@@ -227,14 +228,14 @@ void InitWindow(void)
     glfwWindowHint(GLFW_COCOA_RETINA_FRAMEBUFFER, GLFW_FALSE);
 #endif
 
-    GLOBAL.Window.title = APPLICATION_TITLE;
+    GLOBAL.Window.title = defaultApplicationTitle;
     GLOBAL.Window.window = glfwCreateWindow(1280, 720, GLOBAL.Window.title, NULL, NULL);
     Assert(GLOBAL.Window.window != NULL, "Failed to create window");
 
     GLOBAL.Window.ready = true;
 }
 
-void CloseWindow(void)
+static void CloseWindow(void)
 {
     if (!GLOBAL.Window.ready)
     {
@@ -246,18 +247,18 @@ void CloseWindow(void)
     GLOBAL.Window.ready = false;
 }
 
-bool IsWindowReady(void)
+static bool IsWindowReady(void)
 {
     return GLOBAL.Window.ready;
 }
 
-bool WindowShouldClose(void)
+static bool WindowShouldClose(void)
 {
-    Assert(GLOBAL.Window.ready, "Window is not ready");
+    Assert(IsWindowReady(), "Window is not ready");
     return glfwWindowShouldClose(GLOBAL.Window.window);
 }
 
-// Vulkan Helpers -------------------------------------------------------------
+// Provide Vulkan helper utilities
 
 static void PushUniqueString(const char **list, uint32_t *count, uint32_t capacity, const char *value)
 {
@@ -373,7 +374,7 @@ static bool VulkanLayerListHas(const VkLayerProperties *layers, uint32_t count, 
     return false;
 }
 
-// Vulkan Instance ------------------------------------------------------------
+// Handle Vulkan instance setup
 
 typedef struct VulkanInstanceConfig {
     const char *extensions[VULKAN_MAX_ENABLED_EXTENSIONS];
@@ -519,10 +520,10 @@ static VulkanInstanceConfig VulkanBuildInstanceConfig(bool requestDebug)
         VkLayerProperties availableLayers[VULKAN_MAX_ENUMERATED_LAYERS];
         const uint32_t availableLayerCount = VulkanEnumerateInstanceLayers(availableLayers, ARRAY_SIZE(availableLayers));
 
-        const bool debugLayerAvailable = VulkanLayerListHas(availableLayers, availableLayerCount, VULKAN_VALIDATION_LAYERS[0]);
+        const bool debugLayerAvailable = VulkanLayerListHas(availableLayers, availableLayerCount, vulkanValidationLayers[0]);
         if (debugLayerAvailable)
         {
-            config.layers[config.layerCount++] = VULKAN_VALIDATION_LAYERS[0];
+            config.layers[config.layerCount++] = vulkanValidationLayers[0];
         }
         else
         {
@@ -669,7 +670,7 @@ static void VulkanResetState(void)
     GLOBAL.Vulkan.portabilitySubsetRequired = false;
 }
 
-// Vulkan Device --------------------------------------------------------------
+// Manage Vulkan device resources
 
 static uint32_t VulkanEnumeratePhysicalDevices(VkInstance instance, VkPhysicalDevice *buffer, uint32_t capacity)
 {
@@ -733,12 +734,12 @@ static bool VulkanCheckDeviceExtensions(VkPhysicalDevice device, bool *requiresP
     VkExtensionProperties extensions[VULKAN_MAX_DEVICE_EXTENSIONS];
     const uint32_t extensionCount = VulkanEnumerateDeviceExtensions(device, extensions, ARRAY_SIZE(extensions));
 
-    bool requiredFound[ARRAY_SIZE(VULKAN_REQUIRED_DEVICE_EXTENSIONS)] = { false };
+    bool requiredFound[ARRAY_SIZE(vulkanRequiredDeviceExtensions)] = { false };
     bool portabilitySubsetPresent = false;
 
-    for (uint32_t requiredIndex = 0; requiredIndex < ARRAY_SIZE(VULKAN_REQUIRED_DEVICE_EXTENSIONS); requiredIndex++)
+    for (uint32_t requiredIndex = 0; requiredIndex < ARRAY_SIZE(vulkanRequiredDeviceExtensions); requiredIndex++)
     {
-        const char *name = VULKAN_REQUIRED_DEVICE_EXTENSIONS[requiredIndex];
+        const char *name = vulkanRequiredDeviceExtensions[requiredIndex];
         bool found = false;
         for (uint32_t availableIndex = 0; availableIndex < extensionCount; availableIndex++)
         {
@@ -918,9 +919,9 @@ static void VulkanCreateLogicalDevice(void)
 
     const char *enabledDeviceExtensions[VULKAN_MAX_ENABLED_EXTENSIONS] = { 0 };
     uint32_t enabledDeviceExtensionCount = 0;
-    for (uint32_t index = 0; index < ARRAY_SIZE(VULKAN_REQUIRED_DEVICE_EXTENSIONS); index++)
+    for (uint32_t index = 0; index < ARRAY_SIZE(vulkanRequiredDeviceExtensions); index++)
     {
-        PushUniqueString(enabledDeviceExtensions, &enabledDeviceExtensionCount, ARRAY_SIZE(enabledDeviceExtensions), VULKAN_REQUIRED_DEVICE_EXTENSIONS[index]);
+        PushUniqueString(enabledDeviceExtensions, &enabledDeviceExtensionCount, ARRAY_SIZE(enabledDeviceExtensions), vulkanRequiredDeviceExtensions[index]);
     }
 
     if (GLOBAL.Vulkan.portabilitySubsetRequired)
@@ -942,8 +943,8 @@ static void VulkanCreateLogicalDevice(void)
 
     if (GLOBAL.Vulkan.validationLayersEnabled)
     {
-        createInfo.enabledLayerCount = ARRAY_SIZE(VULKAN_VALIDATION_LAYERS);
-        createInfo.ppEnabledLayerNames = VULKAN_VALIDATION_LAYERS;
+        createInfo.enabledLayerCount = ARRAY_SIZE(vulkanValidationLayers);
+        createInfo.ppEnabledLayerNames = vulkanValidationLayers;
     }
     else
     {
@@ -964,7 +965,7 @@ static void VulkanCreateLogicalDevice(void)
     LogInfo("Vulkan logical device ready");
 }
 
-// Vulkan Swapchain -----------------------------------------------------------
+// Manage Vulkan swapchain resources
 
 typedef struct VulkanSwapchainSupport {
     VkSurfaceCapabilitiesKHR capabilities;
@@ -2120,7 +2121,7 @@ static void VulkanRecordGraphicsCommands(uint32_t imageIndex)
     Assert(endResult == VK_SUCCESS, "Failed to record Vulkan graphics command buffer");
 }
 
-void VulkanRecreateSwapchain(void);
+static void VulkanRecreateSwapchain(void);
 
 static void VulkanDrawFrame(void)
 {
@@ -2362,7 +2363,7 @@ static void VulkanCreateSwapchain(void)
     LogInfo("Vulkan swapchain ready: %u images (%ux%u)", GLOBAL.Vulkan.swapchainImageCount, extent.width, extent.height);
 }
 
-void VulkanRecreateSwapchain(void)
+static void VulkanRecreateSwapchain(void)
 {
     if (!GLOBAL.Vulkan.deviceReady || !GLOBAL.Vulkan.surfaceReady)
     {
@@ -2384,9 +2385,9 @@ void VulkanRecreateSwapchain(void)
     VulkanCreateSwapchain();
 }
 
-// Vulkan Lifecycle -----------------------------------------------------------
+// Manage Vulkan lifecycle
 
-void InitVulkan(void)
+static void InitVulkan(void)
 {
     if (GLOBAL.Vulkan.ready)
     {
@@ -2402,7 +2403,7 @@ void InitVulkan(void)
     const bool requestDebug = (VULKAN_ENABLE_DEBUG != 0);
     VulkanInstanceConfig instanceConfig = VulkanBuildInstanceConfig(requestDebug);
 
-    const char *applicationTitle = (GLOBAL.Window.title != NULL) ? GLOBAL.Window.title : APPLICATION_TITLE;
+    const char *applicationTitle = (GLOBAL.Window.title != NULL) ? GLOBAL.Window.title : defaultApplicationTitle;
     VkApplicationInfo appInfo = {
         .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
         .pApplicationName = applicationTitle,
@@ -2426,7 +2427,7 @@ void InitVulkan(void)
     LogInfo("Vulkan initialization complete");
 }
 
-void CloseVulkan(void)
+static void CloseVulkan(void)
 {
     if (!GLOBAL.Vulkan.instanceReady &&
         !GLOBAL.Vulkan.deviceReady &&
@@ -2489,7 +2490,7 @@ void CloseVulkan(void)
     GLOBAL.Vulkan.portabilitySubsetRequired = false;
 }
 
-// Entry Point ----------------------------------------------------------------
+// Provide application entry point
 
 int main(void)
 {
