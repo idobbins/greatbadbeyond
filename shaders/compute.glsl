@@ -1,5 +1,7 @@
 #version 450
 
+#include "bindings.inc.glsl"
+
 // ---------------- Common ----------------
 
 #ifdef KERNEL_SPHERES_INIT
@@ -8,16 +10,16 @@ layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 #endif
 
-layout(binding = 0, rgba8) uniform writeonly image2D uTarget;      // output
-// binding = 1 is the sampler used by blit; unchanged
+layout(binding = B_TARGET, rgba8) uniform writeonly image2D uTarget;      // output
+// binding = B_SAMPLER is the sampler used by blit; unchanged
 
 // SoA-by-groups scene buffers
-layout(std430, binding = 2) buffer SphereCR   { vec4 sphereCR[];   }; // (cx, cy, cz, r)
-layout(std430, binding = 3) buffer SphereAlb  { vec4 sphereAlb[];  }; // (albedo.rgb, 1)
+layout(std430, binding = B_SPHERE_CR)  buffer SphereCR  { vec4 sphereCR[];  }; // (cx, cy, cz, r)
+layout(std430, binding = B_SPHERE_ALB) buffer SphereAlb { vec4 sphereAlb[]; }; // (albedo.rgb, 1)
 
 // Per-pixel hit buffers (wavefront hand-off)
-layout(std430, binding = 4) buffer HitTBuf    { float hitT[];      }; // t or <0 for miss
-layout(std430, binding = 5) buffer HitNBuf    { vec4  hitN[];      }; // normal.xyz, matId in .w: -1 miss, 0 plane, (i+1) sphere index
+layout(std430, binding = B_HIT_T) buffer HitTBuf { float hitT[]; }; // t or <0 for miss
+layout(std430, binding = B_HIT_N) buffer HitNBuf { vec4 hitN[];  }; // normal.xyz, matId in .w: -1 miss, 0 plane, (i+1) sphere index
 
 // Compact push constants (<=128B)
 layout(push_constant) uniform PC {

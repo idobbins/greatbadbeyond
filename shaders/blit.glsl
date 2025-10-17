@@ -1,5 +1,7 @@
 #version 450
 
+#include "bindings.inc.glsl"
+
 #ifdef VERTEX_SHADER
 layout(location = 0) out vec2 vUV;
 
@@ -26,7 +28,7 @@ void main()
 layout(location = 0) in vec2 vUV;
 layout(location = 0) out vec4 outColor;
 
-layout(binding = 1) uniform sampler2D uGradient;
+layout(binding = B_SAMPLER) uniform sampler2D uGradient;
 
 void main()
 {

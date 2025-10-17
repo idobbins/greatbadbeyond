@@ -1,10 +1,17 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-- `src/main.c` holds the application entry point, Vulkan setup, and render loop wiring.
-- Keep new renderer and gameplay logic consolidated within `src/main.c`; defer splitting into additional source files until we revisit the architecture.
+- `src/runtime.h` owns `GlobalData`, shared macros, and the logging/assert declarations shared by all translation units.
+- `src/main.c` keeps the application entry point (GLFW/window/input loop, frame stats) and delegates Vulkan work to the new modules.
+- `src/vk_bootstrap.{c,h}` initialize and tear down the instance, device, queues, command pool/buffer, sync primitives, and VMA allocator.
+- `src/vk_descriptors.{c,h}` create the descriptor layout/pool/set and provide `UpdateComputeDescriptorSet`.
+- `src/vk_pipelines.{c,h}` load SPIR-V modules and build/destroy the compute and blit pipelines.
+- `src/rt_resources.{c,h}` own swapchain-sized buffers, the gradient image, and the descriptor writes.
+- `src/rt_frame.{c,h}` record the per-frame command buffer (compute dispatch + blit) and expose `RtUpdateSpawnArea`.
+- `src/vk_swapchain.{c,h}` manage swapchain lifetime and call into resources/pipelines for rebuilds; they expose `CreateSwapchain`, `DestroySwapchain`, `RecreateSwapchain`, and `VulkanDrawFrame`.
+- `shaders/bindings.inc.glsl` mirrors the C binding IDs from `src/shader_bindings.h` so GLSL includes stay in sync.
 - `shaders/blit.glsl` and `shaders/compute.glsl` compile to SPIR-V under `build/*/shaders`; keep sources human-readable here.
-- `CMakeLists.txt` configures the C17 toolchain, FetchContent for GLFW, and shader compilation targets.
+- `CMakeLists.txt` configures the C17 toolchain, FetchContent for GLFW, shader compilation targets, and includes the new source files.
 - Generated `cmake-build-*` directories come from IDE builds; prefer fresh `build/<config>` folders for reproducible output.
 
 ## Build, Test, and Development Commands

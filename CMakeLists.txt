@@ -59,7 +59,7 @@ set(BLIT_FRAGMENT_SHADER_SPV ${SHADER_OUTPUT_DIR}/blit.frag.spv)
 add_custom_command(
     OUTPUT ${SPHERES_INIT_SPV}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADER_OUTPUT_DIR}
-    COMMAND ${GLSLC_EXECUTABLE} -fshader-stage=compute -DKERNEL_SPHERES_INIT -o ${SPHERES_INIT_SPV} ${COMPUTE_SHADER_SOURCE}
+    COMMAND ${GLSLC_EXECUTABLE} -I${SHADER_SOURCE_DIR} -fshader-stage=compute -DKERNEL_SPHERES_INIT -o ${SPHERES_INIT_SPV} ${COMPUTE_SHADER_SOURCE}
     DEPENDS ${COMPUTE_SHADER_SOURCE}
     COMMENT "Compiling spheres_init"
     VERBATIM
@@ -68,7 +68,7 @@ add_custom_command(
 add_custom_command(
     OUTPUT ${PRIMARY_INTERSECT_SPV}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADER_OUTPUT_DIR}
-    COMMAND ${GLSLC_EXECUTABLE} -fshader-stage=compute -DKERNEL_PRIMARY_INTERSECT -o ${PRIMARY_INTERSECT_SPV} ${COMPUTE_SHADER_SOURCE}
+    COMMAND ${GLSLC_EXECUTABLE} -I${SHADER_SOURCE_DIR} -fshader-stage=compute -DKERNEL_PRIMARY_INTERSECT -o ${PRIMARY_INTERSECT_SPV} ${COMPUTE_SHADER_SOURCE}
     DEPENDS ${COMPUTE_SHADER_SOURCE}
     COMMENT "Compiling primary_intersect"
     VERBATIM
@@ -77,7 +77,7 @@ add_custom_command(
 add_custom_command(
     OUTPUT ${SHADE_SHADOW_SPV}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADER_OUTPUT_DIR}
-    COMMAND ${GLSLC_EXECUTABLE} -fshader-stage=compute -DKERNEL_SHADE_SHADOW -o ${SHADE_SHADOW_SPV} ${COMPUTE_SHADER_SOURCE}
+    COMMAND ${GLSLC_EXECUTABLE} -I${SHADER_SOURCE_DIR} -fshader-stage=compute -DKERNEL_SHADE_SHADOW -o ${SHADE_SHADOW_SPV} ${COMPUTE_SHADER_SOURCE}
     DEPENDS ${COMPUTE_SHADER_SOURCE}
     COMMENT "Compiling shade_shadow"
     VERBATIM
@@ -86,7 +86,7 @@ add_custom_command(
 add_custom_command(
     OUTPUT ${BLIT_VERTEX_SHADER_SPV}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADER_OUTPUT_DIR}
-    COMMAND ${GLSLC_EXECUTABLE} -DVERTEX_SHADER -fshader-stage=vertex -o ${BLIT_VERTEX_SHADER_SPV} ${BLIT_SHADER_SOURCE}
+    COMMAND ${GLSLC_EXECUTABLE} -I${SHADER_SOURCE_DIR} -DVERTEX_SHADER -fshader-stage=vertex -o ${BLIT_VERTEX_SHADER_SPV} ${BLIT_SHADER_SOURCE}
     DEPENDS ${BLIT_SHADER_SOURCE}
     COMMENT "Compiling blit.glsl (vertex)"
     VERBATIM
@@ -95,7 +95,7 @@ add_custom_command(
 add_custom_command(
     OUTPUT ${BLIT_FRAGMENT_SHADER_SPV}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADER_OUTPUT_DIR}
-    COMMAND ${GLSLC_EXECUTABLE} -DFRAGMENT_SHADER -fshader-stage=fragment -o ${BLIT_FRAGMENT_SHADER_SPV} ${BLIT_SHADER_SOURCE}
+    COMMAND ${GLSLC_EXECUTABLE} -I${SHADER_SOURCE_DIR} -DFRAGMENT_SHADER -fshader-stage=fragment -o ${BLIT_FRAGMENT_SHADER_SPV} ${BLIT_SHADER_SOURCE}
     DEPENDS ${BLIT_SHADER_SOURCE}
     COMMENT "Compiling blit.glsl (fragment)"
     VERBATIM
@@ -112,6 +112,12 @@ add_custom_target(compile_shaders
 
 add_executable(${PROJECT_NAME}
   src/main.c
+  src/vk_bootstrap.c
+  src/vk_descriptors.c
+  src/vk_pipelines.c
+  src/rt_resources.c
+  src/rt_frame.c
+  src/vk_swapchain.c
   src/vma_impl.cpp
 )
 
