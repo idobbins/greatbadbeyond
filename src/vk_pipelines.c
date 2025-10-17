@@ -70,8 +70,7 @@ static VkShaderModule VulkanLoadShaderModule(const char *filename)
 
 void LoadShaderModules(void)
 {
-    if ((GLOBAL.Vulkan.spheresInitSM != VK_NULL_HANDLE) &&
-        (GLOBAL.Vulkan.primaryIntersectSM != VK_NULL_HANDLE) &&
+    if ((GLOBAL.Vulkan.primaryIntersectSM != VK_NULL_HANDLE) &&
         (GLOBAL.Vulkan.shadeShadowSM != VK_NULL_HANDLE) &&
         (GLOBAL.Vulkan.blitVertexShaderModule != VK_NULL_HANDLE) &&
         (GLOBAL.Vulkan.blitFragmentShaderModule != VK_NULL_HANDLE))
@@ -79,23 +78,31 @@ void LoadShaderModules(void)
         return;
     }
 
-    GLOBAL.Vulkan.spheresInitSM = VulkanLoadShaderModule("spheres_init.spv");
-    GLOBAL.Vulkan.primaryIntersectSM = VulkanLoadShaderModule("primary_intersect.spv");
-    GLOBAL.Vulkan.shadeShadowSM = VulkanLoadShaderModule("shade_shadow.spv");
-    GLOBAL.Vulkan.blitVertexShaderModule = VulkanLoadShaderModule("blit.vert.spv");
-    GLOBAL.Vulkan.blitFragmentShaderModule = VulkanLoadShaderModule("blit.frag.spv");
+    if (GLOBAL.Vulkan.primaryIntersectSM == VK_NULL_HANDLE)
+    {
+        GLOBAL.Vulkan.primaryIntersectSM = VulkanLoadShaderModule("primary_intersect.spv");
+    }
+
+    if (GLOBAL.Vulkan.shadeShadowSM == VK_NULL_HANDLE)
+    {
+        GLOBAL.Vulkan.shadeShadowSM = VulkanLoadShaderModule("shade_shadow.spv");
+    }
+
+    if (GLOBAL.Vulkan.blitVertexShaderModule == VK_NULL_HANDLE)
+    {
+        GLOBAL.Vulkan.blitVertexShaderModule = VulkanLoadShaderModule("blit.vert.spv");
+    }
+
+    if (GLOBAL.Vulkan.blitFragmentShaderModule == VK_NULL_HANDLE)
+    {
+        GLOBAL.Vulkan.blitFragmentShaderModule = VulkanLoadShaderModule("blit.frag.spv");
+    }
 
     LogInfo("Vulkan shader modules ready");
 }
 
 void DestroyShaderModules(void)
 {
-    if (GLOBAL.Vulkan.spheresInitSM != VK_NULL_HANDLE)
-    {
-        vkDestroyShaderModule(GLOBAL.Vulkan.device, GLOBAL.Vulkan.spheresInitSM, NULL);
-        GLOBAL.Vulkan.spheresInitSM = VK_NULL_HANDLE;
-    }
-
     if (GLOBAL.Vulkan.primaryIntersectSM != VK_NULL_HANDLE)
     {
         vkDestroyShaderModule(GLOBAL.Vulkan.device, GLOBAL.Vulkan.primaryIntersectSM, NULL);
@@ -170,7 +177,6 @@ static void EnsureBlitPipelineLayout(void)
 void CreateComputePipelines(void)
 {
     const bool ready =
-        (GLOBAL.Vulkan.spheresInitPipe != VK_NULL_HANDLE) &&
         (GLOBAL.Vulkan.primaryIntersectPipe != VK_NULL_HANDLE) &&
         (GLOBAL.Vulkan.shadeShadowPipe != VK_NULL_HANDLE);
     if (ready)
@@ -178,30 +184,10 @@ void CreateComputePipelines(void)
         return;
     }
 
-    Assert(GLOBAL.Vulkan.spheresInitSM != VK_NULL_HANDLE, "Spheres init shader module is not ready");
     Assert(GLOBAL.Vulkan.primaryIntersectSM != VK_NULL_HANDLE, "Primary intersect shader module is not ready");
     Assert(GLOBAL.Vulkan.shadeShadowSM != VK_NULL_HANDLE, "Shade shadow shader module is not ready");
 
     EnsureComputePipelineLayout();
-
-    if (GLOBAL.Vulkan.spheresInitPipe == VK_NULL_HANDLE)
-    {
-        VkPipelineShaderStageCreateInfo stage = {
-            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-            .stage = VK_SHADER_STAGE_COMPUTE_BIT,
-            .module = GLOBAL.Vulkan.spheresInitSM,
-            .pName = "main",
-        };
-
-        VkComputePipelineCreateInfo info = {
-            .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-            .stage = stage,
-            .layout = GLOBAL.Vulkan.computePipelineLayout,
-        };
-
-        VkResult result = vkCreateComputePipelines(GLOBAL.Vulkan.device, VK_NULL_HANDLE, 1, &info, NULL, &GLOBAL.Vulkan.spheresInitPipe);
-        Assert(result == VK_SUCCESS, "Failed to create spheres init pipeline");
-    }
 
     if (GLOBAL.Vulkan.primaryIntersectPipe == VK_NULL_HANDLE)
     {
@@ -395,12 +381,6 @@ void DestroyPipelines(void)
     {
         vkDestroyPipeline(GLOBAL.Vulkan.device, GLOBAL.Vulkan.primaryIntersectPipe, NULL);
         GLOBAL.Vulkan.primaryIntersectPipe = VK_NULL_HANDLE;
-    }
-
-    if (GLOBAL.Vulkan.spheresInitPipe != VK_NULL_HANDLE)
-    {
-        vkDestroyPipeline(GLOBAL.Vulkan.device, GLOBAL.Vulkan.spheresInitPipe, NULL);
-        GLOBAL.Vulkan.spheresInitPipe = VK_NULL_HANDLE;
     }
 
     DestroyBlitPipeline();

@@ -91,7 +91,6 @@ typedef struct GlobalData {
         uint32_t swapchainImageCount;
         VkFormat swapchainImageFormat;
         VkExtent2D swapchainExtent;
-        VkShaderModule spheresInitSM;
         VkShaderModule primaryIntersectSM;
         VkShaderModule shadeShadowSM;
         VkShaderModule blitVertexShaderModule;
@@ -101,7 +100,6 @@ typedef struct GlobalData {
         VkDescriptorSet descriptorSet;
         VkPipelineLayout computePipelineLayout;
         VkPipelineLayout blitPipelineLayout;
-        VkPipeline spheresInitPipe;
         VkPipeline primaryIntersectPipe;
         VkPipeline shadeShadowPipe;
         VkPipeline blitPipeline;
@@ -121,8 +119,12 @@ typedef struct GlobalData {
         bool gradientInitialized;
         bool sceneInitialized;
 
+        uint32_t sphereTargetCount;
         uint32_t sphereCount;
-        float sphereRadius;
+        float sphereMinRadius;
+        float sphereMaxRadius;
+        float sphereCRHost[RT_MAX_SPHERES * 4];
+        float sphereAlbHost[RT_MAX_SPHERES * 4];
         float groundY;
         float worldMinX;
         float worldMinZ;

@@ -205,7 +205,6 @@ static void VulkanResetState(void)
     GLOBAL.Vulkan.swapchainImageFormat = VK_FORMAT_UNDEFINED;
     GLOBAL.Vulkan.swapchainExtent.width = 0;
     GLOBAL.Vulkan.swapchainExtent.height = 0;
-    GLOBAL.Vulkan.spheresInitSM = VK_NULL_HANDLE;
     GLOBAL.Vulkan.primaryIntersectSM = VK_NULL_HANDLE;
     GLOBAL.Vulkan.shadeShadowSM = VK_NULL_HANDLE;
     GLOBAL.Vulkan.blitVertexShaderModule = VK_NULL_HANDLE;
@@ -215,7 +214,6 @@ static void VulkanResetState(void)
     GLOBAL.Vulkan.descriptorSet = VK_NULL_HANDLE;
     GLOBAL.Vulkan.computePipelineLayout = VK_NULL_HANDLE;
     GLOBAL.Vulkan.blitPipelineLayout = VK_NULL_HANDLE;
-    GLOBAL.Vulkan.spheresInitPipe = VK_NULL_HANDLE;
     GLOBAL.Vulkan.primaryIntersectPipe = VK_NULL_HANDLE;
     GLOBAL.Vulkan.shadeShadowPipe = VK_NULL_HANDLE;
     GLOBAL.Vulkan.blitPipeline = VK_NULL_HANDLE;
@@ -230,9 +228,12 @@ static void VulkanResetState(void)
     memset(GLOBAL.Vulkan.renderFinishedSemaphores, 0, sizeof(GLOBAL.Vulkan.renderFinishedSemaphores));
     GLOBAL.Vulkan.frameFence = VK_NULL_HANDLE;
     GLOBAL.Vulkan.rt = (VulkanBuffers){ 0 };
+    memset(GLOBAL.Vulkan.sphereCRHost, 0, sizeof(GLOBAL.Vulkan.sphereCRHost));
+    memset(GLOBAL.Vulkan.sphereAlbHost, 0, sizeof(GLOBAL.Vulkan.sphereAlbHost));
     GLOBAL.Vulkan.gradientInitialized = false;
     GLOBAL.Vulkan.sceneInitialized = false;
     GLOBAL.Vulkan.frameIndex = 0;
+    GLOBAL.Vulkan.sphereCount = 0;
     GLOBAL.Vulkan.ready = false;
     GLOBAL.Vulkan.debugEnabled = false;
     GLOBAL.Vulkan.validationLayersEnabled = false;

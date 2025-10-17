@@ -17,10 +17,8 @@ typedef struct PCPush {
     float _pad2;
     float worldMin[2];
     float worldMax[2];
-    float sphereRadius;
     float groundY;
-    uint32_t rngSeed;
-    uint32_t flags;
+    float _pad3[3];
 } PCPush;
 
 void RtUpdateSpawnArea(void);

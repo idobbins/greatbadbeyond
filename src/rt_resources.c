@@ -182,14 +182,16 @@ void RtCreateSwapchainResources(void)
         CreateBuffer(hitNSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, &GLOBAL.Vulkan.rt.hitN, &GLOBAL.Vulkan.rt.hitNAlloc);
     }
 
+    const VkBufferUsageFlags sphereUsage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+
     if (GLOBAL.Vulkan.rt.sphereCR == VK_NULL_HANDLE)
     {
-        CreateBuffer(sphereSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, &GLOBAL.Vulkan.rt.sphereCR, &GLOBAL.Vulkan.rt.sphereCRAlloc);
+        CreateBuffer(sphereSize, sphereUsage, &GLOBAL.Vulkan.rt.sphereCR, &GLOBAL.Vulkan.rt.sphereCRAlloc);
     }
 
     if (GLOBAL.Vulkan.rt.sphereAlb == VK_NULL_HANDLE)
     {
-        CreateBuffer(sphereSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, &GLOBAL.Vulkan.rt.sphereAlb, &GLOBAL.Vulkan.rt.sphereAlbAlloc);
+        CreateBuffer(sphereSize, sphereUsage, &GLOBAL.Vulkan.rt.sphereAlb, &GLOBAL.Vulkan.rt.sphereAlbAlloc);
     }
 
     CreateGradientResources();

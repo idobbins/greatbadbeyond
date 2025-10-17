@@ -50,20 +50,10 @@ set(SHADER_OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/shaders)
 set(COMPUTE_SHADER_SOURCE ${SHADER_SOURCE_DIR}/compute.glsl)
 set(BLIT_SHADER_SOURCE ${SHADER_SOURCE_DIR}/blit.glsl)
 
-set(SPHERES_INIT_SPV       ${SHADER_OUTPUT_DIR}/spheres_init.spv)
 set(PRIMARY_INTERSECT_SPV  ${SHADER_OUTPUT_DIR}/primary_intersect.spv)
 set(SHADE_SHADOW_SPV       ${SHADER_OUTPUT_DIR}/shade_shadow.spv)
 set(BLIT_VERTEX_SHADER_SPV ${SHADER_OUTPUT_DIR}/blit.vert.spv)
 set(BLIT_FRAGMENT_SHADER_SPV ${SHADER_OUTPUT_DIR}/blit.frag.spv)
-
-add_custom_command(
-    OUTPUT ${SPHERES_INIT_SPV}
-    COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADER_OUTPUT_DIR}
-    COMMAND ${GLSLC_EXECUTABLE} -I${SHADER_SOURCE_DIR} -fshader-stage=compute -DKERNEL_SPHERES_INIT -o ${SPHERES_INIT_SPV} ${COMPUTE_SHADER_SOURCE}
-    DEPENDS ${COMPUTE_SHADER_SOURCE}
-    COMMENT "Compiling spheres_init"
-    VERBATIM
-)
 
 add_custom_command(
     OUTPUT ${PRIMARY_INTERSECT_SPV}
@@ -104,7 +94,6 @@ add_custom_command(
 
 add_custom_target(compile_shaders
     DEPENDS
-        ${SPHERES_INIT_SPV}
         ${PRIMARY_INTERSECT_SPV}
         ${SHADE_SHADOW_SPV}
         ${BLIT_VERTEX_SHADER_SPV}

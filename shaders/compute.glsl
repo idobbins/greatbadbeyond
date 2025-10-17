@@ -2,11 +2,7 @@
 
 #include "bindings.inc.glsl"
 
-#if defined(KERNEL_SPHERES_INIT)
-layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
-#else
 layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
-#endif
 
 layout(binding = B_TARGET, rgba8) uniform writeonly image2D uTarget;
 
@@ -27,30 +23,12 @@ layout(push_constant) uniform PC {
 
     vec2 worldMin;
     vec2 worldMax;
-    float sphereRadius;
     float groundY;
-    uint rngSeed;
-    uint flags;
+    float _pad3[3];
 } pc;
 
 const float kHuge = 1e30;
 const float kSurfaceBias = 1e-3;
-
-uint wang_hash(uint s)
-{
-    s = (s ^ 61u) ^ (s >> 16);
-    s *= 9u;
-    s = s ^ (s >> 4);
-    s *= 0x27d4eb2du;
-    s = s ^ (s >> 15);
-    return s;
-}
-
-float rand01(inout uint state)
-{
-    state = wang_hash(state);
-    return float(state) * (1.0 / 4294967296.0);
-}
 
 vec3 computeRayDir(uvec2 pix)
 {
@@ -100,44 +78,6 @@ bool intersectPlaneY(vec3 ro, vec3 rd, float y, out float t, out vec3 n)
     n = vec3(0.0, (denom < 0.0) ? 1.0 : -1.0, 0.0);
     return true;
 }
-
-#ifdef KERNEL_SPHERES_INIT
-void main()
-{
-    uint i = gl_GlobalInvocationID.x;
-    if (i >= pc.sphereCount)
-    {
-        return;
-    }
-
-    uint cellsX = uint(ceil(sqrt(float(pc.sphereCount))));
-    uint cellsZ = (pc.sphereCount + cellsX - 1u) / cellsX;
-
-    float wx = pc.worldMax.x - pc.worldMin.x;
-    float wz = pc.worldMax.y - pc.worldMin.y;
-    float cellX = wx / float(max(cellsX, 1u));
-    float cellZ = wz / float(max(cellsZ, 1u));
-
-    float jitterX = max(0.0, 0.5 * cellX - pc.sphereRadius);
-    float jitterZ = max(0.0, 0.5 * cellZ - pc.sphereRadius);
-
-    uint ix = (cellsX == 0u) ? 0u : (i % cellsX);
-    uint iz = (cellsX == 0u) ? 0u : (i / cellsX);
-
-    float cx = pc.worldMin.x + (float(ix) + 0.5) * cellX;
-    float cz = pc.worldMin.y + (float(iz) + 0.5) * cellZ;
-
-    uint rng = pc.rngSeed ^ (i + pc.frame * 1664525u);
-    float dx = (rand01(rng) * 2.0 - 1.0) * jitterX * 0.8;
-    float dz = (rand01(rng) * 2.0 - 1.0) * jitterZ * 0.8;
-
-    float y = pc.groundY + pc.sphereRadius;
-    sphereCR[i] = vec4(cx + dx, y, cz + dz, pc.sphereRadius);
-
-    vec3 h = vec3(rand01(rng), rand01(rng) * 0.25 + 0.65, rand01(rng) * 0.4 + 0.4);
-    sphereAlb[i] = vec4(h, 1.0);
-}
-#endif
 
 #if defined(KERNEL_PRIMARY_INTERSECT) || defined(KERNEL_SHADE_SHADOW)
 bool findClosestSphere(vec3 ro, vec3 rd, inout float bestT, inout vec3 bestN, inout float bestId)
