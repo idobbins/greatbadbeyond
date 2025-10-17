@@ -4,10 +4,3 @@
 #define B_SPHERE_ALB 3
 #define B_HIT_T 4
 #define B_HIT_N 5
-#define B_GRID_L0_META 6
-#define B_GRID_L0_COUNTER 7
-#define B_GRID_L0_INDICES 8
-#define B_GRID_L1_META 9
-#define B_GRID_L1_COUNTER 10
-#define B_GRID_L1_INDICES 11
-#define B_GRID_STATE 12

@@ -53,9 +53,6 @@ set(BLIT_SHADER_SOURCE ${SHADER_SOURCE_DIR}/blit.glsl)
 set(SPHERES_INIT_SPV       ${SHADER_OUTPUT_DIR}/spheres_init.spv)
 set(PRIMARY_INTERSECT_SPV  ${SHADER_OUTPUT_DIR}/primary_intersect.spv)
 set(SHADE_SHADOW_SPV       ${SHADER_OUTPUT_DIR}/shade_shadow.spv)
-set(GRID_COUNT_SPV         ${SHADER_OUTPUT_DIR}/grid_count.spv)
-set(GRID_CLASSIFY_SPV      ${SHADER_OUTPUT_DIR}/grid_classify.spv)
-set(GRID_SCATTER_SPV       ${SHADER_OUTPUT_DIR}/grid_scatter.spv)
 set(BLIT_VERTEX_SHADER_SPV ${SHADER_OUTPUT_DIR}/blit.vert.spv)
 set(BLIT_FRAGMENT_SHADER_SPV ${SHADER_OUTPUT_DIR}/blit.frag.spv)
 
@@ -86,32 +83,6 @@ add_custom_command(
     VERBATIM
 )
 
-add_custom_command(
-    OUTPUT ${GRID_COUNT_SPV}
-    COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADER_OUTPUT_DIR}
-    COMMAND ${GLSLC_EXECUTABLE} -I${SHADER_SOURCE_DIR} -fshader-stage=compute -DKERNEL_GRID_COUNT -o ${GRID_COUNT_SPV} ${COMPUTE_SHADER_SOURCE}
-    DEPENDS ${COMPUTE_SHADER_SOURCE}
-    COMMENT "Compiling grid_count"
-    VERBATIM
-)
-
-add_custom_command(
-    OUTPUT ${GRID_CLASSIFY_SPV}
-    COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADER_OUTPUT_DIR}
-    COMMAND ${GLSLC_EXECUTABLE} -I${SHADER_SOURCE_DIR} -fshader-stage=compute -DKERNEL_GRID_CLASSIFY -o ${GRID_CLASSIFY_SPV} ${COMPUTE_SHADER_SOURCE}
-    DEPENDS ${COMPUTE_SHADER_SOURCE}
-    COMMENT "Compiling grid_classify"
-    VERBATIM
-)
-
-add_custom_command(
-    OUTPUT ${GRID_SCATTER_SPV}
-    COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADER_OUTPUT_DIR}
-    COMMAND ${GLSLC_EXECUTABLE} -I${SHADER_SOURCE_DIR} -fshader-stage=compute -DKERNEL_GRID_SCATTER -o ${GRID_SCATTER_SPV} ${COMPUTE_SHADER_SOURCE}
-    DEPENDS ${COMPUTE_SHADER_SOURCE}
-    COMMENT "Compiling grid_scatter"
-    VERBATIM
-)
 
 add_custom_command(
     OUTPUT ${BLIT_VERTEX_SHADER_SPV}
@@ -136,9 +107,6 @@ add_custom_target(compile_shaders
         ${SPHERES_INIT_SPV}
         ${PRIMARY_INTERSECT_SPV}
         ${SHADE_SHADOW_SPV}
-        ${GRID_COUNT_SPV}
-        ${GRID_CLASSIFY_SPV}
-        ${GRID_SCATTER_SPV}
         ${BLIT_VERTEX_SHADER_SPV}
         ${BLIT_FRAGMENT_SHADER_SPV}
 )

@@ -172,14 +172,6 @@ void RtCreateSwapchainResources(void)
     VkDeviceSize hitTSize = sizeof(float) * pixels;
     VkDeviceSize hitNSize = sizeof(float) * 4 * pixels;
     VkDeviceSize sphereSize = sizeof(float) * 4 * (VkDeviceSize)RT_MAX_SPHERES;
-    VkDeviceSize gridL0MetaSize = sizeof(uint32_t) * 4 * (VkDeviceSize)GRID_LEVEL0_CELLS;
-    VkDeviceSize gridL0CounterSize = sizeof(uint32_t) * (VkDeviceSize)GRID_LEVEL0_CELLS;
-    VkDeviceSize gridL0IndicesSize = sizeof(uint32_t) * (VkDeviceSize)RT_MAX_SPHERES;
-    VkDeviceSize gridL1MetaSize = sizeof(uint32_t) * 4 * (VkDeviceSize)GRID_LEVEL1_CELLS;
-    VkDeviceSize gridL1CounterSize = sizeof(uint32_t) * (VkDeviceSize)GRID_LEVEL1_CELLS;
-    VkDeviceSize gridL1IndicesSize = sizeof(uint32_t) * (VkDeviceSize)RT_MAX_SPHERES;
-    VkDeviceSize gridStateSize = sizeof(uint32_t) * 4;
-
     if (GLOBAL.Vulkan.rt.hitT == VK_NULL_HANDLE)
     {
         CreateBuffer(hitTSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, &GLOBAL.Vulkan.rt.hitT, &GLOBAL.Vulkan.rt.hitTAlloc);
@@ -200,41 +192,6 @@ void RtCreateSwapchainResources(void)
         CreateBuffer(sphereSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, &GLOBAL.Vulkan.rt.sphereAlb, &GLOBAL.Vulkan.rt.sphereAlbAlloc);
     }
 
-    if (GLOBAL.Vulkan.rt.gridLevel0Meta == VK_NULL_HANDLE)
-    {
-        CreateBuffer(gridL0MetaSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, &GLOBAL.Vulkan.rt.gridLevel0Meta, &GLOBAL.Vulkan.rt.gridLevel0MetaAlloc);
-    }
-
-    if (GLOBAL.Vulkan.rt.gridLevel0Counter == VK_NULL_HANDLE)
-    {
-        CreateBuffer(gridL0CounterSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, &GLOBAL.Vulkan.rt.gridLevel0Counter, &GLOBAL.Vulkan.rt.gridLevel0CounterAlloc);
-    }
-
-    if (GLOBAL.Vulkan.rt.gridLevel0Indices == VK_NULL_HANDLE)
-    {
-        CreateBuffer(gridL0IndicesSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, &GLOBAL.Vulkan.rt.gridLevel0Indices, &GLOBAL.Vulkan.rt.gridLevel0IndicesAlloc);
-    }
-
-    if (GLOBAL.Vulkan.rt.gridLevel1Meta == VK_NULL_HANDLE)
-    {
-        CreateBuffer(gridL1MetaSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, &GLOBAL.Vulkan.rt.gridLevel1Meta, &GLOBAL.Vulkan.rt.gridLevel1MetaAlloc);
-    }
-
-    if (GLOBAL.Vulkan.rt.gridLevel1Counter == VK_NULL_HANDLE)
-    {
-        CreateBuffer(gridL1CounterSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, &GLOBAL.Vulkan.rt.gridLevel1Counter, &GLOBAL.Vulkan.rt.gridLevel1CounterAlloc);
-    }
-
-    if (GLOBAL.Vulkan.rt.gridLevel1Indices == VK_NULL_HANDLE)
-    {
-        CreateBuffer(gridL1IndicesSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, &GLOBAL.Vulkan.rt.gridLevel1Indices, &GLOBAL.Vulkan.rt.gridLevel1IndicesAlloc);
-    }
-
-    if (GLOBAL.Vulkan.rt.gridState == VK_NULL_HANDLE)
-    {
-        CreateBuffer(gridStateSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, &GLOBAL.Vulkan.rt.gridState, &GLOBAL.Vulkan.rt.gridStateAlloc);
-    }
-
     CreateGradientResources();
 
     ComputeDS resources = {
@@ -244,13 +201,6 @@ void RtCreateSwapchainResources(void)
         .sphereAlb = GLOBAL.Vulkan.rt.sphereAlb,
         .hitT = GLOBAL.Vulkan.rt.hitT,
         .hitN = GLOBAL.Vulkan.rt.hitN,
-        .gridLevel0Meta = GLOBAL.Vulkan.rt.gridLevel0Meta,
-        .gridLevel0Counter = GLOBAL.Vulkan.rt.gridLevel0Counter,
-        .gridLevel0Indices = GLOBAL.Vulkan.rt.gridLevel0Indices,
-        .gridLevel1Meta = GLOBAL.Vulkan.rt.gridLevel1Meta,
-        .gridLevel1Counter = GLOBAL.Vulkan.rt.gridLevel1Counter,
-        .gridLevel1Indices = GLOBAL.Vulkan.rt.gridLevel1Indices,
-        .gridState = GLOBAL.Vulkan.rt.gridState,
     };
 
     UpdateComputeDescriptorSet(&resources);
@@ -265,12 +215,5 @@ void RtDestroySwapchainResources(void)
     DestroyBuffer(&GLOBAL.Vulkan.rt.hitN, &GLOBAL.Vulkan.rt.hitNAlloc);
     DestroyBuffer(&GLOBAL.Vulkan.rt.sphereCR, &GLOBAL.Vulkan.rt.sphereCRAlloc);
     DestroyBuffer(&GLOBAL.Vulkan.rt.sphereAlb, &GLOBAL.Vulkan.rt.sphereAlbAlloc);
-    DestroyBuffer(&GLOBAL.Vulkan.rt.gridLevel0Meta, &GLOBAL.Vulkan.rt.gridLevel0MetaAlloc);
-    DestroyBuffer(&GLOBAL.Vulkan.rt.gridLevel0Counter, &GLOBAL.Vulkan.rt.gridLevel0CounterAlloc);
-    DestroyBuffer(&GLOBAL.Vulkan.rt.gridLevel0Indices, &GLOBAL.Vulkan.rt.gridLevel0IndicesAlloc);
-    DestroyBuffer(&GLOBAL.Vulkan.rt.gridLevel1Meta, &GLOBAL.Vulkan.rt.gridLevel1MetaAlloc);
-    DestroyBuffer(&GLOBAL.Vulkan.rt.gridLevel1Counter, &GLOBAL.Vulkan.rt.gridLevel1CounterAlloc);
-    DestroyBuffer(&GLOBAL.Vulkan.rt.gridLevel1Indices, &GLOBAL.Vulkan.rt.gridLevel1IndicesAlloc);
-    DestroyBuffer(&GLOBAL.Vulkan.rt.gridState, &GLOBAL.Vulkan.rt.gridStateAlloc);
     GLOBAL.Vulkan.sceneInitialized = false;
 }

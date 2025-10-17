@@ -51,9 +51,6 @@ void RtRecordFrame(uint32_t imageIndex, VkExtent2D extent)
     Assert(GLOBAL.Vulkan.spheresInitPipe != VK_NULL_HANDLE, "Spheres init pipeline is not ready");
     Assert(GLOBAL.Vulkan.primaryIntersectPipe != VK_NULL_HANDLE, "Primary intersect pipeline is not ready");
     Assert(GLOBAL.Vulkan.shadeShadowPipe != VK_NULL_HANDLE, "Shade shadow pipeline is not ready");
-    Assert(GLOBAL.Vulkan.gridCountPipe != VK_NULL_HANDLE, "Grid count pipeline is not ready");
-    Assert(GLOBAL.Vulkan.gridClassifyPipe != VK_NULL_HANDLE, "Grid classify pipeline is not ready");
-    Assert(GLOBAL.Vulkan.gridScatterPipe != VK_NULL_HANDLE, "Grid scatter pipeline is not ready");
     Assert(GLOBAL.Vulkan.blitPipeline != VK_NULL_HANDLE, "Vulkan blit pipeline is not ready");
     Assert(GLOBAL.Vulkan.descriptorSet != VK_NULL_HANDLE, "Vulkan descriptor set is not ready");
     Assert(GLOBAL.Vulkan.gradientImage != VK_NULL_HANDLE, "Vulkan gradient image is not ready");
@@ -66,13 +63,6 @@ void RtRecordFrame(uint32_t imageIndex, VkExtent2D extent)
     Assert(GLOBAL.Vulkan.rt.sphereAlb != VK_NULL_HANDLE, "Sphere albedo buffer is not ready");
     Assert(GLOBAL.Vulkan.rt.hitT != VK_NULL_HANDLE, "Hit distance buffer is not ready");
     Assert(GLOBAL.Vulkan.rt.hitN != VK_NULL_HANDLE, "Hit normal buffer is not ready");
-    Assert(GLOBAL.Vulkan.rt.gridLevel0Meta != VK_NULL_HANDLE, "Grid level0 meta buffer is not ready");
-    Assert(GLOBAL.Vulkan.rt.gridLevel0Counter != VK_NULL_HANDLE, "Grid level0 counter buffer is not ready");
-    Assert(GLOBAL.Vulkan.rt.gridLevel0Indices != VK_NULL_HANDLE, "Grid level0 index buffer is not ready");
-    Assert(GLOBAL.Vulkan.rt.gridLevel1Meta != VK_NULL_HANDLE, "Grid level1 meta buffer is not ready");
-    Assert(GLOBAL.Vulkan.rt.gridLevel1Counter != VK_NULL_HANDLE, "Grid level1 counter buffer is not ready");
-    Assert(GLOBAL.Vulkan.rt.gridLevel1Indices != VK_NULL_HANDLE, "Grid level1 index buffer is not ready");
-    Assert(GLOBAL.Vulkan.rt.gridState != VK_NULL_HANDLE, "Grid state buffer is not ready");
 
     VkResult resetResult = vkResetCommandBuffer(GLOBAL.Vulkan.commandBuffer, 0);
     Assert(resetResult == VK_SUCCESS, "Failed to reset Vulkan command buffer");
@@ -117,41 +107,6 @@ void RtRecordFrame(uint32_t imageIndex, VkExtent2D extent)
 
     UpdateSpawnArea();
 
-    const uint32_t sphereCount = GLOBAL.Vulkan.sphereCount;
-    uint32_t gridDimBase = 1u;
-    if (sphereCount > 0u)
-    {
-        float root = sqrtf((float)sphereCount);
-        uint32_t approx = (uint32_t)ceilf(root * 0.5f);
-        if (approx < 1u)
-        {
-            approx = 1u;
-        }
-        if (approx > (uint32_t)GRID_MAX_LEVEL0_DIM)
-        {
-            approx = (uint32_t)GRID_MAX_LEVEL0_DIM;
-        }
-        gridDimBase = approx;
-    }
-
-    uint32_t gridDimX = gridDimBase;
-    uint32_t gridDimZ = gridDimBase;
-    if (gridDimX == 0u)
-    {
-        gridDimX = 1u;
-    }
-    if (gridDimZ == 0u)
-    {
-        gridDimZ = 1u;
-    }
-
-    const uint32_t gridFineDim = (uint32_t)GRID_FINE_DIM;
-    uint32_t gridRefineThreshold = gridFineDim * gridFineDim / 2u;
-    if (gridRefineThreshold < 1u)
-    {
-        gridRefineThreshold = 1u;
-    }
-
     PCPush pc = {
         .width = extent.width,
         .height = extent.height,
@@ -168,16 +123,10 @@ void RtRecordFrame(uint32_t imageIndex, VkExtent2D extent)
         .groundY = GLOBAL.Vulkan.groundY,
         .rngSeed = 1337u,
         .flags = 0u,
-        .gridDimX = gridDimX,
-        .gridDimZ = gridDimZ,
-        .gridFineDim = gridFineDim,
-        .gridRefineThreshold = gridRefineThreshold,
     };
 
     const uint32_t groupCountX = (pc.width + VULKAN_COMPUTE_LOCAL_SIZE - 1u) / VULKAN_COMPUTE_LOCAL_SIZE;
     const uint32_t groupCountY = (pc.height + VULKAN_COMPUTE_LOCAL_SIZE - 1u) / VULKAN_COMPUTE_LOCAL_SIZE;
-    const uint32_t gridCountGroups = (pc.sphereCount + 64u - 1u) / 64u;
-    const uint32_t gridClassifyGroups = (gridDimX * gridDimZ + 64u - 1u) / 64u;
 
     if (!GLOBAL.Vulkan.sceneInitialized)
     {
@@ -236,281 +185,6 @@ void RtRecordFrame(uint32_t imageIndex, VkExtent2D extent)
 
         vkCmdPipelineBarrier2(GLOBAL.Vulkan.commandBuffer, &sphereDependency);
         GLOBAL.Vulkan.sceneInitialized = true;
-    }
-
-    const VkDeviceSize gridL0MetaSize = sizeof(uint32_t) * 4 * (VkDeviceSize)GRID_LEVEL0_CELLS;
-    const VkDeviceSize gridL0CounterSize = sizeof(uint32_t) * (VkDeviceSize)GRID_LEVEL0_CELLS;
-    const VkDeviceSize gridL1MetaSize = sizeof(uint32_t) * 4 * (VkDeviceSize)GRID_LEVEL1_CELLS;
-    const VkDeviceSize gridL1CounterSize = sizeof(uint32_t) * (VkDeviceSize)GRID_LEVEL1_CELLS;
-    const VkDeviceSize gridStateSize = sizeof(uint32_t) * 4;
-
-    vkCmdFillBuffer(GLOBAL.Vulkan.commandBuffer, GLOBAL.Vulkan.rt.gridLevel0Meta, 0, gridL0MetaSize, 0);
-    vkCmdFillBuffer(GLOBAL.Vulkan.commandBuffer, GLOBAL.Vulkan.rt.gridLevel0Counter, 0, gridL0CounterSize, 0);
-    vkCmdFillBuffer(GLOBAL.Vulkan.commandBuffer, GLOBAL.Vulkan.rt.gridLevel1Meta, 0, gridL1MetaSize, 0);
-    vkCmdFillBuffer(GLOBAL.Vulkan.commandBuffer, GLOBAL.Vulkan.rt.gridLevel1Counter, 0, gridL1CounterSize, 0);
-    vkCmdFillBuffer(GLOBAL.Vulkan.commandBuffer, GLOBAL.Vulkan.rt.gridState, 0, gridStateSize, 0);
-
-    VkBufferMemoryBarrier2 clearBarriers[5] = {
-        {
-            .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-            .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-            .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
-            .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            .dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-            .buffer = GLOBAL.Vulkan.rt.gridLevel0Meta,
-            .offset = 0,
-            .size = VK_WHOLE_SIZE,
-        },
-        {
-            .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-            .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-            .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
-            .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            .dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-            .buffer = GLOBAL.Vulkan.rt.gridLevel0Counter,
-            .offset = 0,
-            .size = VK_WHOLE_SIZE,
-        },
-        {
-            .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-            .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-            .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
-            .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            .dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-            .buffer = GLOBAL.Vulkan.rt.gridLevel1Meta,
-            .offset = 0,
-            .size = VK_WHOLE_SIZE,
-        },
-        {
-            .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-            .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-            .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
-            .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            .dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-            .buffer = GLOBAL.Vulkan.rt.gridLevel1Counter,
-            .offset = 0,
-            .size = VK_WHOLE_SIZE,
-        },
-        {
-            .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-            .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-            .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
-            .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            .dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-            .buffer = GLOBAL.Vulkan.rt.gridState,
-            .offset = 0,
-            .size = VK_WHOLE_SIZE,
-        },
-    };
-
-    VkDependencyInfo clearDependency = {
-        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-        .bufferMemoryBarrierCount = ARRAY_SIZE(clearBarriers),
-        .pBufferMemoryBarriers = clearBarriers,
-    };
-
-    vkCmdPipelineBarrier2(GLOBAL.Vulkan.commandBuffer, &clearDependency);
-
-    if (pc.sphereCount > 0u)
-    {
-        vkCmdBindPipeline(GLOBAL.Vulkan.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, GLOBAL.Vulkan.gridCountPipe);
-        vkCmdBindDescriptorSets(
-            GLOBAL.Vulkan.commandBuffer,
-            VK_PIPELINE_BIND_POINT_COMPUTE,
-            GLOBAL.Vulkan.computePipelineLayout,
-            0,
-            1,
-            &GLOBAL.Vulkan.descriptorSet,
-            0,
-            NULL);
-        vkCmdPushConstants(
-            GLOBAL.Vulkan.commandBuffer,
-            GLOBAL.Vulkan.computePipelineLayout,
-            VK_SHADER_STAGE_COMPUTE_BIT,
-            0,
-            sizeof(pc),
-            &pc);
-        vkCmdDispatch(GLOBAL.Vulkan.commandBuffer, gridCountGroups, 1, 1);
-    }
-
-    VkBufferMemoryBarrier2 countBarriers[2] = {
-        {
-            .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-            .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            .srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-            .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            .dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-            .buffer = GLOBAL.Vulkan.rt.gridLevel0Meta,
-            .offset = 0,
-            .size = VK_WHOLE_SIZE,
-        },
-        {
-            .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-            .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            .srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-            .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            .dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-            .buffer = GLOBAL.Vulkan.rt.gridLevel1Meta,
-            .offset = 0,
-            .size = VK_WHOLE_SIZE,
-        },
-    };
-
-    VkDependencyInfo countDependency = {
-        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-        .bufferMemoryBarrierCount = ARRAY_SIZE(countBarriers),
-        .pBufferMemoryBarriers = countBarriers,
-    };
-
-    if (pc.sphereCount > 0u)
-    {
-        vkCmdPipelineBarrier2(GLOBAL.Vulkan.commandBuffer, &countDependency);
-    }
-
-    vkCmdBindPipeline(GLOBAL.Vulkan.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, GLOBAL.Vulkan.gridClassifyPipe);
-    vkCmdBindDescriptorSets(
-        GLOBAL.Vulkan.commandBuffer,
-        VK_PIPELINE_BIND_POINT_COMPUTE,
-        GLOBAL.Vulkan.computePipelineLayout,
-        0,
-        1,
-        &GLOBAL.Vulkan.descriptorSet,
-        0,
-        NULL);
-    vkCmdPushConstants(
-        GLOBAL.Vulkan.commandBuffer,
-        GLOBAL.Vulkan.computePipelineLayout,
-        VK_SHADER_STAGE_COMPUTE_BIT,
-        0,
-        sizeof(pc),
-        &pc);
-    vkCmdDispatch(GLOBAL.Vulkan.commandBuffer, gridClassifyGroups, 1, 1);
-
-    VkBufferMemoryBarrier2 classifyBarriers[3] = {
-        {
-            .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-            .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            .srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-            .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            .dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-            .buffer = GLOBAL.Vulkan.rt.gridLevel0Meta,
-            .offset = 0,
-            .size = VK_WHOLE_SIZE,
-        },
-        {
-            .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-            .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            .srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-            .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            .dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-            .buffer = GLOBAL.Vulkan.rt.gridLevel1Meta,
-            .offset = 0,
-            .size = VK_WHOLE_SIZE,
-        },
-        {
-            .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-            .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            .srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-            .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            .dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-            .buffer = GLOBAL.Vulkan.rt.gridLevel1Counter,
-            .offset = 0,
-            .size = VK_WHOLE_SIZE,
-        },
-    };
-
-    VkDependencyInfo classifyDependency = {
-        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-        .bufferMemoryBarrierCount = ARRAY_SIZE(classifyBarriers),
-        .pBufferMemoryBarriers = classifyBarriers,
-    };
-
-    vkCmdPipelineBarrier2(GLOBAL.Vulkan.commandBuffer, &classifyDependency);
-
-    if (pc.sphereCount > 0u)
-    {
-        vkCmdBindPipeline(GLOBAL.Vulkan.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, GLOBAL.Vulkan.gridScatterPipe);
-        vkCmdBindDescriptorSets(
-            GLOBAL.Vulkan.commandBuffer,
-            VK_PIPELINE_BIND_POINT_COMPUTE,
-            GLOBAL.Vulkan.computePipelineLayout,
-            0,
-            1,
-            &GLOBAL.Vulkan.descriptorSet,
-            0,
-            NULL);
-        vkCmdPushConstants(
-            GLOBAL.Vulkan.commandBuffer,
-            GLOBAL.Vulkan.computePipelineLayout,
-            VK_SHADER_STAGE_COMPUTE_BIT,
-            0,
-            sizeof(pc),
-            &pc);
-        vkCmdDispatch(GLOBAL.Vulkan.commandBuffer, gridCountGroups, 1, 1);
-    }
-
-    VkBufferMemoryBarrier2 scatterBarriers[5] = {
-        {
-            .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-            .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            .srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-            .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            .dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT,
-            .buffer = GLOBAL.Vulkan.rt.gridLevel0Indices,
-            .offset = 0,
-            .size = VK_WHOLE_SIZE,
-        },
-        {
-            .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-            .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            .srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-            .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            .dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT,
-            .buffer = GLOBAL.Vulkan.rt.gridLevel1Indices,
-            .offset = 0,
-            .size = VK_WHOLE_SIZE,
-        },
-        {
-            .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-            .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            .srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-            .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            .dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT,
-            .buffer = GLOBAL.Vulkan.rt.gridLevel0Meta,
-            .offset = 0,
-            .size = VK_WHOLE_SIZE,
-        },
-        {
-            .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-            .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            .srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-            .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            .dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT,
-            .buffer = GLOBAL.Vulkan.rt.gridLevel1Meta,
-            .offset = 0,
-            .size = VK_WHOLE_SIZE,
-        },
-        {
-            .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-            .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            .srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-            .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            .dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT,
-            .buffer = GLOBAL.Vulkan.rt.gridLevel0Counter,
-            .offset = 0,
-            .size = VK_WHOLE_SIZE,
-        },
-    };
-
-    VkDependencyInfo scatterDependency = {
-        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-        .bufferMemoryBarrierCount = ARRAY_SIZE(scatterBarriers),
-        .pBufferMemoryBarriers = scatterBarriers,
-    };
-
-    if (pc.sphereCount > 0u)
-    {
-        vkCmdPipelineBarrier2(GLOBAL.Vulkan.commandBuffer, &scatterDependency);
     }
 
     vkCmdBindPipeline(GLOBAL.Vulkan.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, GLOBAL.Vulkan.primaryIntersectPipe);

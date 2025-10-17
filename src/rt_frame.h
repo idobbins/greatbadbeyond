@@ -21,10 +21,6 @@ typedef struct PCPush {
     float groundY;
     uint32_t rngSeed;
     uint32_t flags;
-    uint32_t gridDimX;
-    uint32_t gridDimZ;
-    uint32_t gridFineDim;
-    uint32_t gridRefineThreshold;
 } PCPush;
 
 void RtUpdateSpawnArea(void);
