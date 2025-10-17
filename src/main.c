@@ -27,28 +27,19 @@ static const char *const vulkanValidationLayers[] = {
     "VK_LAYER_KHRONOS_validation",
 };
 
-static const char *const vulkanRequiredDeviceExtensions[] = {
-    VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-};
-
 #ifndef VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME
     #define VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME "VK_KHR_portability_subset"
 #endif
 
 #define VULKAN_MAX_ENABLED_EXTENSIONS 16
 #define VULKAN_MAX_ENABLED_LAYERS ARRAY_SIZE(vulkanValidationLayers)
-#define VULKAN_MAX_ENUMERATED_EXTENSIONS 256
-#define VULKAN_MAX_ENUMERATED_LAYERS 64
 #define VULKAN_MAX_PHYSICAL_DEVICES 16
-#define VULKAN_MAX_QUEUE_FAMILIES 16
-#define VULKAN_MAX_DEVICE_EXTENSIONS 256
 #define VULKAN_MAX_SWAPCHAIN_IMAGES 8
 #define VULKAN_MAX_SURFACE_FORMATS 64
 #define VULKAN_MAX_PRESENT_MODES 16
 #define VULKAN_MAX_SHADER_SIZE (1024 * 1024)
 #define VULKAN_COMPUTE_LOCAL_SIZE 16
 #define VULKAN_MAX_PATH_LENGTH 512
-#define VULKAN_INVALID_QUEUE_FAMILY UINT32_MAX
 
 #ifndef VULKAN_SHADER_DIRECTORY
     #define VULKAN_SHADER_DIRECTORY "./shaders"
@@ -118,17 +109,12 @@ typedef struct GlobalData {
         VkSurfaceKHR surface;
         VkPhysicalDevice physicalDevice;
         VkDevice device;
-        VkQueue graphicsQueue;
-        VkQueue presentQueue;
-        VkQueue computeQueue;
-        uint32_t graphicsQueueFamily;
-        uint32_t presentQueueFamily;
-        uint32_t computeQueueFamily;
+        VkQueue queue;
+        uint32_t queueFamily;
         VkSwapchainKHR swapchain;
         VkImage swapchainImages[VULKAN_MAX_SWAPCHAIN_IMAGES];
         VkImageView swapchainImageViews[VULKAN_MAX_SWAPCHAIN_IMAGES];
         uint32_t swapchainImageCount;
-        bool swapchainImagePresented[VULKAN_MAX_SWAPCHAIN_IMAGES];
         VkFormat swapchainImageFormat;
         VkExtent2D swapchainExtent;
         VkShaderModule computeShaderModule;
@@ -142,41 +128,21 @@ typedef struct GlobalData {
         VkPipeline computePipeline;
         VkPipeline blitPipeline;
         VmaAllocator vma;
-        VkCommandPool computeCommandPool;
-        VkCommandPool graphicsCommandPool;
-        VkCommandBuffer computeCommandBuffer;
-        VkCommandBuffer graphicsCommandBuffer;
+        VkCommandPool commandPool;
+        VkCommandBuffer commandBuffer;
         VkImage gradientImage;
         VmaAllocation gradientAlloc;
         VkImageView gradientImageView;
         VkSampler gradientSampler;
         VkSemaphore imageAvailableSemaphore;
-        VkSemaphore renderFinishedSemaphore;
+        VkSemaphore renderFinishedSemaphores[VULKAN_MAX_SWAPCHAIN_IMAGES];
         VkFence frameFence;
 
-        bool instanceReady;
-        bool debugMessengerReady;
-        bool surfaceReady;
-        bool physicalDeviceReady;
-        bool deviceReady;
-        bool queuesReady;
-        bool swapchainReady;
-        bool shaderModulesReady;
-        bool descriptorSetLayoutReady;
-        bool descriptorPoolReady;
-        bool descriptorSetReady;
-        bool descriptorSetUpdated;
-        bool pipelinesReady;
-        bool commandPoolsReady;
-        bool commandBuffersReady;
-        bool gradientReady;
         bool gradientInitialized;
-        bool syncReady;
 
         bool ready;
         bool debugEnabled;
         bool validationLayersEnabled;
-        bool portabilitySubsetRequired;
 
     } Vulkan;
 } GlobalData;
@@ -273,20 +239,6 @@ static void PushUniqueString(const char **list, uint32_t *count, uint32_t capaci
     list[(*count)++] = value;
 }
 
-static void PushUniqueUint32(uint32_t *list, uint32_t *count, uint32_t capacity, uint32_t value)
-{
-    for (uint32_t index = 0; index < *count; index++)
-    {
-        if (list[index] == value)
-        {
-            return;
-        }
-    }
-
-    Assert(*count < capacity, "Too many Vulkan queue families requested");
-    list[(*count)++] = value;
-}
-
 static void VulkanBuildShaderPath(const char *name, char *buffer, uint32_t capacity)
 {
     Assert(name != NULL, "Shader name is null");
@@ -326,7 +278,7 @@ static uint32_t VulkanReadBinaryFile(const char *path, uint8_t *buffer, uint32_t
 
 static VkShaderModule VulkanLoadShaderModule(const char *filename)
 {
-    Assert(GLOBAL.Vulkan.deviceReady, "Vulkan device is not ready");
+    Assert(GLOBAL.Vulkan.device != VK_NULL_HANDLE, "Vulkan device is not ready");
 
     char path[VULKAN_MAX_PATH_LENGTH];
     VulkanBuildShaderPath(filename, path, ARRAY_SIZE(path));
@@ -347,30 +299,6 @@ static VkShaderModule VulkanLoadShaderModule(const char *filename)
     Assert(result == VK_SUCCESS, "Failed to create Vulkan shader module");
 
     return module;
-}
-
-static bool VulkanExtensionListHas(const VkExtensionProperties *extensions, uint32_t count, const char *name)
-{
-    for (uint32_t index = 0; index < count; index++)
-    {
-        if (strcmp(extensions[index].extensionName, name) == 0)
-        {
-            return true;
-        }
-    }
-    return false;
-}
-
-static bool VulkanLayerListHas(const VkLayerProperties *layers, uint32_t count, const char *name)
-{
-    for (uint32_t index = 0; index < count; index++)
-    {
-        if (strcmp(layers[index].layerName, name) == 0)
-        {
-            return true;
-        }
-    }
-    return false;
 }
 
 // Handle Vulkan instance setup
@@ -435,32 +363,6 @@ static VkDebugUtilsMessengerCreateInfoEXT VulkanMakeDebugMessengerCreateInfo(voi
     return createInfo;
 }
 
-static uint32_t VulkanEnumerateInstanceExtensions(VkExtensionProperties *buffer, uint32_t capacity)
-{
-    uint32_t count = 0;
-    VkResult result = vkEnumerateInstanceExtensionProperties(NULL, &count, NULL);
-    Assert((result == VK_SUCCESS) || (result == VK_INCOMPLETE), "Failed to query Vulkan instance extensions");
-    Assert(count <= capacity, "Too many Vulkan instance extensions for buffer");
-
-    result = vkEnumerateInstanceExtensionProperties(NULL, &count, buffer);
-    Assert(result == VK_SUCCESS, "Failed to enumerate Vulkan instance extensions");
-
-    return count;
-}
-
-static uint32_t VulkanEnumerateInstanceLayers(VkLayerProperties *buffer, uint32_t capacity)
-{
-    uint32_t count = 0;
-    VkResult result = vkEnumerateInstanceLayerProperties(&count, NULL);
-    Assert((result == VK_SUCCESS) || (result == VK_INCOMPLETE), "Failed to query Vulkan instance layers");
-    Assert(count <= capacity, "Too many Vulkan instance layers for buffer");
-
-    result = vkEnumerateInstanceLayerProperties(&count, buffer);
-    Assert(result == VK_SUCCESS, "Failed to enumerate Vulkan instance layers");
-
-    return count;
-}
-
 static VulkanInstanceConfig VulkanBuildInstanceConfig(bool requestDebug)
 {
     VulkanInstanceConfig config = {
@@ -477,56 +379,30 @@ static VulkanInstanceConfig VulkanBuildInstanceConfig(bool requestDebug)
     Assert(requiredExtensions != NULL, "glfwGetRequiredInstanceExtensions returned NULL");
     Assert(requiredExtensionCount > 0, "GLFW did not report any required Vulkan instance extensions");
 
-    VkExtensionProperties availableExtensions[VULKAN_MAX_ENUMERATED_EXTENSIONS];
-    const uint32_t availableExtensionCount = VulkanEnumerateInstanceExtensions(availableExtensions, ARRAY_SIZE(availableExtensions));
-
     for (uint32_t index = 0; index < requiredExtensionCount; index++)
     {
         const char *name = requiredExtensions[index];
-        if (!VulkanExtensionListHas(availableExtensions, availableExtensionCount, name))
-        {
-            LogError("Missing required Vulkan instance extension reported by GLFW: %s", name);
-            Assert(false, "Missing GLFW-required Vulkan instance extension");
-        }
         PushUniqueString(config.extensions, &config.extensionCount, ARRAY_SIZE(config.extensions), name);
     }
 
     if (requestDebug)
     {
-        const bool debugExtensionAvailable = VulkanExtensionListHas(availableExtensions, availableExtensionCount, VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
-        if (debugExtensionAvailable)
-        {
-            PushUniqueString(config.extensions, &config.extensionCount, ARRAY_SIZE(config.extensions), VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
-            config.debugExtensionEnabled = true;
-        }
-        else
-        {
-            LogWarn("VK_EXT_debug_utils not available; continuing without debug messenger");
-        }
+        PushUniqueString(config.extensions, &config.extensionCount, ARRAY_SIZE(config.extensions), VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+        config.debugExtensionEnabled = true;
     }
 
-    const bool portabilityExtensionAvailable = VulkanExtensionListHas(availableExtensions, availableExtensionCount, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
-    if (portabilityExtensionAvailable)
-    {
+    #if defined(__APPLE__)
         PushUniqueString(config.extensions, &config.extensionCount, ARRAY_SIZE(config.extensions), VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
         config.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
-    }
+    #endif
 
     Assert(config.extensionCount > 0, "No Vulkan instance extensions configured");
 
     if (requestDebug)
     {
-        VkLayerProperties availableLayers[VULKAN_MAX_ENUMERATED_LAYERS];
-        const uint32_t availableLayerCount = VulkanEnumerateInstanceLayers(availableLayers, ARRAY_SIZE(availableLayers));
-
-        const bool debugLayerAvailable = VulkanLayerListHas(availableLayers, availableLayerCount, vulkanValidationLayers[0]);
-        if (debugLayerAvailable)
+        for (uint32_t index = 0; index < ARRAY_SIZE(vulkanValidationLayers); index++)
         {
-            config.layers[config.layerCount++] = vulkanValidationLayers[0];
-        }
-        else
-        {
-            LogWarn("Vulkan validation layer not available; continuing without validation");
+            PushUniqueString(config.layers, &config.layerCount, ARRAY_SIZE(config.layers), vulkanValidationLayers[index]);
         }
     }
 
@@ -557,7 +433,6 @@ static void VulkanCreateInstance(const VulkanInstanceConfig *config, const VkApp
     VkResult result = vkCreateInstance(&createInfo, NULL, &GLOBAL.Vulkan.instance);
     Assert(result == VK_SUCCESS, "Failed to create Vulkan instance");
 
-    GLOBAL.Vulkan.instanceReady = true;
     GLOBAL.Vulkan.validationLayersEnabled = (config->layerCount > 0);
 }
 
@@ -581,7 +456,6 @@ static void VulkanSetupDebugMessenger(bool debugExtensionEnabled)
     VkResult result = createMessenger(GLOBAL.Vulkan.instance, &createInfo, NULL, &GLOBAL.Vulkan.debugMessenger);
     if (result == VK_SUCCESS)
     {
-        GLOBAL.Vulkan.debugMessengerReady = true;
         GLOBAL.Vulkan.debugEnabled = true;
     }
     else
@@ -594,8 +468,6 @@ static void VulkanCreateSurface(void)
 {
     VkResult surfaceResult = glfwCreateWindowSurface(GLOBAL.Vulkan.instance, GLOBAL.Window.window, NULL, &GLOBAL.Vulkan.surface);
     Assert(surfaceResult == VK_SUCCESS, "Failed to create Vulkan surface");
-
-    GLOBAL.Vulkan.surfaceReady = true;
 }
 
 static void VulkanResetState(void)
@@ -605,16 +477,11 @@ static void VulkanResetState(void)
     GLOBAL.Vulkan.surface = VK_NULL_HANDLE;
     GLOBAL.Vulkan.physicalDevice = VK_NULL_HANDLE;
     GLOBAL.Vulkan.device = VK_NULL_HANDLE;
-    GLOBAL.Vulkan.graphicsQueue = VK_NULL_HANDLE;
-    GLOBAL.Vulkan.presentQueue = VK_NULL_HANDLE;
-    GLOBAL.Vulkan.computeQueue = VK_NULL_HANDLE;
-    GLOBAL.Vulkan.graphicsQueueFamily = VULKAN_INVALID_QUEUE_FAMILY;
-    GLOBAL.Vulkan.presentQueueFamily = VULKAN_INVALID_QUEUE_FAMILY;
-    GLOBAL.Vulkan.computeQueueFamily = VULKAN_INVALID_QUEUE_FAMILY;
+    GLOBAL.Vulkan.queue = VK_NULL_HANDLE;
+    GLOBAL.Vulkan.queueFamily = UINT32_MAX;
     GLOBAL.Vulkan.swapchain = VK_NULL_HANDLE;
     memset(GLOBAL.Vulkan.swapchainImages, 0, sizeof(GLOBAL.Vulkan.swapchainImages));
     memset(GLOBAL.Vulkan.swapchainImageViews, 0, sizeof(GLOBAL.Vulkan.swapchainImageViews));
-    memset(GLOBAL.Vulkan.swapchainImagePresented, 0, sizeof(GLOBAL.Vulkan.swapchainImagePresented));
     GLOBAL.Vulkan.swapchainImageCount = 0;
     GLOBAL.Vulkan.swapchainImageFormat = VK_FORMAT_UNDEFINED;
     GLOBAL.Vulkan.swapchainExtent.width = 0;
@@ -630,41 +497,21 @@ static void VulkanResetState(void)
     GLOBAL.Vulkan.computePipeline = VK_NULL_HANDLE;
     GLOBAL.Vulkan.blitPipeline = VK_NULL_HANDLE;
     GLOBAL.Vulkan.vma = NULL;
-    GLOBAL.Vulkan.computeCommandPool = VK_NULL_HANDLE;
-    GLOBAL.Vulkan.graphicsCommandPool = VK_NULL_HANDLE;
-    GLOBAL.Vulkan.computeCommandBuffer = VK_NULL_HANDLE;
-    GLOBAL.Vulkan.graphicsCommandBuffer = VK_NULL_HANDLE;
+    GLOBAL.Vulkan.commandPool = VK_NULL_HANDLE;
+    GLOBAL.Vulkan.commandBuffer = VK_NULL_HANDLE;
     GLOBAL.Vulkan.gradientImage = VK_NULL_HANDLE;
     GLOBAL.Vulkan.gradientAlloc = NULL;
     GLOBAL.Vulkan.gradientImageView = VK_NULL_HANDLE;
     GLOBAL.Vulkan.gradientSampler = VK_NULL_HANDLE;
     GLOBAL.Vulkan.imageAvailableSemaphore = VK_NULL_HANDLE;
-    GLOBAL.Vulkan.renderFinishedSemaphore = VK_NULL_HANDLE;
+    memset(GLOBAL.Vulkan.renderFinishedSemaphores, 0, sizeof(GLOBAL.Vulkan.renderFinishedSemaphores));
     GLOBAL.Vulkan.frameFence = VK_NULL_HANDLE;
 
-    GLOBAL.Vulkan.instanceReady = false;
-    GLOBAL.Vulkan.debugMessengerReady = false;
-    GLOBAL.Vulkan.surfaceReady = false;
-    GLOBAL.Vulkan.physicalDeviceReady = false;
-    GLOBAL.Vulkan.deviceReady = false;
-    GLOBAL.Vulkan.queuesReady = false;
-    GLOBAL.Vulkan.swapchainReady = false;
-    GLOBAL.Vulkan.shaderModulesReady = false;
-    GLOBAL.Vulkan.descriptorSetLayoutReady = false;
-    GLOBAL.Vulkan.descriptorPoolReady = false;
-    GLOBAL.Vulkan.descriptorSetReady = false;
-    GLOBAL.Vulkan.descriptorSetUpdated = false;
-    GLOBAL.Vulkan.pipelinesReady = false;
-    GLOBAL.Vulkan.commandPoolsReady = false;
-    GLOBAL.Vulkan.commandBuffersReady = false;
-    GLOBAL.Vulkan.gradientReady = false;
     GLOBAL.Vulkan.gradientInitialized = false;
-    GLOBAL.Vulkan.syncReady = false;
 
     GLOBAL.Vulkan.ready = false;
     GLOBAL.Vulkan.debugEnabled = false;
     GLOBAL.Vulkan.validationLayersEnabled = false;
-    GLOBAL.Vulkan.portabilitySubsetRequired = false;
 }
 
 // Manage Vulkan device resources
@@ -683,143 +530,39 @@ static uint32_t VulkanEnumeratePhysicalDevices(VkInstance instance, VkPhysicalDe
     return count;
 }
 
-static uint32_t VulkanEnumerateDeviceExtensions(VkPhysicalDevice device, VkExtensionProperties *buffer, uint32_t capacity)
-{
-    uint32_t count = 0;
-    VkResult result = vkEnumerateDeviceExtensionProperties(device, NULL, &count, NULL);
-    Assert((result == VK_SUCCESS) || (result == VK_INCOMPLETE), "Failed to query Vulkan device extensions");
-    Assert(count <= capacity, "Too many Vulkan device extensions for buffer");
-
-    result = vkEnumerateDeviceExtensionProperties(device, NULL, &count, buffer);
-    Assert(result == VK_SUCCESS, "Failed to enumerate Vulkan device extensions");
-
-    return count;
-}
-
-static uint32_t VulkanGetQueueFamilyProperties(VkPhysicalDevice device, VkQueueFamilyProperties *buffer, uint32_t capacity)
+static bool FindUniversalQueue(VkPhysicalDevice device, VkSurfaceKHR surface, uint32_t *family)
 {
     uint32_t count = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(device, &count, NULL);
     Assert(count > 0, "Vulkan physical device reports zero queue families");
-    Assert(count <= capacity, "Too many Vulkan queue families for buffer");
-
-    vkGetPhysicalDeviceQueueFamilyProperties(device, &count, buffer);
-    return count;
-}
-
-static bool VulkanCheckDeviceExtensions(VkPhysicalDevice device, bool *requiresPortabilitySubset)
-{
-    VkExtensionProperties extensions[VULKAN_MAX_DEVICE_EXTENSIONS];
-    const uint32_t extensionCount = VulkanEnumerateDeviceExtensions(device, extensions, ARRAY_SIZE(extensions));
-
-    bool requiredFound[ARRAY_SIZE(vulkanRequiredDeviceExtensions)] = { false };
-    bool portabilitySubsetPresent = false;
-
-    for (uint32_t requiredIndex = 0; requiredIndex < ARRAY_SIZE(vulkanRequiredDeviceExtensions); requiredIndex++)
+    VkQueueFamilyProperties props[16];
+    if (count > ARRAY_SIZE(props))
     {
-        const char *name = vulkanRequiredDeviceExtensions[requiredIndex];
-        bool found = false;
-        for (uint32_t availableIndex = 0; availableIndex < extensionCount; availableIndex++)
-        {
-            if (strcmp(extensions[availableIndex].extensionName, name) == 0)
-            {
-                found = true;
-                break;
-            }
-        }
-        requiredFound[requiredIndex] = found;
+        count = ARRAY_SIZE(props);
     }
+    vkGetPhysicalDeviceQueueFamilyProperties(device, &count, props);
 
-    for (uint32_t availableIndex = 0; availableIndex < extensionCount; availableIndex++)
+    for (uint32_t index = 0; index < count; index++)
     {
-        if (strcmp(extensions[availableIndex].extensionName, VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME) == 0)
+        VkBool32 present = VK_FALSE;
+        VkResult presentResult = vkGetPhysicalDeviceSurfaceSupportKHR(device, index, surface, &present);
+        Assert(presentResult == VK_SUCCESS, "Failed to query Vulkan surface support");
+
+        if ((present == VK_TRUE) &&
+            ((props[index].queueFlags & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT)) != 0) &&
+            props[index].queueCount > 0)
         {
-            portabilitySubsetPresent = true;
-            break;
+            *family = index;
+            return true;
         }
     }
 
-    bool allRequired = true;
-    for (uint32_t index = 0; index < ARRAY_SIZE(requiredFound); index++)
-    {
-        if (!requiredFound[index])
-        {
-            allRequired = false;
-            break;
-        }
-    }
-
-    if (requiresPortabilitySubset != NULL)
-    {
-        *requiresPortabilitySubset = portabilitySubsetPresent;
-    }
-
-    if (!allRequired)
-    {
-        return false;
-    }
-
-    return true;
-}
-
-static bool VulkanFindQueueFamilies(VkPhysicalDevice device, VkSurfaceKHR surface, uint32_t *graphicsFamily, uint32_t *presentFamily, uint32_t *computeFamily)
-{
-    VkQueueFamilyProperties queueFamilies[VULKAN_MAX_QUEUE_FAMILIES];
-    const uint32_t queueFamilyCount = VulkanGetQueueFamilyProperties(device, queueFamilies, ARRAY_SIZE(queueFamilies));
-
-    bool graphicsFound = false;
-    bool presentFound = false;
-    bool computeFound = false;
-    bool computeDedicated = false;
-
-    for (uint32_t index = 0; index < queueFamilyCount; index++)
-    {
-        const VkQueueFamilyProperties *family = &queueFamilies[index];
-
-        if (!graphicsFound && (family->queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0 && family->queueCount > 0)
-        {
-            *graphicsFamily = index;
-            graphicsFound = true;
-        }
-
-        if (!presentFound && family->queueCount > 0)
-        {
-            VkBool32 supported = VK_FALSE;
-            VkResult presentResult = vkGetPhysicalDeviceSurfaceSupportKHR(device, index, surface, &supported);
-            Assert(presentResult == VK_SUCCESS, "Failed to query Vulkan surface support");
-            if (supported == VK_TRUE)
-            {
-                *presentFamily = index;
-                presentFound = true;
-            }
-        }
-
-        if (family->queueCount > 0 && (family->queueFlags & VK_QUEUE_COMPUTE_BIT) != 0)
-        {
-            const bool familyHasGraphics = (family->queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0;
-            if (!computeFound || (!familyHasGraphics && !computeDedicated))
-            {
-                *computeFamily = index;
-                computeFound = true;
-                computeDedicated = !familyHasGraphics;
-            }
-        }
-
-        if (graphicsFound && presentFound)
-        {
-            if (computeFound && computeDedicated)
-            {
-                break;
-            }
-        }
-    }
-
-    return (graphicsFound && presentFound && computeFound);
+    return false;
 }
 
 static void VulkanSelectPhysicalDevice(void)
 {
-    if (GLOBAL.Vulkan.physicalDeviceReady)
+    if (GLOBAL.Vulkan.physicalDevice != VK_NULL_HANDLE)
     {
         return;
     }
@@ -833,28 +576,15 @@ static void VulkanSelectPhysicalDevice(void)
         VkPhysicalDeviceProperties properties;
         vkGetPhysicalDeviceProperties(candidate, &properties);
 
-        bool requiresPortabilitySubset = false;
-        if (!VulkanCheckDeviceExtensions(candidate, &requiresPortabilitySubset))
+        uint32_t universalQueueFamily = UINT32_MAX;
+        if (!FindUniversalQueue(candidate, GLOBAL.Vulkan.surface, &universalQueueFamily))
         {
-            LogWarn("Skipping Vulkan physical device: %s (missing required extensions)", properties.deviceName);
-            continue;
-        }
-
-        uint32_t graphicsFamily = VULKAN_INVALID_QUEUE_FAMILY;
-        uint32_t presentFamily = VULKAN_INVALID_QUEUE_FAMILY;
-        uint32_t computeFamily = VULKAN_INVALID_QUEUE_FAMILY;
-        if (!VulkanFindQueueFamilies(candidate, GLOBAL.Vulkan.surface, &graphicsFamily, &presentFamily, &computeFamily))
-        {
-            LogWarn("Skipping Vulkan physical device: %s (missing graphics/present/compute queues)", properties.deviceName);
+            LogWarn("Skipping Vulkan physical device: %s (no universal queue)", properties.deviceName);
             continue;
         }
 
         GLOBAL.Vulkan.physicalDevice = candidate;
-        GLOBAL.Vulkan.graphicsQueueFamily = graphicsFamily;
-        GLOBAL.Vulkan.presentQueueFamily = presentFamily;
-        GLOBAL.Vulkan.computeQueueFamily = computeFamily;
-        GLOBAL.Vulkan.physicalDeviceReady = true;
-        GLOBAL.Vulkan.portabilitySubsetRequired = requiresPortabilitySubset;
+        GLOBAL.Vulkan.queueFamily = universalQueueFamily;
 
         LogInfo("Selected Vulkan physical device: %s", properties.deviceName);
         return;
@@ -865,33 +595,21 @@ static void VulkanSelectPhysicalDevice(void)
 
 static void VulkanCreateLogicalDevice(void)
 {
-    if (GLOBAL.Vulkan.deviceReady)
+    if (GLOBAL.Vulkan.device != VK_NULL_HANDLE)
     {
         return;
     }
 
-    Assert(GLOBAL.Vulkan.physicalDeviceReady, "Vulkan physical device is not selected");
-    Assert(GLOBAL.Vulkan.graphicsQueueFamily != VULKAN_INVALID_QUEUE_FAMILY, "Vulkan graphics queue family is invalid");
-    Assert(GLOBAL.Vulkan.presentQueueFamily != VULKAN_INVALID_QUEUE_FAMILY, "Vulkan presentation queue family is invalid");
-    Assert(GLOBAL.Vulkan.computeQueueFamily != VULKAN_INVALID_QUEUE_FAMILY, "Vulkan compute queue family is invalid");
+    Assert(GLOBAL.Vulkan.physicalDevice != VK_NULL_HANDLE, "Vulkan physical device is not selected");
+    Assert(GLOBAL.Vulkan.queueFamily != UINT32_MAX, "Vulkan queue family is invalid");
 
-    uint32_t queueFamilies[3] = { 0 };
-    uint32_t queueFamilyCount = 0;
-    PushUniqueUint32(queueFamilies, &queueFamilyCount, ARRAY_SIZE(queueFamilies), GLOBAL.Vulkan.graphicsQueueFamily);
-    PushUniqueUint32(queueFamilies, &queueFamilyCount, ARRAY_SIZE(queueFamilies), GLOBAL.Vulkan.presentQueueFamily);
-    PushUniqueUint32(queueFamilies, &queueFamilyCount, ARRAY_SIZE(queueFamilies), GLOBAL.Vulkan.computeQueueFamily);
-    Assert(queueFamilyCount > 0, "No queue families selected for Vulkan logical device");
-
-    VkDeviceQueueCreateInfo queueCreateInfos[ARRAY_SIZE(queueFamilies)];
-    memset(queueCreateInfos, 0, sizeof(queueCreateInfos));
     const float queuePriority = 1.0f;
-    for (uint32_t index = 0; index < queueFamilyCount; index++)
-    {
-        queueCreateInfos[index].sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-        queueCreateInfos[index].queueFamilyIndex = queueFamilies[index];
-        queueCreateInfos[index].queueCount = 1;
-        queueCreateInfos[index].pQueuePriorities = &queuePriority;
-    }
+    VkDeviceQueueCreateInfo queueCreateInfo = {
+        .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+        .queueFamilyIndex = GLOBAL.Vulkan.queueFamily,
+        .queueCount = 1,
+        .pQueuePriorities = &queuePriority,
+    };
 
     VkPhysicalDeviceFeatures deviceFeatures = { 0 };
 
@@ -911,23 +629,18 @@ static void VulkanCreateLogicalDevice(void)
 
     const char *enabledDeviceExtensions[VULKAN_MAX_ENABLED_EXTENSIONS] = { 0 };
     uint32_t enabledDeviceExtensionCount = 0;
-    for (uint32_t index = 0; index < ARRAY_SIZE(vulkanRequiredDeviceExtensions); index++)
-    {
-        PushUniqueString(enabledDeviceExtensions, &enabledDeviceExtensionCount, ARRAY_SIZE(enabledDeviceExtensions), vulkanRequiredDeviceExtensions[index]);
-    }
+    PushUniqueString(enabledDeviceExtensions, &enabledDeviceExtensionCount, ARRAY_SIZE(enabledDeviceExtensions), VK_KHR_SWAPCHAIN_EXTENSION_NAME);
 
-    if (GLOBAL.Vulkan.portabilitySubsetRequired)
-    {
+    #if defined(__APPLE__)
         PushUniqueString(enabledDeviceExtensions, &enabledDeviceExtensionCount, ARRAY_SIZE(enabledDeviceExtensions), VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME);
-        LogInfo("Enabling Vulkan device extension: %s", VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME);
-    }
+    #endif
 
     Assert(enabledDeviceExtensionCount > 0, "No Vulkan device extensions configured");
 
     VkDeviceCreateInfo createInfo = {
         .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-        .queueCreateInfoCount = queueFamilyCount,
-        .pQueueCreateInfos = queueCreateInfos,
+        .queueCreateInfoCount = 1,
+        .pQueueCreateInfos = &queueCreateInfo,
         .enabledExtensionCount = enabledDeviceExtensionCount,
         .ppEnabledExtensionNames = enabledDeviceExtensions,
         .pEnabledFeatures = &deviceFeatures,
@@ -948,12 +661,7 @@ static void VulkanCreateLogicalDevice(void)
     VkResult result = vkCreateDevice(GLOBAL.Vulkan.physicalDevice, &createInfo, NULL, &GLOBAL.Vulkan.device);
     Assert(result == VK_SUCCESS, "Failed to create Vulkan logical device");
 
-    vkGetDeviceQueue(GLOBAL.Vulkan.device, GLOBAL.Vulkan.graphicsQueueFamily, 0, &GLOBAL.Vulkan.graphicsQueue);
-    vkGetDeviceQueue(GLOBAL.Vulkan.device, GLOBAL.Vulkan.presentQueueFamily, 0, &GLOBAL.Vulkan.presentQueue);
-    vkGetDeviceQueue(GLOBAL.Vulkan.device, GLOBAL.Vulkan.computeQueueFamily, 0, &GLOBAL.Vulkan.computeQueue);
-
-    GLOBAL.Vulkan.deviceReady = true;
-    GLOBAL.Vulkan.queuesReady = true;
+    vkGetDeviceQueue(GLOBAL.Vulkan.device, GLOBAL.Vulkan.queueFamily, 0, &GLOBAL.Vulkan.queue);
 
     LogInfo("Vulkan logical device ready");
 }
@@ -971,11 +679,10 @@ typedef struct VulkanSwapchainSupport {
 static void VulkanRefreshReadyState(void)
 {
     GLOBAL.Vulkan.ready =
-        (GLOBAL.Vulkan.instanceReady &&
-        GLOBAL.Vulkan.surfaceReady &&
-        GLOBAL.Vulkan.deviceReady &&
-        GLOBAL.Vulkan.queuesReady &&
-        GLOBAL.Vulkan.swapchainReady);
+        (GLOBAL.Vulkan.instance != VK_NULL_HANDLE) &&
+        (GLOBAL.Vulkan.surface != VK_NULL_HANDLE) &&
+        (GLOBAL.Vulkan.device != VK_NULL_HANDLE) &&
+        (GLOBAL.Vulkan.swapchain != VK_NULL_HANDLE);
 }
 
 static void VulkanQuerySwapchainSupport(VkPhysicalDevice device, VkSurfaceKHR surface, VulkanSwapchainSupport *support)
@@ -1129,100 +836,76 @@ typedef struct VulkanComputePushConstants {
     uint32_t height;
 } VulkanComputePushConstants;
 
-static void VulkanCreateCommandPools(void)
+static void VulkanCreateCommandPool(void)
 {
-    if (GLOBAL.Vulkan.commandPoolsReady)
+    if (GLOBAL.Vulkan.commandPool != VK_NULL_HANDLE)
     {
         return;
     }
 
-    Assert(GLOBAL.Vulkan.deviceReady, "Vulkan logical device is not ready");
-    Assert(GLOBAL.Vulkan.computeQueueFamily != VULKAN_INVALID_QUEUE_FAMILY, "Vulkan compute queue family is invalid");
-    Assert(GLOBAL.Vulkan.graphicsQueueFamily != VULKAN_INVALID_QUEUE_FAMILY, "Vulkan graphics queue family is invalid");
+    Assert(GLOBAL.Vulkan.device != VK_NULL_HANDLE, "Vulkan logical device is not ready");
+    Assert(GLOBAL.Vulkan.queueFamily != UINT32_MAX, "Vulkan queue family is invalid");
 
     VkCommandPoolCreateInfo poolInfo = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
         .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
-        .queueFamilyIndex = GLOBAL.Vulkan.computeQueueFamily,
+        .queueFamilyIndex = GLOBAL.Vulkan.queueFamily,
     };
 
-    VkResult result = vkCreateCommandPool(GLOBAL.Vulkan.device, &poolInfo, NULL, &GLOBAL.Vulkan.computeCommandPool);
-    Assert(result == VK_SUCCESS, "Failed to create Vulkan compute command pool");
+    VkResult result = vkCreateCommandPool(GLOBAL.Vulkan.device, &poolInfo, NULL, &GLOBAL.Vulkan.commandPool);
+    Assert(result == VK_SUCCESS, "Failed to create Vulkan command pool");
 
-    poolInfo.queueFamilyIndex = GLOBAL.Vulkan.graphicsQueueFamily;
-    result = vkCreateCommandPool(GLOBAL.Vulkan.device, &poolInfo, NULL, &GLOBAL.Vulkan.graphicsCommandPool);
-    Assert(result == VK_SUCCESS, "Failed to create Vulkan graphics command pool");
-
-    GLOBAL.Vulkan.commandPoolsReady = true;
-
-    LogInfo("Vulkan command pools ready");
+    LogInfo("Vulkan command pool ready");
 }
 
-static void VulkanDestroyCommandPools(void)
+static void VulkanDestroyCommandPool(void)
 {
-    if (GLOBAL.Vulkan.graphicsCommandPool != VK_NULL_HANDLE)
+    if (GLOBAL.Vulkan.commandPool != VK_NULL_HANDLE)
     {
-        vkDestroyCommandPool(GLOBAL.Vulkan.device, GLOBAL.Vulkan.graphicsCommandPool, NULL);
-        GLOBAL.Vulkan.graphicsCommandPool = VK_NULL_HANDLE;
+        vkDestroyCommandPool(GLOBAL.Vulkan.device, GLOBAL.Vulkan.commandPool, NULL);
+        GLOBAL.Vulkan.commandPool = VK_NULL_HANDLE;
     }
 
-    if (GLOBAL.Vulkan.computeCommandPool != VK_NULL_HANDLE)
-    {
-        vkDestroyCommandPool(GLOBAL.Vulkan.device, GLOBAL.Vulkan.computeCommandPool, NULL);
-        GLOBAL.Vulkan.computeCommandPool = VK_NULL_HANDLE;
-    }
-
-    GLOBAL.Vulkan.commandBuffersReady = false;
-    GLOBAL.Vulkan.commandPoolsReady = false;
-    GLOBAL.Vulkan.graphicsCommandBuffer = VK_NULL_HANDLE;
-    GLOBAL.Vulkan.computeCommandBuffer = VK_NULL_HANDLE;
+    GLOBAL.Vulkan.commandBuffer = VK_NULL_HANDLE;
 }
 
-static void VulkanAllocateCommandBuffers(void)
+static void VulkanAllocateCommandBuffer(void)
 {
-    if (GLOBAL.Vulkan.commandBuffersReady)
+    if (GLOBAL.Vulkan.commandBuffer != VK_NULL_HANDLE)
     {
         return;
     }
 
-    Assert(GLOBAL.Vulkan.commandPoolsReady, "Vulkan command pools are not ready");
+    Assert(GLOBAL.Vulkan.commandPool != VK_NULL_HANDLE, "Vulkan command pool is not ready");
 
     VkCommandBufferAllocateInfo allocateInfo = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .commandPool = GLOBAL.Vulkan.commandPool,
         .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
         .commandBufferCount = 1,
     };
 
-    allocateInfo.commandPool = GLOBAL.Vulkan.computeCommandPool;
-    VkResult result = vkAllocateCommandBuffers(GLOBAL.Vulkan.device, &allocateInfo, &GLOBAL.Vulkan.computeCommandBuffer);
-    Assert(result == VK_SUCCESS, "Failed to allocate Vulkan compute command buffer");
+    VkResult result = vkAllocateCommandBuffers(GLOBAL.Vulkan.device, &allocateInfo, &GLOBAL.Vulkan.commandBuffer);
+    Assert(result == VK_SUCCESS, "Failed to allocate Vulkan command buffer");
 
-    allocateInfo.commandPool = GLOBAL.Vulkan.graphicsCommandPool;
-    result = vkAllocateCommandBuffers(GLOBAL.Vulkan.device, &allocateInfo, &GLOBAL.Vulkan.graphicsCommandBuffer);
-    Assert(result == VK_SUCCESS, "Failed to allocate Vulkan graphics command buffer");
-
-    GLOBAL.Vulkan.commandBuffersReady = true;
-
-    LogInfo("Vulkan command buffers ready");
+    LogInfo("Vulkan command buffer ready");
 }
 
 static void VulkanCreateSyncObjects(void)
 {
-    if (GLOBAL.Vulkan.syncReady)
+    if ((GLOBAL.Vulkan.imageAvailableSemaphore != VK_NULL_HANDLE) &&
+        (GLOBAL.Vulkan.frameFence != VK_NULL_HANDLE))
     {
         return;
     }
 
-    Assert(GLOBAL.Vulkan.deviceReady, "Vulkan logical device is not ready");
+    Assert(GLOBAL.Vulkan.device != VK_NULL_HANDLE, "Vulkan logical device is not ready");
 
     VkSemaphoreCreateInfo semaphoreInfo = {
         .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
     };
 
     VkResult result = vkCreateSemaphore(GLOBAL.Vulkan.device, &semaphoreInfo, NULL, &GLOBAL.Vulkan.imageAvailableSemaphore);
-    Assert(result == VK_SUCCESS, "Failed to create Vulkan semaphore");
-
-    result = vkCreateSemaphore(GLOBAL.Vulkan.device, &semaphoreInfo, NULL, &GLOBAL.Vulkan.renderFinishedSemaphore);
     Assert(result == VK_SUCCESS, "Failed to create Vulkan semaphore");
 
     VkFenceCreateInfo fenceInfo = {
@@ -1232,8 +915,6 @@ static void VulkanCreateSyncObjects(void)
 
     result = vkCreateFence(GLOBAL.Vulkan.device, &fenceInfo, NULL, &GLOBAL.Vulkan.frameFence);
     Assert(result == VK_SUCCESS, "Failed to create Vulkan fence");
-
-    GLOBAL.Vulkan.syncReady = true;
 
     LogInfo("Vulkan synchronization objects ready");
 }
@@ -1246,35 +927,67 @@ static void VulkanDestroySyncObjects(void)
         GLOBAL.Vulkan.frameFence = VK_NULL_HANDLE;
     }
 
-    if (GLOBAL.Vulkan.renderFinishedSemaphore != VK_NULL_HANDLE)
-    {
-        vkDestroySemaphore(GLOBAL.Vulkan.device, GLOBAL.Vulkan.renderFinishedSemaphore, NULL);
-        GLOBAL.Vulkan.renderFinishedSemaphore = VK_NULL_HANDLE;
-    }
-
     if (GLOBAL.Vulkan.imageAvailableSemaphore != VK_NULL_HANDLE)
     {
         vkDestroySemaphore(GLOBAL.Vulkan.device, GLOBAL.Vulkan.imageAvailableSemaphore, NULL);
         GLOBAL.Vulkan.imageAvailableSemaphore = VK_NULL_HANDLE;
     }
+}
 
-    GLOBAL.Vulkan.syncReady = false;
+static void VulkanDestroySwapchainSemaphores(void)
+{
+    for (uint32_t index = 0; index < VULKAN_MAX_SWAPCHAIN_IMAGES; index++)
+    {
+        if (GLOBAL.Vulkan.renderFinishedSemaphores[index] != VK_NULL_HANDLE)
+        {
+            vkDestroySemaphore(GLOBAL.Vulkan.device, GLOBAL.Vulkan.renderFinishedSemaphores[index], NULL);
+            GLOBAL.Vulkan.renderFinishedSemaphores[index] = VK_NULL_HANDLE;
+        }
+    }
+}
+
+static void VulkanCreateSwapchainSemaphores(void)
+{
+    Assert(GLOBAL.Vulkan.device != VK_NULL_HANDLE, "Vulkan logical device is not ready");
+    Assert(GLOBAL.Vulkan.swapchainImageCount <= VULKAN_MAX_SWAPCHAIN_IMAGES, "Vulkan swapchain image count out of range");
+
+    VkSemaphoreCreateInfo semaphoreInfo = {
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+    };
+
+    for (uint32_t index = 0; index < GLOBAL.Vulkan.swapchainImageCount; index++)
+    {
+        if (GLOBAL.Vulkan.renderFinishedSemaphores[index] == VK_NULL_HANDLE)
+        {
+            VkResult result = vkCreateSemaphore(GLOBAL.Vulkan.device, &semaphoreInfo, NULL, &GLOBAL.Vulkan.renderFinishedSemaphores[index]);
+            Assert(result == VK_SUCCESS, "Failed to create Vulkan render-finished semaphore");
+        }
+    }
+
+    for (uint32_t index = GLOBAL.Vulkan.swapchainImageCount; index < VULKAN_MAX_SWAPCHAIN_IMAGES; index++)
+    {
+        if (GLOBAL.Vulkan.renderFinishedSemaphores[index] != VK_NULL_HANDLE)
+        {
+            vkDestroySemaphore(GLOBAL.Vulkan.device, GLOBAL.Vulkan.renderFinishedSemaphores[index], NULL);
+            GLOBAL.Vulkan.renderFinishedSemaphores[index] = VK_NULL_HANDLE;
+        }
+    }
 }
 
 static void VulkanCreateShaderModules(void)
 {
-    if (GLOBAL.Vulkan.shaderModulesReady)
+    if ((GLOBAL.Vulkan.computeShaderModule != VK_NULL_HANDLE) &&
+        (GLOBAL.Vulkan.blitVertexShaderModule != VK_NULL_HANDLE) &&
+        (GLOBAL.Vulkan.blitFragmentShaderModule != VK_NULL_HANDLE))
     {
         return;
     }
 
-    Assert(GLOBAL.Vulkan.deviceReady, "Vulkan logical device is not ready");
+    Assert(GLOBAL.Vulkan.device != VK_NULL_HANDLE, "Vulkan logical device is not ready");
 
     GLOBAL.Vulkan.computeShaderModule = VulkanLoadShaderModule("compute.spv");
     GLOBAL.Vulkan.blitVertexShaderModule = VulkanLoadShaderModule("blit.vert.spv");
     GLOBAL.Vulkan.blitFragmentShaderModule = VulkanLoadShaderModule("blit.frag.spv");
-
-    GLOBAL.Vulkan.shaderModulesReady = true;
 
     LogInfo("Vulkan shader modules ready");
 }
@@ -1298,18 +1011,16 @@ static void VulkanDestroyShaderModules(void)
         vkDestroyShaderModule(GLOBAL.Vulkan.device, GLOBAL.Vulkan.blitFragmentShaderModule, NULL);
         GLOBAL.Vulkan.blitFragmentShaderModule = VK_NULL_HANDLE;
     }
-
-    GLOBAL.Vulkan.shaderModulesReady = false;
 }
 
 static void VulkanCreateDescriptorSetLayout(void)
 {
-    if (GLOBAL.Vulkan.descriptorSetLayoutReady)
+    if (GLOBAL.Vulkan.descriptorSetLayout != VK_NULL_HANDLE)
     {
         return;
     }
 
-    Assert(GLOBAL.Vulkan.deviceReady, "Vulkan logical device is not ready");
+    Assert(GLOBAL.Vulkan.device != VK_NULL_HANDLE, "Vulkan logical device is not ready");
 
     VkDescriptorSetLayoutBinding bindings[2] = {
         {
@@ -1335,8 +1046,6 @@ static void VulkanCreateDescriptorSetLayout(void)
     VkResult result = vkCreateDescriptorSetLayout(GLOBAL.Vulkan.device, &layoutInfo, NULL, &GLOBAL.Vulkan.descriptorSetLayout);
     Assert(result == VK_SUCCESS, "Failed to create Vulkan descriptor set layout");
 
-    GLOBAL.Vulkan.descriptorSetLayoutReady = true;
-
     LogInfo("Vulkan descriptor set layout ready");
 }
 
@@ -1347,18 +1056,16 @@ static void VulkanDestroyDescriptorSetLayout(void)
         vkDestroyDescriptorSetLayout(GLOBAL.Vulkan.device, GLOBAL.Vulkan.descriptorSetLayout, NULL);
         GLOBAL.Vulkan.descriptorSetLayout = VK_NULL_HANDLE;
     }
-
-    GLOBAL.Vulkan.descriptorSetLayoutReady = false;
 }
 
 static void VulkanCreateDescriptorPool(void)
 {
-    if (GLOBAL.Vulkan.descriptorPoolReady)
+    if (GLOBAL.Vulkan.descriptorPool != VK_NULL_HANDLE)
     {
         return;
     }
 
-    Assert(GLOBAL.Vulkan.deviceReady, "Vulkan logical device is not ready");
+    Assert(GLOBAL.Vulkan.device != VK_NULL_HANDLE, "Vulkan logical device is not ready");
 
     VkDescriptorPoolSize poolSizes[2] = {
         {
@@ -1382,8 +1089,6 @@ static void VulkanCreateDescriptorPool(void)
     VkResult result = vkCreateDescriptorPool(GLOBAL.Vulkan.device, &poolInfo, NULL, &GLOBAL.Vulkan.descriptorPool);
     Assert(result == VK_SUCCESS, "Failed to create Vulkan descriptor pool");
 
-    GLOBAL.Vulkan.descriptorPoolReady = true;
-
     LogInfo("Vulkan descriptor pool ready");
 }
 
@@ -1394,22 +1099,18 @@ static void VulkanDestroyDescriptorPool(void)
         vkDestroyDescriptorPool(GLOBAL.Vulkan.device, GLOBAL.Vulkan.descriptorPool, NULL);
         GLOBAL.Vulkan.descriptorPool = VK_NULL_HANDLE;
     }
-
-    GLOBAL.Vulkan.descriptorPoolReady = false;
-    GLOBAL.Vulkan.descriptorSetReady = false;
-    GLOBAL.Vulkan.descriptorSetUpdated = false;
     GLOBAL.Vulkan.descriptorSet = VK_NULL_HANDLE;
 }
 
 static void VulkanAllocateDescriptorSet(void)
 {
-    if (GLOBAL.Vulkan.descriptorSetReady)
+    if (GLOBAL.Vulkan.descriptorSet != VK_NULL_HANDLE)
     {
         return;
     }
 
-    Assert(GLOBAL.Vulkan.descriptorPoolReady, "Vulkan descriptor pool is not ready");
-    Assert(GLOBAL.Vulkan.descriptorSetLayoutReady, "Vulkan descriptor set layout is not ready");
+    Assert(GLOBAL.Vulkan.descriptorPool != VK_NULL_HANDLE, "Vulkan descriptor pool is not ready");
+    Assert(GLOBAL.Vulkan.descriptorSetLayout != VK_NULL_HANDLE, "Vulkan descriptor set layout is not ready");
 
     VkDescriptorSetAllocateInfo allocInfo = {
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
@@ -1421,15 +1122,12 @@ static void VulkanAllocateDescriptorSet(void)
     VkResult result = vkAllocateDescriptorSets(GLOBAL.Vulkan.device, &allocInfo, &GLOBAL.Vulkan.descriptorSet);
     Assert(result == VK_SUCCESS, "Failed to allocate Vulkan descriptor set");
 
-    GLOBAL.Vulkan.descriptorSetReady = true;
-    GLOBAL.Vulkan.descriptorSetUpdated = false;
-
     LogInfo("Vulkan descriptor set ready");
 }
 
 static void VulkanUpdateDescriptorSet(void)
 {
-    Assert(GLOBAL.Vulkan.descriptorSetReady, "Vulkan descriptor set is not allocated");
+    Assert(GLOBAL.Vulkan.descriptorSet != VK_NULL_HANDLE, "Vulkan descriptor set is not allocated");
     Assert(GLOBAL.Vulkan.gradientImageView != VK_NULL_HANDLE, "Vulkan gradient image view is not ready");
     Assert(GLOBAL.Vulkan.gradientSampler != VK_NULL_HANDLE, "Vulkan gradient sampler is not ready");
 
@@ -1464,28 +1162,22 @@ static void VulkanUpdateDescriptorSet(void)
     };
 
     vkUpdateDescriptorSets(GLOBAL.Vulkan.device, ARRAY_SIZE(writes), writes, 0, NULL);
-    GLOBAL.Vulkan.descriptorSetUpdated = true;
 }
 
 static void VulkanCreateGradientResources(void)
 {
-    if (GLOBAL.Vulkan.gradientReady)
+    if (GLOBAL.Vulkan.gradientImage != VK_NULL_HANDLE)
     {
         return;
     }
 
-    Assert(GLOBAL.Vulkan.deviceReady, "Vulkan logical device is not ready");
-    Assert(GLOBAL.Vulkan.swapchainReady, "Vulkan swapchain is not ready");
-    Assert(GLOBAL.Vulkan.descriptorSetReady, "Vulkan descriptor set is not ready");
+    Assert(GLOBAL.Vulkan.device != VK_NULL_HANDLE, "Vulkan logical device is not ready");
+    Assert(GLOBAL.Vulkan.swapchain != VK_NULL_HANDLE, "Vulkan swapchain is not ready");
+    Assert(GLOBAL.Vulkan.descriptorSet != VK_NULL_HANDLE, "Vulkan descriptor set is not ready");
     Assert(GLOBAL.Vulkan.vma != NULL, "VMA allocator is not ready");
 
     const VkExtent2D extent = GLOBAL.Vulkan.swapchainExtent;
     Assert(extent.width > 0 && extent.height > 0, "Vulkan swapchain extent is invalid");
-
-    uint32_t queueFamilyIndices[2] = {
-        GLOBAL.Vulkan.computeQueueFamily,
-        GLOBAL.Vulkan.graphicsQueueFamily,
-    };
 
     VkImageCreateInfo imageInfo = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
@@ -1502,18 +1194,8 @@ static void VulkanCreateGradientResources(void)
         .tiling = VK_IMAGE_TILING_OPTIMAL,
         .usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
     };
-
-    if (GLOBAL.Vulkan.computeQueueFamily != GLOBAL.Vulkan.graphicsQueueFamily)
-    {
-        imageInfo.sharingMode = VK_SHARING_MODE_CONCURRENT;
-        imageInfo.queueFamilyIndexCount = 2;
-        imageInfo.pQueueFamilyIndices = queueFamilyIndices;
-    }
-    else
-    {
-        imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    }
 
     VmaAllocationCreateInfo allocInfo = {
         .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
@@ -1568,9 +1250,8 @@ static void VulkanCreateGradientResources(void)
     };
 
     VkResult samplerResult = vkCreateSampler(GLOBAL.Vulkan.device, &samplerInfo, NULL, &GLOBAL.Vulkan.gradientSampler);
-    Assert(samplerResult == VK_SUCCESS, "Failed to create Vulkan gradient sampler");
+   Assert(samplerResult == VK_SUCCESS, "Failed to create Vulkan gradient sampler");
 
-    GLOBAL.Vulkan.gradientReady = true;
     GLOBAL.Vulkan.gradientInitialized = false;
 
     VulkanUpdateDescriptorSet();
@@ -1602,20 +1283,22 @@ static void VulkanDestroyGradientResources(void)
         GLOBAL.Vulkan.gradientAlloc = NULL;
     }
 
-    GLOBAL.Vulkan.gradientReady = false;
     GLOBAL.Vulkan.gradientInitialized = false;
-    GLOBAL.Vulkan.descriptorSetUpdated = false;
 }
 
 static void VulkanCreatePipelines(void)
 {
-    if (GLOBAL.Vulkan.pipelinesReady)
+    const bool computeReady = (GLOBAL.Vulkan.computePipeline != VK_NULL_HANDLE);
+    const bool blitReady = (GLOBAL.Vulkan.blitPipeline != VK_NULL_HANDLE);
+    if (computeReady && blitReady)
     {
         return;
     }
 
-    Assert(GLOBAL.Vulkan.shaderModulesReady, "Vulkan shader modules are not ready");
-    Assert(GLOBAL.Vulkan.descriptorSetLayoutReady, "Vulkan descriptor set layout is not ready");
+    Assert(GLOBAL.Vulkan.computeShaderModule != VK_NULL_HANDLE, "Vulkan compute shader module is not ready");
+    Assert(GLOBAL.Vulkan.blitVertexShaderModule != VK_NULL_HANDLE, "Vulkan blit vertex shader module is not ready");
+    Assert(GLOBAL.Vulkan.blitFragmentShaderModule != VK_NULL_HANDLE, "Vulkan blit fragment shader module is not ready");
+    Assert(GLOBAL.Vulkan.descriptorSetLayout != VK_NULL_HANDLE, "Vulkan descriptor set layout is not ready");
 
     VkPushConstantRange pushRange = {
         .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
@@ -1623,41 +1306,50 @@ static void VulkanCreatePipelines(void)
         .size = sizeof(VulkanComputePushConstants),
     };
 
-    VkPipelineLayoutCreateInfo computeLayoutInfo = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-        .setLayoutCount = 1,
-        .pSetLayouts = &GLOBAL.Vulkan.descriptorSetLayout,
-        .pushConstantRangeCount = 1,
-        .pPushConstantRanges = &pushRange,
-    };
+    if (GLOBAL.Vulkan.computePipelineLayout == VK_NULL_HANDLE)
+    {
+        VkPipelineLayoutCreateInfo computeLayoutInfo = {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+            .setLayoutCount = 1,
+            .pSetLayouts = &GLOBAL.Vulkan.descriptorSetLayout,
+            .pushConstantRangeCount = 1,
+            .pPushConstantRanges = &pushRange,
+        };
 
-    VkResult result = vkCreatePipelineLayout(GLOBAL.Vulkan.device, &computeLayoutInfo, NULL, &GLOBAL.Vulkan.computePipelineLayout);
-    Assert(result == VK_SUCCESS, "Failed to create Vulkan compute pipeline layout");
+        VkResult layoutResult = vkCreatePipelineLayout(GLOBAL.Vulkan.device, &computeLayoutInfo, NULL, &GLOBAL.Vulkan.computePipelineLayout);
+        Assert(layoutResult == VK_SUCCESS, "Failed to create Vulkan compute pipeline layout");
+    }
 
-    VkPipelineLayoutCreateInfo blitLayoutInfo = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-        .setLayoutCount = 1,
-        .pSetLayouts = &GLOBAL.Vulkan.descriptorSetLayout,
-    };
+    if (GLOBAL.Vulkan.blitPipelineLayout == VK_NULL_HANDLE)
+    {
+        VkPipelineLayoutCreateInfo blitLayoutInfo = {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+            .setLayoutCount = 1,
+            .pSetLayouts = &GLOBAL.Vulkan.descriptorSetLayout,
+        };
 
-    result = vkCreatePipelineLayout(GLOBAL.Vulkan.device, &blitLayoutInfo, NULL, &GLOBAL.Vulkan.blitPipelineLayout);
-    Assert(result == VK_SUCCESS, "Failed to create Vulkan blit pipeline layout");
+        VkResult blitLayoutResult = vkCreatePipelineLayout(GLOBAL.Vulkan.device, &blitLayoutInfo, NULL, &GLOBAL.Vulkan.blitPipelineLayout);
+        Assert(blitLayoutResult == VK_SUCCESS, "Failed to create Vulkan blit pipeline layout");
+    }
 
-    VkPipelineShaderStageCreateInfo computeStage = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-        .stage = VK_SHADER_STAGE_COMPUTE_BIT,
-        .module = GLOBAL.Vulkan.computeShaderModule,
-        .pName = "main",
-    };
+    if (!computeReady)
+    {
+        VkPipelineShaderStageCreateInfo computeStage = {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+            .module = GLOBAL.Vulkan.computeShaderModule,
+            .pName = "main",
+        };
 
-    VkComputePipelineCreateInfo computeInfo = {
-        .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-        .stage = computeStage,
-        .layout = GLOBAL.Vulkan.computePipelineLayout,
-    };
+        VkComputePipelineCreateInfo computeInfo = {
+            .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+            .stage = computeStage,
+            .layout = GLOBAL.Vulkan.computePipelineLayout,
+        };
 
-    result = vkCreateComputePipelines(GLOBAL.Vulkan.device, VK_NULL_HANDLE, 1, &computeInfo, NULL, &GLOBAL.Vulkan.computePipeline);
-    Assert(result == VK_SUCCESS, "Failed to create Vulkan compute pipeline");
+        VkResult computeResult = vkCreateComputePipelines(GLOBAL.Vulkan.device, VK_NULL_HANDLE, 1, &computeInfo, NULL, &GLOBAL.Vulkan.computePipeline);
+        Assert(computeResult == VK_SUCCESS, "Failed to create Vulkan compute pipeline");
+    }
 
     VkPipelineShaderStageCreateInfo shaderStages[2] = {
         {
@@ -1763,10 +1455,11 @@ static void VulkanCreatePipelines(void)
         .subpass = 0,
     };
 
-    result = vkCreateGraphicsPipelines(GLOBAL.Vulkan.device, VK_NULL_HANDLE, 1, &graphicsInfo, NULL, &GLOBAL.Vulkan.blitPipeline);
-    Assert(result == VK_SUCCESS, "Failed to create Vulkan blit pipeline");
-
-    GLOBAL.Vulkan.pipelinesReady = true;
+    if (!blitReady)
+    {
+        VkResult graphicsResult = vkCreateGraphicsPipelines(GLOBAL.Vulkan.device, VK_NULL_HANDLE, 1, &graphicsInfo, NULL, &GLOBAL.Vulkan.blitPipeline);
+        Assert(graphicsResult == VK_SUCCESS, "Failed to create Vulkan blit pipeline");
+    }
 
     LogInfo("Vulkan pipelines ready");
 }
@@ -1796,8 +1489,6 @@ static void VulkanDestroyPipelines(void)
         vkDestroyPipelineLayout(GLOBAL.Vulkan.device, GLOBAL.Vulkan.computePipelineLayout, NULL);
         GLOBAL.Vulkan.computePipelineLayout = VK_NULL_HANDLE;
     }
-
-    GLOBAL.Vulkan.pipelinesReady = false;
 }
 
 static void VulkanDestroySwapchainResources(void)
@@ -1808,7 +1499,7 @@ static void VulkanDestroySwapchainResources(void)
 
 static void VulkanCreateSwapchainResources(void)
 {
-    Assert(GLOBAL.Vulkan.swapchainReady, "Vulkan swapchain is not ready");
+    Assert(GLOBAL.Vulkan.swapchain != VK_NULL_HANDLE, "Vulkan swapchain is not ready");
 
     VulkanCreateGradientResources();
     VulkanCreatePipelines();
@@ -1816,8 +1507,8 @@ static void VulkanCreateSwapchainResources(void)
 
 static void VulkanCreateDeviceResources(void)
 {
-    VulkanCreateCommandPools();
-    VulkanAllocateCommandBuffers();
+    VulkanCreateCommandPool();
+    VulkanAllocateCommandBuffer();
     VulkanCreateSyncObjects();
     VulkanCreateShaderModules();
     VulkanCreateDescriptorSetLayout();
@@ -1844,7 +1535,8 @@ static void VulkanDestroyDeviceResources(void)
     VulkanDestroyDescriptorPool();
     VulkanDestroyDescriptorSetLayout();
     VulkanDestroyShaderModules();
-    VulkanDestroyCommandPools();
+    VulkanDestroyCommandPool();
+    VulkanDestroySwapchainSemaphores();
 
     if (GLOBAL.Vulkan.vma != NULL)
     {
@@ -1854,22 +1546,29 @@ static void VulkanDestroyDeviceResources(void)
     }
 }
 
-static void VulkanRecordComputeCommands(uint32_t width, uint32_t height)
+static void VulkanRecordFrameCommands(uint32_t imageIndex, VkExtent2D extent)
 {
-    Assert(GLOBAL.Vulkan.commandBuffersReady, "Vulkan command buffers are not ready");
-    Assert(GLOBAL.Vulkan.pipelinesReady, "Vulkan pipelines are not ready");
-    Assert(GLOBAL.Vulkan.descriptorSetUpdated, "Vulkan descriptor set is not updated");
+    Assert(GLOBAL.Vulkan.commandBuffer != VK_NULL_HANDLE, "Vulkan command buffer is not available");
+    Assert(GLOBAL.Vulkan.computePipeline != VK_NULL_HANDLE, "Vulkan compute pipeline is not ready");
+    Assert(GLOBAL.Vulkan.blitPipeline != VK_NULL_HANDLE, "Vulkan blit pipeline is not ready");
+    Assert(GLOBAL.Vulkan.descriptorSet != VK_NULL_HANDLE, "Vulkan descriptor set is not ready");
+    Assert(GLOBAL.Vulkan.gradientImage != VK_NULL_HANDLE, "Vulkan gradient image is not ready");
+    Assert(GLOBAL.Vulkan.gradientImageView != VK_NULL_HANDLE, "Vulkan gradient image view is not ready");
+    Assert(GLOBAL.Vulkan.computePipelineLayout != VK_NULL_HANDLE, "Vulkan compute pipeline layout is not ready");
+    Assert(GLOBAL.Vulkan.blitPipelineLayout != VK_NULL_HANDLE, "Vulkan blit pipeline layout is not ready");
+    Assert(GLOBAL.Vulkan.swapchainImageViews[imageIndex] != VK_NULL_HANDLE, "Vulkan swapchain image view is not ready");
+    Assert(imageIndex < GLOBAL.Vulkan.swapchainImageCount, "Vulkan swapchain image index out of range");
 
-    VkResult resetResult = vkResetCommandBuffer(GLOBAL.Vulkan.computeCommandBuffer, 0);
-    Assert(resetResult == VK_SUCCESS, "Failed to reset Vulkan compute command buffer");
+    VkResult resetResult = vkResetCommandBuffer(GLOBAL.Vulkan.commandBuffer, 0);
+    Assert(resetResult == VK_SUCCESS, "Failed to reset Vulkan command buffer");
 
     VkCommandBufferBeginInfo beginInfo = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
         .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
     };
 
-    VkResult beginResult = vkBeginCommandBuffer(GLOBAL.Vulkan.computeCommandBuffer, &beginInfo);
-    Assert(beginResult == VK_SUCCESS, "Failed to begin Vulkan compute command buffer");
+    VkResult beginResult = vkBeginCommandBuffer(GLOBAL.Vulkan.commandBuffer, &beginInfo);
+    Assert(beginResult == VK_SUCCESS, "Failed to begin Vulkan command buffer");
 
     VkImageMemoryBarrier2 toGeneral = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
@@ -1897,11 +1596,11 @@ static void VulkanRecordComputeCommands(uint32_t width, uint32_t height)
         .pImageMemoryBarriers = &toGeneral,
     };
 
-    vkCmdPipelineBarrier2(GLOBAL.Vulkan.computeCommandBuffer, &toGeneralDependency);
+    vkCmdPipelineBarrier2(GLOBAL.Vulkan.commandBuffer, &toGeneralDependency);
 
-    vkCmdBindPipeline(GLOBAL.Vulkan.computeCommandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, GLOBAL.Vulkan.computePipeline);
+    vkCmdBindPipeline(GLOBAL.Vulkan.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, GLOBAL.Vulkan.computePipeline);
     vkCmdBindDescriptorSets(
-        GLOBAL.Vulkan.computeCommandBuffer,
+        GLOBAL.Vulkan.commandBuffer,
         VK_PIPELINE_BIND_POINT_COMPUTE,
         GLOBAL.Vulkan.computePipelineLayout,
         0,
@@ -1911,22 +1610,22 @@ static void VulkanRecordComputeCommands(uint32_t width, uint32_t height)
         NULL);
 
     VulkanComputePushConstants pushConstants = {
-        .width = width,
-        .height = height,
+        .width = extent.width,
+        .height = extent.height,
     };
 
     vkCmdPushConstants(
-        GLOBAL.Vulkan.computeCommandBuffer,
+        GLOBAL.Vulkan.commandBuffer,
         GLOBAL.Vulkan.computePipelineLayout,
         VK_SHADER_STAGE_COMPUTE_BIT,
         0,
         sizeof(pushConstants),
         &pushConstants);
 
-    const uint32_t groupCountX = (width + VULKAN_COMPUTE_LOCAL_SIZE - 1) / VULKAN_COMPUTE_LOCAL_SIZE;
-    const uint32_t groupCountY = (height + VULKAN_COMPUTE_LOCAL_SIZE - 1) / VULKAN_COMPUTE_LOCAL_SIZE;
+    const uint32_t groupCountX = (extent.width + VULKAN_COMPUTE_LOCAL_SIZE - 1) / VULKAN_COMPUTE_LOCAL_SIZE;
+    const uint32_t groupCountY = (extent.height + VULKAN_COMPUTE_LOCAL_SIZE - 1) / VULKAN_COMPUTE_LOCAL_SIZE;
 
-    vkCmdDispatch(GLOBAL.Vulkan.computeCommandBuffer, groupCountX, groupCountY, 1);
+    vkCmdDispatch(GLOBAL.Vulkan.commandBuffer, groupCountX, groupCountY, 1);
 
     VkImageMemoryBarrier2 toRead = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
@@ -1954,41 +1653,15 @@ static void VulkanRecordComputeCommands(uint32_t width, uint32_t height)
         .pImageMemoryBarriers = &toRead,
     };
 
-    vkCmdPipelineBarrier2(GLOBAL.Vulkan.computeCommandBuffer, &toReadDependency);
+    vkCmdPipelineBarrier2(GLOBAL.Vulkan.commandBuffer, &toReadDependency);
 
-    VkResult endResult = vkEndCommandBuffer(GLOBAL.Vulkan.computeCommandBuffer);
-    Assert(endResult == VK_SUCCESS, "Failed to record Vulkan compute command buffer");
-
-    GLOBAL.Vulkan.gradientInitialized = true;
-}
-
-static void VulkanRecordGraphicsCommands(uint32_t imageIndex)
-{
-    Assert(GLOBAL.Vulkan.commandBuffersReady, "Vulkan command buffers are not ready");
-    Assert(GLOBAL.Vulkan.pipelinesReady, "Vulkan pipelines are not ready");
-    Assert(imageIndex < GLOBAL.Vulkan.swapchainImageCount, "Vulkan swapchain image index out of range");
-
-    VkResult resetResult = vkResetCommandBuffer(GLOBAL.Vulkan.graphicsCommandBuffer, 0);
-    Assert(resetResult == VK_SUCCESS, "Failed to reset Vulkan graphics command buffer");
-
-    VkCommandBufferBeginInfo beginInfo = {
-        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-    };
-
-    VkResult beginResult = vkBeginCommandBuffer(GLOBAL.Vulkan.graphicsCommandBuffer, &beginInfo);
-    Assert(beginResult == VK_SUCCESS, "Failed to begin Vulkan graphics command buffer");
-
-    const bool imagePresented = (imageIndex < GLOBAL.Vulkan.swapchainImageCount) ?
-        GLOBAL.Vulkan.swapchainImagePresented[imageIndex] : false;
-
-    VkImageMemoryBarrier2 preBarrier = {
+    VkImageMemoryBarrier2 swapchainPre = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-        .srcStageMask = imagePresented ? VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT : VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
-        .srcAccessMask = 0,
+        .srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
         .dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+        .srcAccessMask = 0,
         .dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-        .oldLayout = imagePresented ? VK_IMAGE_LAYOUT_PRESENT_SRC_KHR : VK_IMAGE_LAYOUT_UNDEFINED,
+        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
         .newLayout = VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
         .image = GLOBAL.Vulkan.swapchainImages[imageIndex],
         .subresourceRange = {
@@ -2000,13 +1673,13 @@ static void VulkanRecordGraphicsCommands(uint32_t imageIndex)
         },
     };
 
-    VkDependencyInfo preDependency = {
+    VkDependencyInfo swapchainPreDependency = {
         .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
         .imageMemoryBarrierCount = 1,
-        .pImageMemoryBarriers = &preBarrier,
+        .pImageMemoryBarriers = &swapchainPre,
     };
 
-    vkCmdPipelineBarrier2(GLOBAL.Vulkan.graphicsCommandBuffer, &preDependency);
+    vkCmdPipelineBarrier2(GLOBAL.Vulkan.commandBuffer, &swapchainPreDependency);
 
     VkClearValue clearColor = {
         .color = { { 0.0f, 0.0f, 0.0f, 1.0f } },
@@ -2025,17 +1698,17 @@ static void VulkanRecordGraphicsCommands(uint32_t imageIndex)
         .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
         .renderArea = {
             .offset = { 0, 0 },
-            .extent = GLOBAL.Vulkan.swapchainExtent,
+            .extent = extent,
         },
         .layerCount = 1,
         .colorAttachmentCount = 1,
         .pColorAttachments = &colorAttachment,
     };
 
-    vkCmdBeginRendering(GLOBAL.Vulkan.graphicsCommandBuffer, &renderingInfo);
-    vkCmdBindPipeline(GLOBAL.Vulkan.graphicsCommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, GLOBAL.Vulkan.blitPipeline);
+    vkCmdBeginRendering(GLOBAL.Vulkan.commandBuffer, &renderingInfo);
+    vkCmdBindPipeline(GLOBAL.Vulkan.commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, GLOBAL.Vulkan.blitPipeline);
     vkCmdBindDescriptorSets(
-        GLOBAL.Vulkan.graphicsCommandBuffer,
+        GLOBAL.Vulkan.commandBuffer,
         VK_PIPELINE_BIND_POINT_GRAPHICS,
         GLOBAL.Vulkan.blitPipelineLayout,
         0,
@@ -2044,14 +1717,14 @@ static void VulkanRecordGraphicsCommands(uint32_t imageIndex)
         0,
         NULL);
 
-    vkCmdDraw(GLOBAL.Vulkan.graphicsCommandBuffer, 3, 1, 0, 0);
-    vkCmdEndRendering(GLOBAL.Vulkan.graphicsCommandBuffer);
+    vkCmdDraw(GLOBAL.Vulkan.commandBuffer, 3, 1, 0, 0);
+    vkCmdEndRendering(GLOBAL.Vulkan.commandBuffer);
 
-    VkImageMemoryBarrier2 postBarrier = {
+    VkImageMemoryBarrier2 swapchainPost = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
         .srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-        .srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
         .dstStageMask = VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT,
+        .srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
         .dstAccessMask = 0,
         .oldLayout = VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
         .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
@@ -2065,23 +1738,25 @@ static void VulkanRecordGraphicsCommands(uint32_t imageIndex)
         },
     };
 
-    VkDependencyInfo postDependency = {
+    VkDependencyInfo swapchainPostDependency = {
         .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
         .imageMemoryBarrierCount = 1,
-        .pImageMemoryBarriers = &postBarrier,
+        .pImageMemoryBarriers = &swapchainPost,
     };
 
-    vkCmdPipelineBarrier2(GLOBAL.Vulkan.graphicsCommandBuffer, &postDependency);
+    vkCmdPipelineBarrier2(GLOBAL.Vulkan.commandBuffer, &swapchainPostDependency);
 
-    VkResult endResult = vkEndCommandBuffer(GLOBAL.Vulkan.graphicsCommandBuffer);
-    Assert(endResult == VK_SUCCESS, "Failed to record Vulkan graphics command buffer");
+    VkResult endResult = vkEndCommandBuffer(GLOBAL.Vulkan.commandBuffer);
+    Assert(endResult == VK_SUCCESS, "Failed to record Vulkan frame command buffer");
+
+    GLOBAL.Vulkan.gradientInitialized = true;
 }
 
 static void VulkanRecreateSwapchain(void);
 
 static void VulkanDrawFrame(void)
 {
-    if (!GLOBAL.Vulkan.ready || !GLOBAL.Vulkan.swapchainReady)
+    if (!GLOBAL.Vulkan.ready)
     {
         return;
     }
@@ -2092,7 +1767,9 @@ static void VulkanDrawFrame(void)
         return;
     }
 
-    Assert(GLOBAL.Vulkan.syncReady, "Vulkan synchronization objects are not ready");
+    Assert(GLOBAL.Vulkan.commandBuffer != VK_NULL_HANDLE, "Vulkan command buffer is not ready");
+    Assert(GLOBAL.Vulkan.imageAvailableSemaphore != VK_NULL_HANDLE, "Vulkan synchronization objects are not ready");
+    Assert(GLOBAL.Vulkan.frameFence != VK_NULL_HANDLE, "Vulkan frame fence is not ready");
 
     VkResult fenceResult = vkWaitForFences(GLOBAL.Vulkan.device, 1, &GLOBAL.Vulkan.frameFence, VK_TRUE, UINT64_MAX);
     Assert(fenceResult == VK_SUCCESS, "Failed to wait for Vulkan frame fence");
@@ -2117,39 +1794,28 @@ static void VulkanDrawFrame(void)
 
     Assert((acquireResult == VK_SUCCESS) || (acquireResult == VK_SUBOPTIMAL_KHR), "Failed to acquire Vulkan swapchain image");
 
-    VulkanRecordComputeCommands(extent.width, extent.height);
+    VulkanRecordFrameCommands(imageIndex, extent);
 
-    VkSubmitInfo computeSubmit = {
-        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-        .commandBufferCount = 1,
-        .pCommandBuffers = &GLOBAL.Vulkan.computeCommandBuffer,
-    };
-
-    VkResult submitResult = vkQueueSubmit(GLOBAL.Vulkan.computeQueue, 1, &computeSubmit, VK_NULL_HANDLE);
-    Assert(submitResult == VK_SUCCESS, "Failed to submit Vulkan compute commands");
-
-    VkResult waitResult = vkQueueWaitIdle(GLOBAL.Vulkan.computeQueue);
-    Assert(waitResult == VK_SUCCESS, "Failed to wait for Vulkan compute queue");
-
-    VulkanRecordGraphicsCommands(imageIndex);
+    VkSemaphore renderFinishedSemaphore = GLOBAL.Vulkan.renderFinishedSemaphores[imageIndex];
+    Assert(renderFinishedSemaphore != VK_NULL_HANDLE, "Vulkan render-finished semaphore is not ready");
 
     VkSemaphore waitSemaphores[] = { GLOBAL.Vulkan.imageAvailableSemaphore };
     VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
-    VkSemaphore signalSemaphores[] = { GLOBAL.Vulkan.renderFinishedSemaphore };
+    VkSemaphore signalSemaphores[] = { renderFinishedSemaphore };
 
-    VkSubmitInfo graphicsSubmit = {
+    VkSubmitInfo submitInfo = {
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
         .waitSemaphoreCount = ARRAY_SIZE(waitSemaphores),
         .pWaitSemaphores = waitSemaphores,
         .pWaitDstStageMask = waitStages,
         .commandBufferCount = 1,
-        .pCommandBuffers = &GLOBAL.Vulkan.graphicsCommandBuffer,
+        .pCommandBuffers = &GLOBAL.Vulkan.commandBuffer,
         .signalSemaphoreCount = ARRAY_SIZE(signalSemaphores),
         .pSignalSemaphores = signalSemaphores,
     };
 
-    submitResult = vkQueueSubmit(GLOBAL.Vulkan.graphicsQueue, 1, &graphicsSubmit, GLOBAL.Vulkan.frameFence);
-    Assert(submitResult == VK_SUCCESS, "Failed to submit Vulkan graphics commands");
+    VkResult submitResult = vkQueueSubmit(GLOBAL.Vulkan.queue, 1, &submitInfo, GLOBAL.Vulkan.frameFence);
+    Assert(submitResult == VK_SUCCESS, "Failed to submit Vulkan frame commands");
 
     VkPresentInfoKHR presentInfo = {
         .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
@@ -2160,7 +1826,7 @@ static void VulkanDrawFrame(void)
         .pWaitSemaphores = signalSemaphores,
     };
 
-    VkResult presentResult = vkQueuePresentKHR(GLOBAL.Vulkan.presentQueue, &presentInfo);
+    VkResult presentResult = vkQueuePresentKHR(GLOBAL.Vulkan.queue, &presentInfo);
     if (presentResult == VK_ERROR_OUT_OF_DATE_KHR || presentResult == VK_SUBOPTIMAL_KHR)
     {
         VulkanRecreateSwapchain();
@@ -2168,17 +1834,14 @@ static void VulkanDrawFrame(void)
     }
 
     Assert(presentResult == VK_SUCCESS, "Failed to present Vulkan swapchain image");
-    if (imageIndex < GLOBAL.Vulkan.swapchainImageCount)
-    {
-        GLOBAL.Vulkan.swapchainImagePresented[imageIndex] = true;
-    }
+    (void)imageIndex;
 }
 
 static void VulkanDestroySwapchain(void)
 {
     VulkanDestroySwapchainResources();
 
-    if (!GLOBAL.Vulkan.swapchainReady)
+    if (GLOBAL.Vulkan.swapchain == VK_NULL_HANDLE)
     {
         return;
     }
@@ -2196,18 +1859,15 @@ static void VulkanDestroySwapchain(void)
     GLOBAL.Vulkan.swapchainImageCount = 0;
     memset(GLOBAL.Vulkan.swapchainImages, 0, sizeof(GLOBAL.Vulkan.swapchainImages));
     memset(GLOBAL.Vulkan.swapchainImageViews, 0, sizeof(GLOBAL.Vulkan.swapchainImageViews));
-    memset(GLOBAL.Vulkan.swapchainImagePresented, 0, sizeof(GLOBAL.Vulkan.swapchainImagePresented));
 
-    if (GLOBAL.Vulkan.swapchain != VK_NULL_HANDLE)
-    {
-        vkDestroySwapchainKHR(GLOBAL.Vulkan.device, GLOBAL.Vulkan.swapchain, NULL);
-        GLOBAL.Vulkan.swapchain = VK_NULL_HANDLE;
-    }
+    VulkanDestroySwapchainSemaphores();
+
+    vkDestroySwapchainKHR(GLOBAL.Vulkan.device, GLOBAL.Vulkan.swapchain, NULL);
+    GLOBAL.Vulkan.swapchain = VK_NULL_HANDLE;
 
     GLOBAL.Vulkan.swapchainExtent.width = 0;
     GLOBAL.Vulkan.swapchainExtent.height = 0;
     GLOBAL.Vulkan.swapchainImageFormat = VK_FORMAT_UNDEFINED;
-    GLOBAL.Vulkan.swapchainReady = false;
     VulkanRefreshReadyState();
 
     LogInfo("Vulkan swapchain destroyed");
@@ -2215,8 +1875,8 @@ static void VulkanDestroySwapchain(void)
 
 static void VulkanCreateSwapchain(void)
 {
-    Assert(GLOBAL.Vulkan.deviceReady, "Vulkan logical device is not ready");
-    Assert(GLOBAL.Vulkan.surfaceReady, "Vulkan surface is not created");
+    Assert(GLOBAL.Vulkan.device != VK_NULL_HANDLE, "Vulkan logical device is not ready");
+    Assert(GLOBAL.Vulkan.surface != VK_NULL_HANDLE, "Vulkan surface is not created");
     Assert(GLOBAL.Window.ready, "Window is not created");
 
     VulkanSwapchainSupport support;
@@ -2229,7 +1889,7 @@ static void VulkanCreateSwapchain(void)
     VkExtent2D extent = VulkanChooseExtent(&support.capabilities);
 
     uint32_t imageCount = support.capabilities.minImageCount + 1;
-    if (support.capabilities.maxImageCount > 0 && imageCount > support.capabilities.maxImageCount)
+    if ((support.capabilities.maxImageCount > 0) && (imageCount > support.capabilities.maxImageCount))
     {
         imageCount = support.capabilities.maxImageCount;
     }
@@ -2243,11 +1903,6 @@ static void VulkanCreateSwapchain(void)
 
     VkCompositeAlphaFlagBitsKHR compositeAlpha = VulkanChooseCompositeAlpha(support.capabilities.supportedCompositeAlpha);
 
-    uint32_t queueFamilyIndices[2] = {
-        GLOBAL.Vulkan.graphicsQueueFamily,
-        GLOBAL.Vulkan.presentQueueFamily,
-    };
-
     VkSwapchainCreateInfoKHR createInfo = {
         .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
         .surface = GLOBAL.Vulkan.surface,
@@ -2257,23 +1912,13 @@ static void VulkanCreateSwapchain(void)
         .imageExtent = extent,
         .imageArrayLayers = 1,
         .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+        .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
         .preTransform = transform,
         .compositeAlpha = compositeAlpha,
         .presentMode = presentMode,
         .clipped = VK_TRUE,
         .oldSwapchain = VK_NULL_HANDLE,
     };
-
-    if (GLOBAL.Vulkan.graphicsQueueFamily != GLOBAL.Vulkan.presentQueueFamily)
-    {
-        createInfo.imageSharingMode = VK_SHARING_MODE_CONCURRENT;
-        createInfo.queueFamilyIndexCount = 2;
-        createInfo.pQueueFamilyIndices = queueFamilyIndices;
-    }
-    else
-    {
-        createInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    }
 
     VkResult swapchainResult = vkCreateSwapchainKHR(GLOBAL.Vulkan.device, &createInfo, NULL, &GLOBAL.Vulkan.swapchain);
     Assert(swapchainResult == VK_SUCCESS, "Failed to create Vulkan swapchain");
@@ -2288,7 +1933,6 @@ static void VulkanCreateSwapchain(void)
     GLOBAL.Vulkan.swapchainImageCount = retrievedImageCount;
 
     memset(GLOBAL.Vulkan.swapchainImageViews, 0, sizeof(GLOBAL.Vulkan.swapchainImageViews));
-    memset(GLOBAL.Vulkan.swapchainImagePresented, 0, sizeof(GLOBAL.Vulkan.swapchainImagePresented));
 
     for (uint32_t index = 0; index < GLOBAL.Vulkan.swapchainImageCount; index++)
     {
@@ -2318,7 +1962,7 @@ static void VulkanCreateSwapchain(void)
 
     GLOBAL.Vulkan.swapchainImageFormat = surfaceFormat.format;
     GLOBAL.Vulkan.swapchainExtent = extent;
-    GLOBAL.Vulkan.swapchainReady = true;
+    VulkanCreateSwapchainSemaphores();
     VulkanCreateSwapchainResources();
     VulkanRefreshReadyState();
 
@@ -2327,7 +1971,7 @@ static void VulkanCreateSwapchain(void)
 
 static void VulkanRecreateSwapchain(void)
 {
-    if (!GLOBAL.Vulkan.deviceReady || !GLOBAL.Vulkan.surfaceReady)
+    if ((GLOBAL.Vulkan.device == VK_NULL_HANDLE) || (GLOBAL.Vulkan.surface == VK_NULL_HANDLE))
     {
         return;
     }
@@ -2391,43 +2035,35 @@ static void InitVulkan(void)
 
 static void CloseVulkan(void)
 {
-    if (!GLOBAL.Vulkan.instanceReady &&
-        !GLOBAL.Vulkan.deviceReady &&
-        !GLOBAL.Vulkan.surfaceReady &&
-        !GLOBAL.Vulkan.debugMessengerReady)
+    if ((GLOBAL.Vulkan.instance == VK_NULL_HANDLE) &&
+        (GLOBAL.Vulkan.device == VK_NULL_HANDLE) &&
+        (GLOBAL.Vulkan.surface == VK_NULL_HANDLE) &&
+        (GLOBAL.Vulkan.debugMessenger == VK_NULL_HANDLE))
     {
         return;
     }
 
-    if (GLOBAL.Vulkan.deviceReady)
+    if (GLOBAL.Vulkan.device != VK_NULL_HANDLE)
     {
         vkDeviceWaitIdle(GLOBAL.Vulkan.device);
         VulkanDestroySwapchain();
         VulkanDestroyDeviceResources();
         vkDestroyDevice(GLOBAL.Vulkan.device, NULL);
         GLOBAL.Vulkan.device = VK_NULL_HANDLE;
-        GLOBAL.Vulkan.deviceReady = false;
     }
 
-    GLOBAL.Vulkan.queuesReady = false;
-    GLOBAL.Vulkan.graphicsQueue = VK_NULL_HANDLE;
-    GLOBAL.Vulkan.presentQueue = VK_NULL_HANDLE;
-    GLOBAL.Vulkan.computeQueue = VK_NULL_HANDLE;
-    GLOBAL.Vulkan.graphicsQueueFamily = VULKAN_INVALID_QUEUE_FAMILY;
-    GLOBAL.Vulkan.presentQueueFamily = VULKAN_INVALID_QUEUE_FAMILY;
-    GLOBAL.Vulkan.computeQueueFamily = VULKAN_INVALID_QUEUE_FAMILY;
+    GLOBAL.Vulkan.queue = VK_NULL_HANDLE;
+    GLOBAL.Vulkan.queueFamily = UINT32_MAX;
 
     GLOBAL.Vulkan.physicalDevice = VK_NULL_HANDLE;
-    GLOBAL.Vulkan.physicalDeviceReady = false;
 
-    if (GLOBAL.Vulkan.surfaceReady)
+    if (GLOBAL.Vulkan.surface != VK_NULL_HANDLE)
     {
         vkDestroySurfaceKHR(GLOBAL.Vulkan.instance, GLOBAL.Vulkan.surface, NULL);
         GLOBAL.Vulkan.surface = VK_NULL_HANDLE;
-        GLOBAL.Vulkan.surfaceReady = false;
     }
 
-    if (GLOBAL.Vulkan.debugMessengerReady)
+    if (GLOBAL.Vulkan.debugMessenger != VK_NULL_HANDLE)
     {
         PFN_vkDestroyDebugUtilsMessengerEXT destroyMessenger = (PFN_vkDestroyDebugUtilsMessengerEXT)
             vkGetInstanceProcAddr(GLOBAL.Vulkan.instance, "vkDestroyDebugUtilsMessengerEXT");
@@ -2436,20 +2072,17 @@ static void CloseVulkan(void)
             destroyMessenger(GLOBAL.Vulkan.instance, GLOBAL.Vulkan.debugMessenger, NULL);
         }
         GLOBAL.Vulkan.debugMessenger = VK_NULL_HANDLE;
-        GLOBAL.Vulkan.debugMessengerReady = false;
+        GLOBAL.Vulkan.debugEnabled = false;
     }
 
-    if (GLOBAL.Vulkan.instanceReady)
+    if (GLOBAL.Vulkan.instance != VK_NULL_HANDLE)
     {
         vkDestroyInstance(GLOBAL.Vulkan.instance, NULL);
         GLOBAL.Vulkan.instance = VK_NULL_HANDLE;
-        GLOBAL.Vulkan.instanceReady = false;
     }
 
     GLOBAL.Vulkan.ready = false;
-    GLOBAL.Vulkan.debugEnabled = false;
     GLOBAL.Vulkan.validationLayersEnabled = false;
-    GLOBAL.Vulkan.portabilitySubsetRequired = false;
 }
 
 // Provide application entry point
