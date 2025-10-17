@@ -73,6 +73,9 @@ void LoadShaderModules(void)
     if ((GLOBAL.Vulkan.spheresInitSM != VK_NULL_HANDLE) &&
         (GLOBAL.Vulkan.primaryIntersectSM != VK_NULL_HANDLE) &&
         (GLOBAL.Vulkan.shadeShadowSM != VK_NULL_HANDLE) &&
+        (GLOBAL.Vulkan.gridCountSM != VK_NULL_HANDLE) &&
+        (GLOBAL.Vulkan.gridClassifySM != VK_NULL_HANDLE) &&
+        (GLOBAL.Vulkan.gridScatterSM != VK_NULL_HANDLE) &&
         (GLOBAL.Vulkan.blitVertexShaderModule != VK_NULL_HANDLE) &&
         (GLOBAL.Vulkan.blitFragmentShaderModule != VK_NULL_HANDLE))
     {
@@ -82,6 +85,9 @@ void LoadShaderModules(void)
     GLOBAL.Vulkan.spheresInitSM = VulkanLoadShaderModule("spheres_init.spv");
     GLOBAL.Vulkan.primaryIntersectSM = VulkanLoadShaderModule("primary_intersect.spv");
     GLOBAL.Vulkan.shadeShadowSM = VulkanLoadShaderModule("shade_shadow.spv");
+    GLOBAL.Vulkan.gridCountSM = VulkanLoadShaderModule("grid_count.spv");
+    GLOBAL.Vulkan.gridClassifySM = VulkanLoadShaderModule("grid_classify.spv");
+    GLOBAL.Vulkan.gridScatterSM = VulkanLoadShaderModule("grid_scatter.spv");
     GLOBAL.Vulkan.blitVertexShaderModule = VulkanLoadShaderModule("blit.vert.spv");
     GLOBAL.Vulkan.blitFragmentShaderModule = VulkanLoadShaderModule("blit.frag.spv");
 
@@ -106,6 +112,24 @@ void DestroyShaderModules(void)
     {
         vkDestroyShaderModule(GLOBAL.Vulkan.device, GLOBAL.Vulkan.shadeShadowSM, NULL);
         GLOBAL.Vulkan.shadeShadowSM = VK_NULL_HANDLE;
+    }
+
+    if (GLOBAL.Vulkan.gridCountSM != VK_NULL_HANDLE)
+    {
+        vkDestroyShaderModule(GLOBAL.Vulkan.device, GLOBAL.Vulkan.gridCountSM, NULL);
+        GLOBAL.Vulkan.gridCountSM = VK_NULL_HANDLE;
+    }
+
+    if (GLOBAL.Vulkan.gridClassifySM != VK_NULL_HANDLE)
+    {
+        vkDestroyShaderModule(GLOBAL.Vulkan.device, GLOBAL.Vulkan.gridClassifySM, NULL);
+        GLOBAL.Vulkan.gridClassifySM = VK_NULL_HANDLE;
+    }
+
+    if (GLOBAL.Vulkan.gridScatterSM != VK_NULL_HANDLE)
+    {
+        vkDestroyShaderModule(GLOBAL.Vulkan.device, GLOBAL.Vulkan.gridScatterSM, NULL);
+        GLOBAL.Vulkan.gridScatterSM = VK_NULL_HANDLE;
     }
 
     if (GLOBAL.Vulkan.blitVertexShaderModule != VK_NULL_HANDLE)
@@ -172,7 +196,10 @@ void CreateComputePipelines(void)
     const bool ready =
         (GLOBAL.Vulkan.spheresInitPipe != VK_NULL_HANDLE) &&
         (GLOBAL.Vulkan.primaryIntersectPipe != VK_NULL_HANDLE) &&
-        (GLOBAL.Vulkan.shadeShadowPipe != VK_NULL_HANDLE);
+        (GLOBAL.Vulkan.shadeShadowPipe != VK_NULL_HANDLE) &&
+        (GLOBAL.Vulkan.gridCountPipe != VK_NULL_HANDLE) &&
+        (GLOBAL.Vulkan.gridClassifyPipe != VK_NULL_HANDLE) &&
+        (GLOBAL.Vulkan.gridScatterPipe != VK_NULL_HANDLE);
     if (ready)
     {
         return;
@@ -181,6 +208,9 @@ void CreateComputePipelines(void)
     Assert(GLOBAL.Vulkan.spheresInitSM != VK_NULL_HANDLE, "Spheres init shader module is not ready");
     Assert(GLOBAL.Vulkan.primaryIntersectSM != VK_NULL_HANDLE, "Primary intersect shader module is not ready");
     Assert(GLOBAL.Vulkan.shadeShadowSM != VK_NULL_HANDLE, "Shade shadow shader module is not ready");
+    Assert(GLOBAL.Vulkan.gridCountSM != VK_NULL_HANDLE, "Grid count shader module is not ready");
+    Assert(GLOBAL.Vulkan.gridClassifySM != VK_NULL_HANDLE, "Grid classify shader module is not ready");
+    Assert(GLOBAL.Vulkan.gridScatterSM != VK_NULL_HANDLE, "Grid scatter shader module is not ready");
 
     EnsureComputePipelineLayout();
 
@@ -239,6 +269,63 @@ void CreateComputePipelines(void)
 
         VkResult result = vkCreateComputePipelines(GLOBAL.Vulkan.device, VK_NULL_HANDLE, 1, &info, NULL, &GLOBAL.Vulkan.shadeShadowPipe);
         Assert(result == VK_SUCCESS, "Failed to create shade shadow pipeline");
+    }
+
+    if (GLOBAL.Vulkan.gridCountPipe == VK_NULL_HANDLE)
+    {
+        VkPipelineShaderStageCreateInfo stage = {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+            .module = GLOBAL.Vulkan.gridCountSM,
+            .pName = "main",
+        };
+
+        VkComputePipelineCreateInfo info = {
+            .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+            .stage = stage,
+            .layout = GLOBAL.Vulkan.computePipelineLayout,
+        };
+
+        VkResult result = vkCreateComputePipelines(GLOBAL.Vulkan.device, VK_NULL_HANDLE, 1, &info, NULL, &GLOBAL.Vulkan.gridCountPipe);
+        Assert(result == VK_SUCCESS, "Failed to create grid count pipeline");
+    }
+
+    if (GLOBAL.Vulkan.gridClassifyPipe == VK_NULL_HANDLE)
+    {
+        VkPipelineShaderStageCreateInfo stage = {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+            .module = GLOBAL.Vulkan.gridClassifySM,
+            .pName = "main",
+        };
+
+        VkComputePipelineCreateInfo info = {
+            .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+            .stage = stage,
+            .layout = GLOBAL.Vulkan.computePipelineLayout,
+        };
+
+        VkResult result = vkCreateComputePipelines(GLOBAL.Vulkan.device, VK_NULL_HANDLE, 1, &info, NULL, &GLOBAL.Vulkan.gridClassifyPipe);
+        Assert(result == VK_SUCCESS, "Failed to create grid classify pipeline");
+    }
+
+    if (GLOBAL.Vulkan.gridScatterPipe == VK_NULL_HANDLE)
+    {
+        VkPipelineShaderStageCreateInfo stage = {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+            .module = GLOBAL.Vulkan.gridScatterSM,
+            .pName = "main",
+        };
+
+        VkComputePipelineCreateInfo info = {
+            .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+            .stage = stage,
+            .layout = GLOBAL.Vulkan.computePipelineLayout,
+        };
+
+        VkResult result = vkCreateComputePipelines(GLOBAL.Vulkan.device, VK_NULL_HANDLE, 1, &info, NULL, &GLOBAL.Vulkan.gridScatterPipe);
+        Assert(result == VK_SUCCESS, "Failed to create grid scatter pipeline");
     }
 
     LogInfo("Vulkan compute pipelines ready");
@@ -401,6 +488,24 @@ void DestroyPipelines(void)
     {
         vkDestroyPipeline(GLOBAL.Vulkan.device, GLOBAL.Vulkan.spheresInitPipe, NULL);
         GLOBAL.Vulkan.spheresInitPipe = VK_NULL_HANDLE;
+    }
+
+    if (GLOBAL.Vulkan.gridScatterPipe != VK_NULL_HANDLE)
+    {
+        vkDestroyPipeline(GLOBAL.Vulkan.device, GLOBAL.Vulkan.gridScatterPipe, NULL);
+        GLOBAL.Vulkan.gridScatterPipe = VK_NULL_HANDLE;
+    }
+
+    if (GLOBAL.Vulkan.gridClassifyPipe != VK_NULL_HANDLE)
+    {
+        vkDestroyPipeline(GLOBAL.Vulkan.device, GLOBAL.Vulkan.gridClassifyPipe, NULL);
+        GLOBAL.Vulkan.gridClassifyPipe = VK_NULL_HANDLE;
+    }
+
+    if (GLOBAL.Vulkan.gridCountPipe != VK_NULL_HANDLE)
+    {
+        vkDestroyPipeline(GLOBAL.Vulkan.device, GLOBAL.Vulkan.gridCountPipe, NULL);
+        GLOBAL.Vulkan.gridCountPipe = VK_NULL_HANDLE;
     }
 
     DestroyBlitPipeline();

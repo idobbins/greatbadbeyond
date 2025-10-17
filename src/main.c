@@ -165,13 +165,13 @@ static void InitWindow(void)
     GLOBAL.Vulkan.cam.right = (float3){ 1.0f, 0.0f, 0.0f };
     GLOBAL.Vulkan.cam.up = (float3){ 0.0f, 1.0f, 0.0f };
     GLOBAL.Vulkan.frameIndex = 0;
-    GLOBAL.Vulkan.sphereCount = 512;
+    GLOBAL.Vulkan.sphereCount = 10000;
     GLOBAL.Vulkan.sphereRadius = 0.25f;
     GLOBAL.Vulkan.groundY = 0.0f;
-    GLOBAL.Vulkan.worldMinX = -8.0f;
-    GLOBAL.Vulkan.worldMinZ = -8.0f;
-    GLOBAL.Vulkan.worldMaxX = 8.0f;
-    GLOBAL.Vulkan.worldMaxZ = 8.0f;
+    GLOBAL.Vulkan.worldMinX = 0.0f;
+    GLOBAL.Vulkan.worldMinZ = 0.0f;
+    GLOBAL.Vulkan.worldMaxX = 0.0f;
+    GLOBAL.Vulkan.worldMaxZ = 0.0f;
     GLOBAL.Vulkan.sceneInitialized = false;
 
     Assert(GLOBAL.Vulkan.sphereCount <= RT_MAX_SPHERES, "Sphere count exceeds capacity");

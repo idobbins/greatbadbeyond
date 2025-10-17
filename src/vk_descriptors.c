@@ -10,7 +10,7 @@ void VulkanCreateDescriptorInfra(void)
 
     if (GLOBAL.Vulkan.descriptorSetLayout == VK_NULL_HANDLE)
     {
-        VkDescriptorSetLayoutBinding bindings[6] = {
+        VkDescriptorSetLayoutBinding bindings[13] = {
             {
                 .binding = B_TARGET,
                 .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
@@ -47,6 +47,48 @@ void VulkanCreateDescriptorInfra(void)
                 .descriptorCount = 1,
                 .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
             },
+            {
+                .binding = B_GRID_L0_META,
+                .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .descriptorCount = 1,
+                .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+            },
+            {
+                .binding = B_GRID_L0_COUNTER,
+                .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .descriptorCount = 1,
+                .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+            },
+            {
+                .binding = B_GRID_L0_INDICES,
+                .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .descriptorCount = 1,
+                .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+            },
+            {
+                .binding = B_GRID_L1_META,
+                .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .descriptorCount = 1,
+                .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+            },
+            {
+                .binding = B_GRID_L1_COUNTER,
+                .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .descriptorCount = 1,
+                .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+            },
+            {
+                .binding = B_GRID_L1_INDICES,
+                .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .descriptorCount = 1,
+                .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+            },
+            {
+                .binding = B_GRID_STATE,
+                .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .descriptorCount = 1,
+                .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+            },
         };
 
         VkDescriptorSetLayoutCreateInfo layoutInfo = {
@@ -63,9 +105,16 @@ void VulkanCreateDescriptorInfra(void)
 
     if (GLOBAL.Vulkan.descriptorPool == VK_NULL_HANDLE)
     {
-        VkDescriptorPoolSize poolSizes[6] = {
+        VkDescriptorPoolSize poolSizes[13] = {
             { .type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .descriptorCount = 1 },
             { .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1 },
+            { .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1 },
+            { .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1 },
+            { .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1 },
+            { .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1 },
+            { .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1 },
+            { .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1 },
+            { .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1 },
             { .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1 },
             { .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1 },
             { .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1 },
@@ -131,6 +180,13 @@ void UpdateComputeDescriptorSet(const ComputeDS *resources)
     Assert(resources->sphereAlb != VK_NULL_HANDLE, "Sphere albedo buffer is not ready");
     Assert(resources->hitT != VK_NULL_HANDLE, "Hit distance buffer is not ready");
     Assert(resources->hitN != VK_NULL_HANDLE, "Hit normal buffer is not ready");
+    Assert(resources->gridLevel0Meta != VK_NULL_HANDLE, "Grid level0 meta buffer is not ready");
+    Assert(resources->gridLevel0Counter != VK_NULL_HANDLE, "Grid level0 counter buffer is not ready");
+    Assert(resources->gridLevel0Indices != VK_NULL_HANDLE, "Grid level0 index buffer is not ready");
+    Assert(resources->gridLevel1Meta != VK_NULL_HANDLE, "Grid level1 meta buffer is not ready");
+    Assert(resources->gridLevel1Counter != VK_NULL_HANDLE, "Grid level1 counter buffer is not ready");
+    Assert(resources->gridLevel1Indices != VK_NULL_HANDLE, "Grid level1 index buffer is not ready");
+    Assert(resources->gridState != VK_NULL_HANDLE, "Grid state buffer is not ready");
 
     VkDescriptorImageInfo storage = {
         .imageView = resources->targetView,
@@ -167,7 +223,49 @@ void UpdateComputeDescriptorSet(const ComputeDS *resources)
         .range = VK_WHOLE_SIZE,
     };
 
-    VkWriteDescriptorSet writes[6] = {
+    VkDescriptorBufferInfo gridL0Meta = {
+        .buffer = resources->gridLevel0Meta,
+        .offset = 0,
+        .range = VK_WHOLE_SIZE,
+    };
+
+    VkDescriptorBufferInfo gridL0Counter = {
+        .buffer = resources->gridLevel0Counter,
+        .offset = 0,
+        .range = VK_WHOLE_SIZE,
+    };
+
+    VkDescriptorBufferInfo gridL0Indices = {
+        .buffer = resources->gridLevel0Indices,
+        .offset = 0,
+        .range = VK_WHOLE_SIZE,
+    };
+
+    VkDescriptorBufferInfo gridL1Meta = {
+        .buffer = resources->gridLevel1Meta,
+        .offset = 0,
+        .range = VK_WHOLE_SIZE,
+    };
+
+    VkDescriptorBufferInfo gridL1Counter = {
+        .buffer = resources->gridLevel1Counter,
+        .offset = 0,
+        .range = VK_WHOLE_SIZE,
+    };
+
+    VkDescriptorBufferInfo gridL1Indices = {
+        .buffer = resources->gridLevel1Indices,
+        .offset = 0,
+        .range = VK_WHOLE_SIZE,
+    };
+
+    VkDescriptorBufferInfo gridState = {
+        .buffer = resources->gridState,
+        .offset = 0,
+        .range = VK_WHOLE_SIZE,
+    };
+
+    VkWriteDescriptorSet writes[13] = {
         {
             .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
             .dstSet = GLOBAL.Vulkan.descriptorSet,
@@ -215,6 +313,62 @@ void UpdateComputeDescriptorSet(const ComputeDS *resources)
             .descriptorCount = 1,
             .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
             .pBufferInfo = &hitN,
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = GLOBAL.Vulkan.descriptorSet,
+            .dstBinding = B_GRID_L0_META,
+            .descriptorCount = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .pBufferInfo = &gridL0Meta,
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = GLOBAL.Vulkan.descriptorSet,
+            .dstBinding = B_GRID_L0_COUNTER,
+            .descriptorCount = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .pBufferInfo = &gridL0Counter,
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = GLOBAL.Vulkan.descriptorSet,
+            .dstBinding = B_GRID_L0_INDICES,
+            .descriptorCount = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .pBufferInfo = &gridL0Indices,
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = GLOBAL.Vulkan.descriptorSet,
+            .dstBinding = B_GRID_L1_META,
+            .descriptorCount = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .pBufferInfo = &gridL1Meta,
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = GLOBAL.Vulkan.descriptorSet,
+            .dstBinding = B_GRID_L1_COUNTER,
+            .descriptorCount = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .pBufferInfo = &gridL1Counter,
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = GLOBAL.Vulkan.descriptorSet,
+            .dstBinding = B_GRID_L1_INDICES,
+            .descriptorCount = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .pBufferInfo = &gridL1Indices,
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = GLOBAL.Vulkan.descriptorSet,
+            .dstBinding = B_GRID_STATE,
+            .descriptorCount = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .pBufferInfo = &gridState,
         },
     };
 

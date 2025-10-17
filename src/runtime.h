@@ -35,8 +35,13 @@
 #define VULKAN_MAX_SHADER_SIZE (1024 * 1024)
 #define VULKAN_COMPUTE_LOCAL_SIZE 16
 #define VULKAN_MAX_PATH_LENGTH 512
-#define RT_MAX_SPHERES 2048
+#define RT_MAX_SPHERES 16384
 #define FRAME_TIME_SAMPLES 240
+
+#define GRID_MAX_LEVEL0_DIM 64u
+#define GRID_FINE_DIM 4u
+#define GRID_LEVEL0_CELLS (GRID_MAX_LEVEL0_DIM * GRID_MAX_LEVEL0_DIM)
+#define GRID_LEVEL1_CELLS (GRID_LEVEL0_CELLS * GRID_FINE_DIM * GRID_FINE_DIM)
 
 typedef struct VulkanBuffers {
     VkBuffer sphereCR;
@@ -47,6 +52,20 @@ typedef struct VulkanBuffers {
     VmaAllocation hitTAlloc;
     VkBuffer hitN;
     VmaAllocation hitNAlloc;
+    VkBuffer gridLevel0Meta;
+    VmaAllocation gridLevel0MetaAlloc;
+    VkBuffer gridLevel0Counter;
+    VmaAllocation gridLevel0CounterAlloc;
+    VkBuffer gridLevel0Indices;
+    VmaAllocation gridLevel0IndicesAlloc;
+    VkBuffer gridLevel1Meta;
+    VmaAllocation gridLevel1MetaAlloc;
+    VkBuffer gridLevel1Counter;
+    VmaAllocation gridLevel1CounterAlloc;
+    VkBuffer gridLevel1Indices;
+    VmaAllocation gridLevel1IndicesAlloc;
+    VkBuffer gridState;
+    VmaAllocation gridStateAlloc;
 } VulkanBuffers;
 
 typedef struct Float3 {
@@ -94,6 +113,9 @@ typedef struct GlobalData {
         VkShaderModule spheresInitSM;
         VkShaderModule primaryIntersectSM;
         VkShaderModule shadeShadowSM;
+        VkShaderModule gridCountSM;
+        VkShaderModule gridClassifySM;
+        VkShaderModule gridScatterSM;
         VkShaderModule blitVertexShaderModule;
         VkShaderModule blitFragmentShaderModule;
         VkDescriptorSetLayout descriptorSetLayout;
@@ -104,6 +126,9 @@ typedef struct GlobalData {
         VkPipeline spheresInitPipe;
         VkPipeline primaryIntersectPipe;
         VkPipeline shadeShadowPipe;
+        VkPipeline gridCountPipe;
+        VkPipeline gridClassifyPipe;
+        VkPipeline gridScatterPipe;
         VkPipeline blitPipeline;
         VmaAllocator vma;
         VkCommandPool commandPool;
