@@ -7,6 +7,7 @@
 #include <string.h>
 #include <stdarg.h>
 #include <errno.h>
+#include <math.h>
 
 #include <vulkan/vulkan.h>
 #include <GLFW/glfw3.h>
@@ -40,10 +41,39 @@ static const char *const vulkanValidationLayers[] = {
 #define VULKAN_MAX_SHADER_SIZE (1024 * 1024)
 #define VULKAN_COMPUTE_LOCAL_SIZE 16
 #define VULKAN_MAX_PATH_LENGTH 512
+#define RT_MAX_SPHERES 1024
+#define FRAME_TIME_SAMPLES 240
 
 #ifndef VULKAN_SHADER_DIRECTORY
     #define VULKAN_SHADER_DIRECTORY "./shaders"
 #endif
+
+typedef struct VulkanBuffers {
+    VkBuffer sphereCR;
+    VmaAllocation sphereCRAlloc;
+    VkBuffer sphereAlb;
+    VmaAllocation sphereAlbAlloc;
+    VkBuffer hitT;
+    VmaAllocation hitTAlloc;
+    VkBuffer hitN;
+    VmaAllocation hitNAlloc;
+} VulkanBuffers;
+
+typedef struct Float3 {
+    float x;
+    float y;
+    float z;
+} float3;
+
+typedef struct Camera {
+    float3 pos;
+    float yaw;
+    float pitch;
+    float fovY;
+    float3 fwd;
+    float3 right;
+    float3 up;
+} Camera;
 
 static const char *const defaultApplicationTitle = "Callandor";
 
@@ -89,6 +119,47 @@ static inline void Assert(bool condition, const char *message)
     }
 }
 
+static float3 add3(float3 a, float3 b)
+{
+    float3 r = { a.x + b.x, a.y + b.y, a.z + b.z };
+    return r;
+}
+
+static float3 mul3f(float3 v, float s)
+{
+    float3 r = { v.x * s, v.y * s, v.z * s };
+    return r;
+}
+
+static float3 cross3(float3 a, float3 b)
+{
+    float3 r = {
+        (a.y * b.z) - (a.z * b.y),
+        (a.z * b.x) - (a.x * b.z),
+        (a.x * b.y) - (a.y * b.x),
+    };
+    return r;
+}
+
+static float dot3(float3 a, float3 b)
+{
+    return (a.x * b.x) + (a.y * b.y) + (a.z * b.z);
+}
+
+static float3 normalize3(float3 v)
+{
+    float lenSq = dot3(v, v);
+    if (lenSq <= 1e-12f)
+    {
+        float3 zero = { 0.0f, 0.0f, 0.0f };
+        return zero;
+    }
+
+    float invLen = 1.0f / sqrtf(lenSq);
+    float3 r = { v.x * invLen, v.y * invLen, v.z * invLen };
+    return r;
+}
+
 // Track global renderer state
 
 typedef struct GlobalData {
@@ -117,7 +188,9 @@ typedef struct GlobalData {
         uint32_t swapchainImageCount;
         VkFormat swapchainImageFormat;
         VkExtent2D swapchainExtent;
-        VkShaderModule computeShaderModule;
+        VkShaderModule spheresInitSM;
+        VkShaderModule primaryIntersectSM;
+        VkShaderModule shadeShadowSM;
         VkShaderModule blitVertexShaderModule;
         VkShaderModule blitFragmentShaderModule;
         VkDescriptorSetLayout descriptorSetLayout;
@@ -125,7 +198,9 @@ typedef struct GlobalData {
         VkDescriptorSet descriptorSet;
         VkPipelineLayout computePipelineLayout;
         VkPipelineLayout blitPipelineLayout;
-        VkPipeline computePipeline;
+        VkPipeline spheresInitPipe;
+        VkPipeline primaryIntersectPipe;
+        VkPipeline shadeShadowPipe;
         VkPipeline blitPipeline;
         VmaAllocator vma;
         VkCommandPool commandPool;
@@ -138,16 +213,41 @@ typedef struct GlobalData {
         VkSemaphore renderFinishedSemaphores[VULKAN_MAX_SWAPCHAIN_IMAGES];
         VkFence frameFence;
 
+        VulkanBuffers rt;
+
         bool gradientInitialized;
+        bool sceneInitialized;
+
+        uint32_t sphereCount;
+        float sphereRadius;
+        float groundY;
+        float worldMinX;
+        float worldMinZ;
+        float worldMaxX;
+        float worldMaxZ;
+
+        Camera cam;
+        uint32_t frameIndex;
 
         bool ready;
         bool debugEnabled;
         bool validationLayersEnabled;
 
     } Vulkan;
+    struct {
+        double samples[FRAME_TIME_SAMPLES];
+        uint32_t sampleCount;
+        uint32_t sampleCursor;
+        double lastTimestamp;
+        double lastReportTime;
+    } Frame;
 } GlobalData;
 
 static GlobalData GLOBAL = { 0 };
+
+static void FrameStatsReset(void);
+static void FrameStatsAddSample(double deltaSeconds, double nowSeconds);
+static void UpdateSpawnArea(void);
 
 // Manage GLFW and window lifecycle
 
@@ -197,6 +297,30 @@ static void InitWindow(void)
     GLOBAL.Window.window = glfwCreateWindow(1280, 720, GLOBAL.Window.title, NULL, NULL);
     Assert(GLOBAL.Window.window != NULL, "Failed to create window");
 
+    glfwSetInputMode(GLOBAL.Window.window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+
+    GLOBAL.Vulkan.cam.pos = (float3){ 0.0f, 1.5f, 4.0f };
+    GLOBAL.Vulkan.cam.yaw = 0.0f;
+    GLOBAL.Vulkan.cam.pitch = 0.0f;
+    GLOBAL.Vulkan.cam.fovY = 60.0f * 3.14159265f / 180.0f;
+    GLOBAL.Vulkan.cam.fwd = (float3){ 0.0f, 0.0f, -1.0f };
+    GLOBAL.Vulkan.cam.right = (float3){ 1.0f, 0.0f, 0.0f };
+    GLOBAL.Vulkan.cam.up = (float3){ 0.0f, 1.0f, 0.0f };
+    GLOBAL.Vulkan.frameIndex = 0;
+    GLOBAL.Vulkan.sphereCount = 1024;
+    GLOBAL.Vulkan.sphereRadius = 0.25f;
+    GLOBAL.Vulkan.groundY = 0.0f;
+    GLOBAL.Vulkan.worldMinX = -8.0f;
+    GLOBAL.Vulkan.worldMinZ = -8.0f;
+    GLOBAL.Vulkan.worldMaxX = 8.0f;
+    GLOBAL.Vulkan.worldMaxZ = 8.0f;
+    GLOBAL.Vulkan.sceneInitialized = false;
+
+    Assert(GLOBAL.Vulkan.sphereCount <= RT_MAX_SPHERES, "Sphere count exceeds capacity");
+
+    UpdateSpawnArea();
+    FrameStatsReset();
+
     GLOBAL.Window.ready = true;
 }
 
@@ -221,6 +345,253 @@ static bool WindowShouldClose(void)
 {
     Assert(IsWindowReady(), "Window is not ready");
     return glfwWindowShouldClose(GLOBAL.Window.window);
+}
+
+static uint32_t FrameStatsPercentileIndex(uint32_t count, double percentile)
+{
+    if (count == 0)
+    {
+        return 0;
+    }
+
+    double scaled = percentile * (double)(count - 1);
+    uint32_t index = (uint32_t)(scaled + 0.5);
+    if (index >= count)
+    {
+        index = count - 1;
+    }
+
+    return index;
+}
+
+static void FrameStatsAddSample(double deltaSeconds, double nowSeconds)
+{
+    if (deltaSeconds < 0.0)
+    {
+        return;
+    }
+
+    GLOBAL.Frame.samples[GLOBAL.Frame.sampleCursor] = deltaSeconds;
+    if (GLOBAL.Frame.sampleCount < FRAME_TIME_SAMPLES)
+    {
+        GLOBAL.Frame.sampleCount++;
+    }
+    GLOBAL.Frame.sampleCursor = (GLOBAL.Frame.sampleCursor + 1u) % FRAME_TIME_SAMPLES;
+
+    if ((nowSeconds - GLOBAL.Frame.lastReportTime) < 1.0)
+    {
+        return;
+    }
+
+    if (GLOBAL.Frame.sampleCount < 5)
+    {
+        return;
+    }
+
+    double sorted[FRAME_TIME_SAMPLES];
+    const uint32_t count = GLOBAL.Frame.sampleCount;
+    for (uint32_t index = 0; index < count; index++)
+    {
+        sorted[index] = GLOBAL.Frame.samples[index];
+    }
+
+    for (uint32_t i = 1; i < count; i++)
+    {
+        double key = sorted[i];
+        int32_t j = (int32_t)i - 1;
+        while ((j >= 0) && (sorted[j] > key))
+        {
+            sorted[j + 1] = sorted[j];
+            j--;
+        }
+        sorted[j + 1] = key;
+    }
+
+    uint32_t idx0 = FrameStatsPercentileIndex(count, 0.0);
+    uint32_t idx50 = FrameStatsPercentileIndex(count, 0.5);
+    uint32_t idx99 = FrameStatsPercentileIndex(count, 0.99);
+
+    double p0 = sorted[idx0] * 1000.0;
+    double p50 = sorted[idx50] * 1000.0;
+    double p99 = sorted[idx99] * 1000.0;
+
+    LogInfo("frame ms: p0=%.3f p50=%.3f p99=%.3f (n=%u)", p0, p50, p99, count);
+
+    GLOBAL.Frame.lastReportTime = nowSeconds;
+}
+
+static void FrameStatsReset(void)
+{
+    memset(GLOBAL.Frame.samples, 0, sizeof(GLOBAL.Frame.samples));
+    GLOBAL.Frame.sampleCount = 0;
+    GLOBAL.Frame.sampleCursor = 0;
+    double now = glfwGetTime();
+    GLOBAL.Frame.lastTimestamp = now;
+    GLOBAL.Frame.lastReportTime = now;
+}
+
+static void UpdateSpawnArea(void)
+{
+    float radius = GLOBAL.Vulkan.sphereRadius;
+    if (radius <= 0.0f)
+    {
+        radius = 0.25f;
+    }
+
+    float baseCellSize = radius * 3.0f;
+    if (baseCellSize < (radius * 2.05f))
+    {
+        baseCellSize = radius * 2.05f;
+    }
+
+    uint32_t count = GLOBAL.Vulkan.sphereCount;
+    if (count == 0)
+    {
+        float extent = baseCellSize * 0.5f;
+        GLOBAL.Vulkan.worldMinX = -extent;
+        GLOBAL.Vulkan.worldMaxX = extent;
+        GLOBAL.Vulkan.worldMinZ = -extent;
+        GLOBAL.Vulkan.worldMaxZ = extent;
+        return;
+    }
+
+    float cellsXf = ceilf(sqrtf((float)count));
+    uint32_t cellsX = (uint32_t)cellsXf;
+    if (cellsX == 0)
+    {
+        cellsX = 1;
+    }
+    uint32_t cellsZ = (count + cellsX - 1u) / cellsX;
+    if (cellsZ == 0)
+    {
+        cellsZ = 1;
+    }
+
+    float width = (float)cellsX * baseCellSize;
+    float depth = (float)cellsZ * baseCellSize;
+
+    GLOBAL.Vulkan.worldMinX = -0.5f * width;
+    GLOBAL.Vulkan.worldMaxX = 0.5f * width;
+    GLOBAL.Vulkan.worldMinZ = -0.5f * depth;
+    GLOBAL.Vulkan.worldMaxZ = 0.5f * depth;
+}
+
+static void UpdateCameraControls(void)
+{
+    if (!GLOBAL.Window.ready)
+    {
+        return;
+    }
+
+    GLFWwindow *window = GLOBAL.Window.window;
+    if (window == NULL)
+    {
+        return;
+    }
+
+    static double lastTime = 0.0;
+    static double lastX = 0.0;
+    static double lastY = 0.0;
+    static bool firstMouse = true;
+
+    double now = glfwGetTime();
+    if (lastTime == 0.0)
+    {
+        lastTime = now;
+        glfwGetCursorPos(window, &lastX, &lastY);
+        firstMouse = false;
+        return;
+    }
+
+    float dt = (float)(now - lastTime);
+    lastTime = now;
+    if (dt < 0.0f)
+    {
+        dt = 0.0f;
+    }
+    if (dt > 0.25f)
+    {
+        dt = 0.25f;
+    }
+
+    double mx = 0.0;
+    double my = 0.0;
+    glfwGetCursorPos(window, &mx, &my);
+    if (firstMouse)
+    {
+        lastX = mx;
+        lastY = my;
+        firstMouse = false;
+    }
+
+    float dx = (float)(mx - lastX);
+    float dy = (float)(my - lastY);
+    lastX = mx;
+    lastY = my;
+
+    const float sens = 0.0025f;
+    GLOBAL.Vulkan.cam.yaw += dx * sens;
+    GLOBAL.Vulkan.cam.pitch += -dy * sens;
+
+    const float limit = 1.55f;
+    if (GLOBAL.Vulkan.cam.pitch > limit)
+    {
+        GLOBAL.Vulkan.cam.pitch = limit;
+    }
+    if (GLOBAL.Vulkan.cam.pitch < -limit)
+    {
+        GLOBAL.Vulkan.cam.pitch = -limit;
+    }
+
+    float cy = cosf(GLOBAL.Vulkan.cam.yaw);
+    float sy = sinf(GLOBAL.Vulkan.cam.yaw);
+    float cp = cosf(GLOBAL.Vulkan.cam.pitch);
+    float sp = sinf(GLOBAL.Vulkan.cam.pitch);
+
+    GLOBAL.Vulkan.cam.fwd = normalize3((float3){ cp * cy, sp, cp * sy });
+    float3 worldUp = { 0.0f, 1.0f, 0.0f };
+    GLOBAL.Vulkan.cam.right = normalize3(cross3(GLOBAL.Vulkan.cam.fwd, worldUp));
+    if ((GLOBAL.Vulkan.cam.right.x == 0.0f) && (GLOBAL.Vulkan.cam.right.y == 0.0f) && (GLOBAL.Vulkan.cam.right.z == 0.0f))
+    {
+        GLOBAL.Vulkan.cam.right = (float3){ 1.0f, 0.0f, 0.0f };
+    }
+    GLOBAL.Vulkan.cam.up = normalize3(cross3(GLOBAL.Vulkan.cam.right, GLOBAL.Vulkan.cam.fwd));
+
+    float speed = 4.0f;
+    if (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS)
+    {
+        speed *= 3.0f;
+    }
+
+    if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
+    {
+        GLOBAL.Vulkan.cam.pos = add3(GLOBAL.Vulkan.cam.pos, mul3f(GLOBAL.Vulkan.cam.fwd, speed * dt));
+    }
+    if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS)
+    {
+        GLOBAL.Vulkan.cam.pos = add3(GLOBAL.Vulkan.cam.pos, mul3f(GLOBAL.Vulkan.cam.fwd, -speed * dt));
+    }
+    if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)
+    {
+        GLOBAL.Vulkan.cam.pos = add3(GLOBAL.Vulkan.cam.pos, mul3f(GLOBAL.Vulkan.cam.right, speed * dt));
+    }
+    if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS)
+    {
+        GLOBAL.Vulkan.cam.pos = add3(GLOBAL.Vulkan.cam.pos, mul3f(GLOBAL.Vulkan.cam.right, -speed * dt));
+    }
+    if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS)
+    {
+        GLOBAL.Vulkan.cam.pos.y += speed * dt;
+    }
+    if (glfwGetKey(window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS)
+    {
+        GLOBAL.Vulkan.cam.pos.y -= speed * dt;
+    }
+
+    if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
+    {
+        glfwSetWindowShouldClose(window, GLFW_TRUE);
+    }
 }
 
 // Provide Vulkan helper utilities
@@ -486,7 +857,9 @@ static void VulkanResetState(void)
     GLOBAL.Vulkan.swapchainImageFormat = VK_FORMAT_UNDEFINED;
     GLOBAL.Vulkan.swapchainExtent.width = 0;
     GLOBAL.Vulkan.swapchainExtent.height = 0;
-    GLOBAL.Vulkan.computeShaderModule = VK_NULL_HANDLE;
+    GLOBAL.Vulkan.spheresInitSM = VK_NULL_HANDLE;
+    GLOBAL.Vulkan.primaryIntersectSM = VK_NULL_HANDLE;
+    GLOBAL.Vulkan.shadeShadowSM = VK_NULL_HANDLE;
     GLOBAL.Vulkan.blitVertexShaderModule = VK_NULL_HANDLE;
     GLOBAL.Vulkan.blitFragmentShaderModule = VK_NULL_HANDLE;
     GLOBAL.Vulkan.descriptorSetLayout = VK_NULL_HANDLE;
@@ -494,7 +867,9 @@ static void VulkanResetState(void)
     GLOBAL.Vulkan.descriptorSet = VK_NULL_HANDLE;
     GLOBAL.Vulkan.computePipelineLayout = VK_NULL_HANDLE;
     GLOBAL.Vulkan.blitPipelineLayout = VK_NULL_HANDLE;
-    GLOBAL.Vulkan.computePipeline = VK_NULL_HANDLE;
+    GLOBAL.Vulkan.spheresInitPipe = VK_NULL_HANDLE;
+    GLOBAL.Vulkan.primaryIntersectPipe = VK_NULL_HANDLE;
+    GLOBAL.Vulkan.shadeShadowPipe = VK_NULL_HANDLE;
     GLOBAL.Vulkan.blitPipeline = VK_NULL_HANDLE;
     GLOBAL.Vulkan.vma = NULL;
     GLOBAL.Vulkan.commandPool = VK_NULL_HANDLE;
@@ -506,8 +881,10 @@ static void VulkanResetState(void)
     GLOBAL.Vulkan.imageAvailableSemaphore = VK_NULL_HANDLE;
     memset(GLOBAL.Vulkan.renderFinishedSemaphores, 0, sizeof(GLOBAL.Vulkan.renderFinishedSemaphores));
     GLOBAL.Vulkan.frameFence = VK_NULL_HANDLE;
-
+    GLOBAL.Vulkan.rt = (VulkanBuffers){ 0 };
     GLOBAL.Vulkan.gradientInitialized = false;
+    GLOBAL.Vulkan.sceneInitialized = false;
+    GLOBAL.Vulkan.frameIndex = 0;
 
     GLOBAL.Vulkan.ready = false;
     GLOBAL.Vulkan.debugEnabled = false;
@@ -831,10 +1208,26 @@ static VkCompositeAlphaFlagBitsKHR VulkanChooseCompositeAlpha(VkCompositeAlphaFl
     return VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
 }
 
-typedef struct VulkanComputePushConstants {
+typedef struct PCPush {
     uint32_t width;
     uint32_t height;
-} VulkanComputePushConstants;
+    uint32_t frame;
+    uint32_t sphereCount;
+    float camPos[3];
+    float fovY;
+    float camFwd[3];
+    float _pad0;
+    float camRight[3];
+    float _pad1;
+    float camUp[3];
+    float _pad2;
+    float worldMin[2];
+    float worldMax[2];
+    float sphereRadius;
+    float groundY;
+    uint32_t rngSeed;
+    uint32_t flags;
+} PCPush;
 
 static void VulkanCreateCommandPool(void)
 {
@@ -976,7 +1369,9 @@ static void VulkanCreateSwapchainSemaphores(void)
 
 static void VulkanCreateShaderModules(void)
 {
-    if ((GLOBAL.Vulkan.computeShaderModule != VK_NULL_HANDLE) &&
+    if ((GLOBAL.Vulkan.spheresInitSM != VK_NULL_HANDLE) &&
+        (GLOBAL.Vulkan.primaryIntersectSM != VK_NULL_HANDLE) &&
+        (GLOBAL.Vulkan.shadeShadowSM != VK_NULL_HANDLE) &&
         (GLOBAL.Vulkan.blitVertexShaderModule != VK_NULL_HANDLE) &&
         (GLOBAL.Vulkan.blitFragmentShaderModule != VK_NULL_HANDLE))
     {
@@ -985,7 +1380,9 @@ static void VulkanCreateShaderModules(void)
 
     Assert(GLOBAL.Vulkan.device != VK_NULL_HANDLE, "Vulkan logical device is not ready");
 
-    GLOBAL.Vulkan.computeShaderModule = VulkanLoadShaderModule("compute.spv");
+    GLOBAL.Vulkan.spheresInitSM = VulkanLoadShaderModule("spheres_init.spv");
+    GLOBAL.Vulkan.primaryIntersectSM = VulkanLoadShaderModule("primary_intersect.spv");
+    GLOBAL.Vulkan.shadeShadowSM = VulkanLoadShaderModule("shade_shadow.spv");
     GLOBAL.Vulkan.blitVertexShaderModule = VulkanLoadShaderModule("blit.vert.spv");
     GLOBAL.Vulkan.blitFragmentShaderModule = VulkanLoadShaderModule("blit.frag.spv");
 
@@ -994,10 +1391,22 @@ static void VulkanCreateShaderModules(void)
 
 static void VulkanDestroyShaderModules(void)
 {
-    if (GLOBAL.Vulkan.computeShaderModule != VK_NULL_HANDLE)
+    if (GLOBAL.Vulkan.spheresInitSM != VK_NULL_HANDLE)
     {
-        vkDestroyShaderModule(GLOBAL.Vulkan.device, GLOBAL.Vulkan.computeShaderModule, NULL);
-        GLOBAL.Vulkan.computeShaderModule = VK_NULL_HANDLE;
+        vkDestroyShaderModule(GLOBAL.Vulkan.device, GLOBAL.Vulkan.spheresInitSM, NULL);
+        GLOBAL.Vulkan.spheresInitSM = VK_NULL_HANDLE;
+    }
+
+    if (GLOBAL.Vulkan.primaryIntersectSM != VK_NULL_HANDLE)
+    {
+        vkDestroyShaderModule(GLOBAL.Vulkan.device, GLOBAL.Vulkan.primaryIntersectSM, NULL);
+        GLOBAL.Vulkan.primaryIntersectSM = VK_NULL_HANDLE;
+    }
+
+    if (GLOBAL.Vulkan.shadeShadowSM != VK_NULL_HANDLE)
+    {
+        vkDestroyShaderModule(GLOBAL.Vulkan.device, GLOBAL.Vulkan.shadeShadowSM, NULL);
+        GLOBAL.Vulkan.shadeShadowSM = VK_NULL_HANDLE;
     }
 
     if (GLOBAL.Vulkan.blitVertexShaderModule != VK_NULL_HANDLE)
@@ -1022,7 +1431,7 @@ static void VulkanCreateDescriptorSetLayout(void)
 
     Assert(GLOBAL.Vulkan.device != VK_NULL_HANDLE, "Vulkan logical device is not ready");
 
-    VkDescriptorSetLayoutBinding bindings[2] = {
+    VkDescriptorSetLayoutBinding bindings[6] = {
         {
             .binding = 0,
             .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
@@ -1034,6 +1443,30 @@ static void VulkanCreateDescriptorSetLayout(void)
             .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
             .descriptorCount = 1,
             .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+        },
+        {
+            .binding = 2,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+        },
+        {
+            .binding = 3,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+        },
+        {
+            .binding = 4,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+        },
+        {
+            .binding = 5,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
         },
     };
 
@@ -1067,13 +1500,29 @@ static void VulkanCreateDescriptorPool(void)
 
     Assert(GLOBAL.Vulkan.device != VK_NULL_HANDLE, "Vulkan logical device is not ready");
 
-    VkDescriptorPoolSize poolSizes[2] = {
+    VkDescriptorPoolSize poolSizes[6] = {
         {
             .type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
             .descriptorCount = 1,
         },
         {
             .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .descriptorCount = 1,
+        },
+        {
+            .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorCount = 1,
+        },
+        {
+            .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorCount = 1,
+        },
+        {
+            .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorCount = 1,
+        },
+        {
+            .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
             .descriptorCount = 1,
         },
     };
@@ -1130,6 +1579,10 @@ static void VulkanUpdateDescriptorSet(void)
     Assert(GLOBAL.Vulkan.descriptorSet != VK_NULL_HANDLE, "Vulkan descriptor set is not allocated");
     Assert(GLOBAL.Vulkan.gradientImageView != VK_NULL_HANDLE, "Vulkan gradient image view is not ready");
     Assert(GLOBAL.Vulkan.gradientSampler != VK_NULL_HANDLE, "Vulkan gradient sampler is not ready");
+    Assert(GLOBAL.Vulkan.rt.sphereCR != VK_NULL_HANDLE, "Sphere center-radius buffer is not ready");
+    Assert(GLOBAL.Vulkan.rt.sphereAlb != VK_NULL_HANDLE, "Sphere albedo buffer is not ready");
+    Assert(GLOBAL.Vulkan.rt.hitT != VK_NULL_HANDLE, "Hit distance buffer is not ready");
+    Assert(GLOBAL.Vulkan.rt.hitN != VK_NULL_HANDLE, "Hit normal buffer is not ready");
 
     VkDescriptorImageInfo storageInfo = {
         .imageView = GLOBAL.Vulkan.gradientImageView,
@@ -1142,7 +1595,31 @@ static void VulkanUpdateDescriptorSet(void)
         .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
     };
 
-    VkWriteDescriptorSet writes[2] = {
+    VkDescriptorBufferInfo b2 = {
+        .buffer = GLOBAL.Vulkan.rt.sphereCR,
+        .offset = 0,
+        .range = VK_WHOLE_SIZE,
+    };
+
+    VkDescriptorBufferInfo b3 = {
+        .buffer = GLOBAL.Vulkan.rt.sphereAlb,
+        .offset = 0,
+        .range = VK_WHOLE_SIZE,
+    };
+
+    VkDescriptorBufferInfo b4 = {
+        .buffer = GLOBAL.Vulkan.rt.hitT,
+        .offset = 0,
+        .range = VK_WHOLE_SIZE,
+    };
+
+    VkDescriptorBufferInfo b5 = {
+        .buffer = GLOBAL.Vulkan.rt.hitN,
+        .offset = 0,
+        .range = VK_WHOLE_SIZE,
+    };
+
+    VkWriteDescriptorSet writes[6] = {
         {
             .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
             .dstSet = GLOBAL.Vulkan.descriptorSet,
@@ -1158,6 +1635,38 @@ static void VulkanUpdateDescriptorSet(void)
             .descriptorCount = 1,
             .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
             .pImageInfo = &samplerInfo,
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = GLOBAL.Vulkan.descriptorSet,
+            .dstBinding = 2,
+            .descriptorCount = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .pBufferInfo = &b2,
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = GLOBAL.Vulkan.descriptorSet,
+            .dstBinding = 3,
+            .descriptorCount = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .pBufferInfo = &b3,
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = GLOBAL.Vulkan.descriptorSet,
+            .dstBinding = 4,
+            .descriptorCount = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .pBufferInfo = &b4,
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = GLOBAL.Vulkan.descriptorSet,
+            .dstBinding = 5,
+            .descriptorCount = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .pBufferInfo = &b5,
         },
     };
 
@@ -1254,8 +1763,6 @@ static void VulkanCreateGradientResources(void)
 
     GLOBAL.Vulkan.gradientInitialized = false;
 
-    VulkanUpdateDescriptorSet();
-
     LogInfo("Vulkan gradient image ready");
 }
 
@@ -1286,16 +1793,65 @@ static void VulkanDestroyGradientResources(void)
     GLOBAL.Vulkan.gradientInitialized = false;
 }
 
+static void CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkBuffer *buf, VmaAllocation *alloc)
+{
+    Assert(buf != NULL, "Buffer handle pointer is null");
+    Assert(alloc != NULL, "Buffer allocation pointer is null");
+    Assert(GLOBAL.Vulkan.vma != NULL, "VMA allocator is not ready");
+
+    VkBufferCreateInfo bi = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size = size,
+        .usage = usage,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+    };
+
+    VmaAllocationCreateInfo ai = {
+        .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
+    };
+
+    VkResult result = vmaCreateBuffer(GLOBAL.Vulkan.vma, &bi, &ai, buf, alloc, NULL);
+    Assert(result == VK_SUCCESS, "Failed to create buffer");
+}
+
+static void DestroyBuffer(VkBuffer *buf, VmaAllocation *alloc)
+{
+    if ((buf == NULL) || (alloc == NULL))
+    {
+        return;
+    }
+
+    if ((*buf != VK_NULL_HANDLE) && (GLOBAL.Vulkan.vma != NULL))
+    {
+        vmaDestroyBuffer(GLOBAL.Vulkan.vma, *buf, *alloc);
+    }
+
+    if (buf != NULL)
+    {
+        *buf = VK_NULL_HANDLE;
+    }
+
+    if (alloc != NULL)
+    {
+        *alloc = NULL;
+    }
+}
+
 static void VulkanCreatePipelines(void)
 {
-    const bool computeReady = (GLOBAL.Vulkan.computePipeline != VK_NULL_HANDLE);
+    const bool computeReady =
+        (GLOBAL.Vulkan.spheresInitPipe != VK_NULL_HANDLE) &&
+        (GLOBAL.Vulkan.primaryIntersectPipe != VK_NULL_HANDLE) &&
+        (GLOBAL.Vulkan.shadeShadowPipe != VK_NULL_HANDLE);
     const bool blitReady = (GLOBAL.Vulkan.blitPipeline != VK_NULL_HANDLE);
     if (computeReady && blitReady)
     {
         return;
     }
 
-    Assert(GLOBAL.Vulkan.computeShaderModule != VK_NULL_HANDLE, "Vulkan compute shader module is not ready");
+    Assert(GLOBAL.Vulkan.spheresInitSM != VK_NULL_HANDLE, "Spheres init shader module is not ready");
+    Assert(GLOBAL.Vulkan.primaryIntersectSM != VK_NULL_HANDLE, "Primary intersect shader module is not ready");
+    Assert(GLOBAL.Vulkan.shadeShadowSM != VK_NULL_HANDLE, "Shade shadow shader module is not ready");
     Assert(GLOBAL.Vulkan.blitVertexShaderModule != VK_NULL_HANDLE, "Vulkan blit vertex shader module is not ready");
     Assert(GLOBAL.Vulkan.blitFragmentShaderModule != VK_NULL_HANDLE, "Vulkan blit fragment shader module is not ready");
     Assert(GLOBAL.Vulkan.descriptorSetLayout != VK_NULL_HANDLE, "Vulkan descriptor set layout is not ready");
@@ -1303,7 +1859,7 @@ static void VulkanCreatePipelines(void)
     VkPushConstantRange pushRange = {
         .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
         .offset = 0,
-        .size = sizeof(VulkanComputePushConstants),
+        .size = sizeof(PCPush),
     };
 
     if (GLOBAL.Vulkan.computePipelineLayout == VK_NULL_HANDLE)
@@ -1332,23 +1888,61 @@ static void VulkanCreatePipelines(void)
         Assert(blitLayoutResult == VK_SUCCESS, "Failed to create Vulkan blit pipeline layout");
     }
 
-    if (!computeReady)
+    if (GLOBAL.Vulkan.spheresInitPipe == VK_NULL_HANDLE)
     {
-        VkPipelineShaderStageCreateInfo computeStage = {
+        VkPipelineShaderStageCreateInfo stage = {
             .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
             .stage = VK_SHADER_STAGE_COMPUTE_BIT,
-            .module = GLOBAL.Vulkan.computeShaderModule,
+            .module = GLOBAL.Vulkan.spheresInitSM,
             .pName = "main",
         };
 
-        VkComputePipelineCreateInfo computeInfo = {
+        VkComputePipelineCreateInfo info = {
             .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-            .stage = computeStage,
+            .stage = stage,
             .layout = GLOBAL.Vulkan.computePipelineLayout,
         };
 
-        VkResult computeResult = vkCreateComputePipelines(GLOBAL.Vulkan.device, VK_NULL_HANDLE, 1, &computeInfo, NULL, &GLOBAL.Vulkan.computePipeline);
-        Assert(computeResult == VK_SUCCESS, "Failed to create Vulkan compute pipeline");
+        VkResult result = vkCreateComputePipelines(GLOBAL.Vulkan.device, VK_NULL_HANDLE, 1, &info, NULL, &GLOBAL.Vulkan.spheresInitPipe);
+        Assert(result == VK_SUCCESS, "Failed to create spheres init pipeline");
+    }
+
+    if (GLOBAL.Vulkan.primaryIntersectPipe == VK_NULL_HANDLE)
+    {
+        VkPipelineShaderStageCreateInfo stage = {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+            .module = GLOBAL.Vulkan.primaryIntersectSM,
+            .pName = "main",
+        };
+
+        VkComputePipelineCreateInfo info = {
+            .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+            .stage = stage,
+            .layout = GLOBAL.Vulkan.computePipelineLayout,
+        };
+
+        VkResult result = vkCreateComputePipelines(GLOBAL.Vulkan.device, VK_NULL_HANDLE, 1, &info, NULL, &GLOBAL.Vulkan.primaryIntersectPipe);
+        Assert(result == VK_SUCCESS, "Failed to create primary intersect pipeline");
+    }
+
+    if (GLOBAL.Vulkan.shadeShadowPipe == VK_NULL_HANDLE)
+    {
+        VkPipelineShaderStageCreateInfo stage = {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+            .module = GLOBAL.Vulkan.shadeShadowSM,
+            .pName = "main",
+        };
+
+        VkComputePipelineCreateInfo info = {
+            .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+            .stage = stage,
+            .layout = GLOBAL.Vulkan.computePipelineLayout,
+        };
+
+        VkResult result = vkCreateComputePipelines(GLOBAL.Vulkan.device, VK_NULL_HANDLE, 1, &info, NULL, &GLOBAL.Vulkan.shadeShadowPipe);
+        Assert(result == VK_SUCCESS, "Failed to create shade shadow pipeline");
     }
 
     VkPipelineShaderStageCreateInfo shaderStages[2] = {
@@ -1466,16 +2060,28 @@ static void VulkanCreatePipelines(void)
 
 static void VulkanDestroyPipelines(void)
 {
+    if (GLOBAL.Vulkan.shadeShadowPipe != VK_NULL_HANDLE)
+    {
+        vkDestroyPipeline(GLOBAL.Vulkan.device, GLOBAL.Vulkan.shadeShadowPipe, NULL);
+        GLOBAL.Vulkan.shadeShadowPipe = VK_NULL_HANDLE;
+    }
+
+    if (GLOBAL.Vulkan.primaryIntersectPipe != VK_NULL_HANDLE)
+    {
+        vkDestroyPipeline(GLOBAL.Vulkan.device, GLOBAL.Vulkan.primaryIntersectPipe, NULL);
+        GLOBAL.Vulkan.primaryIntersectPipe = VK_NULL_HANDLE;
+    }
+
+    if (GLOBAL.Vulkan.spheresInitPipe != VK_NULL_HANDLE)
+    {
+        vkDestroyPipeline(GLOBAL.Vulkan.device, GLOBAL.Vulkan.spheresInitPipe, NULL);
+        GLOBAL.Vulkan.spheresInitPipe = VK_NULL_HANDLE;
+    }
+
     if (GLOBAL.Vulkan.blitPipeline != VK_NULL_HANDLE)
     {
         vkDestroyPipeline(GLOBAL.Vulkan.device, GLOBAL.Vulkan.blitPipeline, NULL);
         GLOBAL.Vulkan.blitPipeline = VK_NULL_HANDLE;
-    }
-
-    if (GLOBAL.Vulkan.computePipeline != VK_NULL_HANDLE)
-    {
-        vkDestroyPipeline(GLOBAL.Vulkan.device, GLOBAL.Vulkan.computePipeline, NULL);
-        GLOBAL.Vulkan.computePipeline = VK_NULL_HANDLE;
     }
 
     if (GLOBAL.Vulkan.blitPipelineLayout != VK_NULL_HANDLE)
@@ -1495,14 +2101,53 @@ static void VulkanDestroySwapchainResources(void)
 {
     VulkanDestroyPipelines();
     VulkanDestroyGradientResources();
+    DestroyBuffer(&GLOBAL.Vulkan.rt.hitT, &GLOBAL.Vulkan.rt.hitTAlloc);
+    DestroyBuffer(&GLOBAL.Vulkan.rt.hitN, &GLOBAL.Vulkan.rt.hitNAlloc);
+    DestroyBuffer(&GLOBAL.Vulkan.rt.sphereCR, &GLOBAL.Vulkan.rt.sphereCRAlloc);
+    DestroyBuffer(&GLOBAL.Vulkan.rt.sphereAlb, &GLOBAL.Vulkan.rt.sphereAlbAlloc);
+    GLOBAL.Vulkan.sceneInitialized = false;
 }
 
 static void VulkanCreateSwapchainResources(void)
 {
     Assert(GLOBAL.Vulkan.swapchain != VK_NULL_HANDLE, "Vulkan swapchain is not ready");
 
+    VkExtent2D extent = GLOBAL.Vulkan.swapchainExtent;
+    Assert(extent.width > 0 && extent.height > 0, "Vulkan swapchain extent is invalid");
+    Assert(GLOBAL.Vulkan.vma != NULL, "VMA allocator is not ready");
+    Assert(GLOBAL.Vulkan.descriptorSet != VK_NULL_HANDLE, "Vulkan descriptor set is not allocated");
+
+    VkDeviceSize pixels = (VkDeviceSize)extent.width * (VkDeviceSize)extent.height;
+    VkDeviceSize hitTSize = sizeof(float) * pixels;
+    VkDeviceSize hitNSize = sizeof(float) * 4 * pixels;
+    VkDeviceSize sphereSize = sizeof(float) * 4 * (VkDeviceSize)RT_MAX_SPHERES;
+
+    if (GLOBAL.Vulkan.rt.hitT == VK_NULL_HANDLE)
+    {
+        CreateBuffer(hitTSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, &GLOBAL.Vulkan.rt.hitT, &GLOBAL.Vulkan.rt.hitTAlloc);
+    }
+
+    if (GLOBAL.Vulkan.rt.hitN == VK_NULL_HANDLE)
+    {
+        CreateBuffer(hitNSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, &GLOBAL.Vulkan.rt.hitN, &GLOBAL.Vulkan.rt.hitNAlloc);
+    }
+
+    if (GLOBAL.Vulkan.rt.sphereCR == VK_NULL_HANDLE)
+    {
+        CreateBuffer(sphereSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, &GLOBAL.Vulkan.rt.sphereCR, &GLOBAL.Vulkan.rt.sphereCRAlloc);
+    }
+
+    if (GLOBAL.Vulkan.rt.sphereAlb == VK_NULL_HANDLE)
+    {
+        CreateBuffer(sphereSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, &GLOBAL.Vulkan.rt.sphereAlb, &GLOBAL.Vulkan.rt.sphereAlbAlloc);
+    }
+
     VulkanCreateGradientResources();
+    VulkanUpdateDescriptorSet();
     VulkanCreatePipelines();
+
+    GLOBAL.Vulkan.sceneInitialized = false;
+    GLOBAL.Vulkan.frameIndex = 0;
 }
 
 static void VulkanCreateDeviceResources(void)
@@ -1549,7 +2194,9 @@ static void VulkanDestroyDeviceResources(void)
 static void VulkanRecordFrameCommands(uint32_t imageIndex, VkExtent2D extent)
 {
     Assert(GLOBAL.Vulkan.commandBuffer != VK_NULL_HANDLE, "Vulkan command buffer is not available");
-    Assert(GLOBAL.Vulkan.computePipeline != VK_NULL_HANDLE, "Vulkan compute pipeline is not ready");
+    Assert(GLOBAL.Vulkan.spheresInitPipe != VK_NULL_HANDLE, "Spheres init pipeline is not ready");
+    Assert(GLOBAL.Vulkan.primaryIntersectPipe != VK_NULL_HANDLE, "Primary intersect pipeline is not ready");
+    Assert(GLOBAL.Vulkan.shadeShadowPipe != VK_NULL_HANDLE, "Shade shadow pipeline is not ready");
     Assert(GLOBAL.Vulkan.blitPipeline != VK_NULL_HANDLE, "Vulkan blit pipeline is not ready");
     Assert(GLOBAL.Vulkan.descriptorSet != VK_NULL_HANDLE, "Vulkan descriptor set is not ready");
     Assert(GLOBAL.Vulkan.gradientImage != VK_NULL_HANDLE, "Vulkan gradient image is not ready");
@@ -1558,6 +2205,10 @@ static void VulkanRecordFrameCommands(uint32_t imageIndex, VkExtent2D extent)
     Assert(GLOBAL.Vulkan.blitPipelineLayout != VK_NULL_HANDLE, "Vulkan blit pipeline layout is not ready");
     Assert(GLOBAL.Vulkan.swapchainImageViews[imageIndex] != VK_NULL_HANDLE, "Vulkan swapchain image view is not ready");
     Assert(imageIndex < GLOBAL.Vulkan.swapchainImageCount, "Vulkan swapchain image index out of range");
+    Assert(GLOBAL.Vulkan.rt.sphereCR != VK_NULL_HANDLE, "Sphere center-radius buffer is not ready");
+    Assert(GLOBAL.Vulkan.rt.sphereAlb != VK_NULL_HANDLE, "Sphere albedo buffer is not ready");
+    Assert(GLOBAL.Vulkan.rt.hitT != VK_NULL_HANDLE, "Hit distance buffer is not ready");
+    Assert(GLOBAL.Vulkan.rt.hitN != VK_NULL_HANDLE, "Hit normal buffer is not ready");
 
     VkResult resetResult = vkResetCommandBuffer(GLOBAL.Vulkan.commandBuffer, 0);
     Assert(resetResult == VK_SUCCESS, "Failed to reset Vulkan command buffer");
@@ -1598,7 +2249,91 @@ static void VulkanRecordFrameCommands(uint32_t imageIndex, VkExtent2D extent)
 
     vkCmdPipelineBarrier2(GLOBAL.Vulkan.commandBuffer, &toGeneralDependency);
 
-    vkCmdBindPipeline(GLOBAL.Vulkan.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, GLOBAL.Vulkan.computePipeline);
+    Assert(GLOBAL.Vulkan.sphereCount <= RT_MAX_SPHERES, "Sphere count exceeds capacity");
+
+    UpdateSpawnArea();
+
+    PCPush pc = {
+        .width = extent.width,
+        .height = extent.height,
+        .frame = GLOBAL.Vulkan.frameIndex++,
+        .sphereCount = GLOBAL.Vulkan.sphereCount,
+        .camPos = { GLOBAL.Vulkan.cam.pos.x, GLOBAL.Vulkan.cam.pos.y, GLOBAL.Vulkan.cam.pos.z },
+        .fovY = GLOBAL.Vulkan.cam.fovY,
+        .camFwd = { GLOBAL.Vulkan.cam.fwd.x, GLOBAL.Vulkan.cam.fwd.y, GLOBAL.Vulkan.cam.fwd.z },
+        .camRight = { GLOBAL.Vulkan.cam.right.x, GLOBAL.Vulkan.cam.right.y, GLOBAL.Vulkan.cam.right.z },
+        .camUp = { GLOBAL.Vulkan.cam.up.x, GLOBAL.Vulkan.cam.up.y, GLOBAL.Vulkan.cam.up.z },
+        .worldMin = { GLOBAL.Vulkan.worldMinX, GLOBAL.Vulkan.worldMinZ },
+        .worldMax = { GLOBAL.Vulkan.worldMaxX, GLOBAL.Vulkan.worldMaxZ },
+        .sphereRadius = GLOBAL.Vulkan.sphereRadius,
+        .groundY = GLOBAL.Vulkan.groundY,
+        .rngSeed = 1337u,
+        .flags = 0u,
+    };
+
+    const uint32_t groupCountX = (pc.width + VULKAN_COMPUTE_LOCAL_SIZE - 1u) / VULKAN_COMPUTE_LOCAL_SIZE;
+    const uint32_t groupCountY = (pc.height + VULKAN_COMPUTE_LOCAL_SIZE - 1u) / VULKAN_COMPUTE_LOCAL_SIZE;
+
+    if (!GLOBAL.Vulkan.sceneInitialized)
+    {
+        vkCmdBindPipeline(GLOBAL.Vulkan.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, GLOBAL.Vulkan.spheresInitPipe);
+        vkCmdBindDescriptorSets(
+            GLOBAL.Vulkan.commandBuffer,
+            VK_PIPELINE_BIND_POINT_COMPUTE,
+            GLOBAL.Vulkan.computePipelineLayout,
+            0,
+            1,
+            &GLOBAL.Vulkan.descriptorSet,
+            0,
+            NULL);
+        vkCmdPushConstants(
+            GLOBAL.Vulkan.commandBuffer,
+            GLOBAL.Vulkan.computePipelineLayout,
+            VK_SHADER_STAGE_COMPUTE_BIT,
+            0,
+            sizeof(pc),
+            &pc);
+
+        if (pc.sphereCount > 0u)
+        {
+            const uint32_t sphereGroups = (pc.sphereCount + 64u - 1u) / 64u;
+            vkCmdDispatch(GLOBAL.Vulkan.commandBuffer, sphereGroups, 1, 1);
+        }
+
+        VkBufferMemoryBarrier2 sphereBarriers[2] = {
+            {
+                .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+                .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                .srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                .dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT,
+                .buffer = GLOBAL.Vulkan.rt.sphereCR,
+                .offset = 0,
+                .size = VK_WHOLE_SIZE,
+            },
+            {
+                .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+                .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                .srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                .dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT,
+                .buffer = GLOBAL.Vulkan.rt.sphereAlb,
+                .offset = 0,
+                .size = VK_WHOLE_SIZE,
+            },
+        };
+
+        VkDependencyInfo sphereDependency = {
+            .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+            .bufferMemoryBarrierCount = ARRAY_SIZE(sphereBarriers),
+            .pBufferMemoryBarriers = sphereBarriers,
+        };
+
+        vkCmdPipelineBarrier2(GLOBAL.Vulkan.commandBuffer, &sphereDependency);
+        GLOBAL.Vulkan.sceneInitialized = true;
+    }
+
+    vkCmdBindPipeline(GLOBAL.Vulkan.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, GLOBAL.Vulkan.primaryIntersectPipe);
     vkCmdBindDescriptorSets(
         GLOBAL.Vulkan.commandBuffer,
         VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -1608,23 +2343,63 @@ static void VulkanRecordFrameCommands(uint32_t imageIndex, VkExtent2D extent)
         &GLOBAL.Vulkan.descriptorSet,
         0,
         NULL);
-
-    VulkanComputePushConstants pushConstants = {
-        .width = extent.width,
-        .height = extent.height,
-    };
-
     vkCmdPushConstants(
         GLOBAL.Vulkan.commandBuffer,
         GLOBAL.Vulkan.computePipelineLayout,
         VK_SHADER_STAGE_COMPUTE_BIT,
         0,
-        sizeof(pushConstants),
-        &pushConstants);
+        sizeof(pc),
+        &pc);
+    vkCmdDispatch(GLOBAL.Vulkan.commandBuffer, groupCountX, groupCountY, 1);
 
-    const uint32_t groupCountX = (extent.width + VULKAN_COMPUTE_LOCAL_SIZE - 1) / VULKAN_COMPUTE_LOCAL_SIZE;
-    const uint32_t groupCountY = (extent.height + VULKAN_COMPUTE_LOCAL_SIZE - 1) / VULKAN_COMPUTE_LOCAL_SIZE;
+    VkBufferMemoryBarrier2 hitBarriers[2] = {
+        {
+            .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+            .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            .srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+            .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            .dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT,
+            .buffer = GLOBAL.Vulkan.rt.hitT,
+            .offset = 0,
+            .size = VK_WHOLE_SIZE,
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+            .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            .srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+            .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            .dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT,
+            .buffer = GLOBAL.Vulkan.rt.hitN,
+            .offset = 0,
+            .size = VK_WHOLE_SIZE,
+        },
+    };
 
+    VkDependencyInfo hitDependency = {
+        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+        .bufferMemoryBarrierCount = ARRAY_SIZE(hitBarriers),
+        .pBufferMemoryBarriers = hitBarriers,
+    };
+
+    vkCmdPipelineBarrier2(GLOBAL.Vulkan.commandBuffer, &hitDependency);
+
+    vkCmdBindPipeline(GLOBAL.Vulkan.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, GLOBAL.Vulkan.shadeShadowPipe);
+    vkCmdBindDescriptorSets(
+        GLOBAL.Vulkan.commandBuffer,
+        VK_PIPELINE_BIND_POINT_COMPUTE,
+        GLOBAL.Vulkan.computePipelineLayout,
+        0,
+        1,
+        &GLOBAL.Vulkan.descriptorSet,
+        0,
+        NULL);
+    vkCmdPushConstants(
+        GLOBAL.Vulkan.commandBuffer,
+        GLOBAL.Vulkan.computePipelineLayout,
+        VK_SHADER_STAGE_COMPUTE_BIT,
+        0,
+        sizeof(pc),
+        &pc);
     vkCmdDispatch(GLOBAL.Vulkan.commandBuffer, groupCountX, groupCountY, 1);
 
     VkImageMemoryBarrier2 toRead = {
@@ -2096,7 +2871,16 @@ int main(void)
     while (!WindowShouldClose())
     {
         glfwPollEvents();
+        UpdateCameraControls();
         VulkanDrawFrame();
+
+        double now = glfwGetTime();
+        if (GLOBAL.Frame.lastTimestamp > 0.0)
+        {
+            double delta = now - GLOBAL.Frame.lastTimestamp;
+            FrameStatsAddSample(delta, now);
+        }
+        GLOBAL.Frame.lastTimestamp = now;
     }
 
     CloseVulkan();
