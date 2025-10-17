@@ -41,7 +41,7 @@ static const char *const vulkanValidationLayers[] = {
 #define VULKAN_MAX_SHADER_SIZE (1024 * 1024)
 #define VULKAN_COMPUTE_LOCAL_SIZE 16
 #define VULKAN_MAX_PATH_LENGTH 512
-#define RT_MAX_SPHERES 1024
+#define RT_MAX_SPHERES 2048
 #define FRAME_TIME_SAMPLES 240
 
 #ifndef VULKAN_SHADER_DIRECTORY
@@ -307,7 +307,7 @@ static void InitWindow(void)
     GLOBAL.Vulkan.cam.right = (float3){ 1.0f, 0.0f, 0.0f };
     GLOBAL.Vulkan.cam.up = (float3){ 0.0f, 1.0f, 0.0f };
     GLOBAL.Vulkan.frameIndex = 0;
-    GLOBAL.Vulkan.sphereCount = 1024;
+    GLOBAL.Vulkan.sphereCount = 512;
     GLOBAL.Vulkan.sphereRadius = 0.25f;
     GLOBAL.Vulkan.groundY = 0.0f;
     GLOBAL.Vulkan.worldMinX = -8.0f;
