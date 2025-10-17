@@ -449,7 +449,7 @@ void RtRecordFrame(uint32_t imageIndex, VkExtent2D extent)
         vkCmdDispatch(GLOBAL.Vulkan.commandBuffer, gridCountGroups, 1, 1);
     }
 
-    VkBufferMemoryBarrier2 scatterBarriers[4] = {
+    VkBufferMemoryBarrier2 scatterBarriers[5] = {
         {
             .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
             .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
@@ -487,6 +487,16 @@ void RtRecordFrame(uint32_t imageIndex, VkExtent2D extent)
             .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
             .dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT,
             .buffer = GLOBAL.Vulkan.rt.gridLevel1Meta,
+            .offset = 0,
+            .size = VK_WHOLE_SIZE,
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+            .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            .srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+            .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            .dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT,
+            .buffer = GLOBAL.Vulkan.rt.gridLevel0Counter,
             .offset = 0,
             .size = VK_WHOLE_SIZE,
         },

@@ -493,6 +493,21 @@ bool traverseGrid(vec3 ro, vec3 rd, float maxDistance, inout float bestT, inout 
         }
         else if (cellType == CELL_SUBGRID)
         {
+            uint fallbackCount = gridL0Counter[coarseIndex];
+            if (fallbackCount > 0u)
+            {
+                uvec4 fallbackMeta = uvec4(meta.x, fallbackCount, 0u, CELL_LEAF);
+                if (intersectCoarseLeaf(fallbackMeta, ro, rd, bestT, bestN, bestId, anyHit))
+                {
+                    hit = true;
+                    if (anyHit && (bestT < maxDistance))
+                    {
+                        return true;
+                    }
+                    limit = min(tEnd, anyHit ? tEnd : bestT);
+                }
+            }
+
             float tCellExit = min(min(next.x, next.y), limit);
             if (traverseFine(cell, meta.z, ro, rd, currentT, tCellExit, bestT, bestN, bestId, anyHit))
             {
@@ -636,7 +651,8 @@ void main()
     {
         uint fineBase = gridFineBase(cellIndex);
         uint fineCells = gridFineCountPerCoarse();
-        gridL0Meta[cellIndex] = uvec4(0u, count, fineBase, CELL_SUBGRID);
+        uint fallbackStart = atomicAdd(gridStateBuf[0], count);
+        gridL0Meta[cellIndex] = uvec4(fallbackStart, count, fineBase, CELL_SUBGRID);
 
         for (uint s = 0u; s < fineCells; ++s)
         {
