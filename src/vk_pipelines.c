@@ -50,7 +50,7 @@ static VkShaderModule VulkanLoadShaderModule(const char *filename)
     char path[VULKAN_MAX_PATH_LENGTH];
     VulkanBuildShaderPath(filename, path, ARRAY_SIZE(path));
 
-    uint8_t shaderData[VULKAN_MAX_SHADER_SIZE];
+    static uint8_t shaderData[VULKAN_MAX_SHADER_SIZE];
     uint32_t shaderSize = VulkanReadBinaryFile(path, shaderData, sizeof(shaderData));
     Assert(shaderSize > 0, "Shader file is empty");
     Assert((shaderSize % 4) == 0, "Shader file size is not aligned to 4 bytes");

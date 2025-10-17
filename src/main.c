@@ -165,7 +165,7 @@ static void InitWindow(void)
     GLOBAL.Vulkan.cam.right = (float3){ 1.0f, 0.0f, 0.0f };
     GLOBAL.Vulkan.cam.up = (float3){ 0.0f, 1.0f, 0.0f };
     GLOBAL.Vulkan.frameIndex = 0;
-    GLOBAL.Vulkan.sphereCount = 10000;
+    GLOBAL.Vulkan.sphereCount = 1000000u;
     GLOBAL.Vulkan.sphereRadius = 0.25f;
     GLOBAL.Vulkan.groundY = 0.0f;
     GLOBAL.Vulkan.worldMinX = 0.0f;
