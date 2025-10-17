@@ -652,17 +652,21 @@ void main()
         uint fineBase = gridFineBase(cellIndex);
         uint fineCells = gridFineCountPerCoarse();
         uint fallbackStart = atomicAdd(gridStateBuf[0], count);
+        // Reserve a contiguous slice for all fine cells at once to avoid per-cell atomics.
+        uint fineStartBase = atomicAdd(gridStateBuf[1], count);
         gridL0Meta[cellIndex] = uvec4(fallbackStart, count, fineBase, CELL_SUBGRID);
 
+        uint fineRunning = 0u;
         for (uint s = 0u; s < fineCells; ++s)
         {
             uint fineIndex = fineBase + s;
             uint subCount = gridL1Meta[fineIndex].y;
             if (subCount > 0u)
             {
-                uint start = atomicAdd(gridStateBuf[1], subCount);
+                uint start = fineStartBase + fineRunning;
                 gridL1Meta[fineIndex].x = start;
                 gridL1Meta[fineIndex].w = CELL_LEAF;
+                fineRunning += subCount;
             }
             else
             {
