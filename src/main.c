@@ -277,7 +277,27 @@ static void FrameStatsAddSample(double deltaSeconds, double nowSeconds)
     double p50 = sorted[idx50] * 1000.0;
     double p99 = sorted[idx99] * 1000.0;
 
-    LogInfo("frame ms: p0=%.3f p50=%.3f p99=%.3f (n=%u)", p0, p50, p99, count);
+    GLFWwindow *window = GLOBAL.Window.window;
+    if (window != NULL)
+    {
+        const char *baseTitle = (GLOBAL.Window.title != NULL) ? GLOBAL.Window.title : defaultApplicationTitle;
+
+        char title[128];
+        int written = snprintf(
+            title,
+            sizeof(title),
+            "%s | frame ms p0=%.3f p50=%.3f p99=%.3f (n=%u)",
+            baseTitle,
+            p0,
+            p50,
+            p99,
+            count);
+
+        if (written > 0)
+        {
+            glfwSetWindowTitle(window, title);
+        }
+    }
 
     GLOBAL.Frame.lastReportTime = nowSeconds;
 }
@@ -290,6 +310,12 @@ static void FrameStatsReset(void)
     double now = glfwGetTime();
     GLOBAL.Frame.lastTimestamp = now;
     GLOBAL.Frame.lastReportTime = now;
+
+    if (GLOBAL.Window.window != NULL)
+    {
+        const char *title = (GLOBAL.Window.title != NULL) ? GLOBAL.Window.title : defaultApplicationTitle;
+        glfwSetWindowTitle(GLOBAL.Window.window, title);
+    }
 }
 
 // Handle input and camera controls
