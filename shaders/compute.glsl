@@ -1,4 +1,5 @@
 #version 450
+#extension GL_ARB_gpu_shader_int64 : enable
 
 #include "bindings.inc.glsl"
 
@@ -45,6 +46,77 @@ layout(push_constant) uniform PC {
 
 const float kHuge = 1e30;
 const float kSurfaceBias = 1e-3;
+const float kOneOverUint = 1.0 / 4294967296.0;
+
+const uint64_t kPcgMultiplier = 6364136223846793005ul;
+
+struct Pcg32State {
+    uint64_t state;
+    uint64_t inc;
+};
+
+uint pcg32Advance(inout Pcg32State rng)
+{
+    uint64_t oldState = rng.state;
+    rng.state = oldState * kPcgMultiplier + rng.inc;
+    uint xorshifted = uint(((oldState >> 18u) ^ oldState) >> 27u);
+    uint rot = uint(oldState >> 59u);
+    return (xorshifted >> rot) | (xorshifted << ((uint(0u) - rot) & 31u));
+}
+
+void pcg32Seed(out Pcg32State rng, uint64_t initState, uint64_t initSeq)
+{
+    rng.state = 0ul;
+    rng.inc = (initSeq << 1u) | 1ul;
+    pcg32Advance(rng);
+    rng.state += initState;
+    pcg32Advance(rng);
+}
+
+float pcg32Float(inout Pcg32State rng)
+{
+    return float(pcg32Advance(rng)) * kOneOverUint;
+}
+
+vec2 pcg32Vec2(inout Pcg32State rng)
+{
+    return vec2(pcg32Float(rng), pcg32Float(rng));
+}
+
+Pcg32State CreatePixelRng(uint pix)
+{
+    Pcg32State rng;
+    uint64_t pixel = uint64_t(pix);
+    uint64_t frameMix = (uint64_t(pc.accumulationEpoch) << 32u) ^ uint64_t(pc.frame);
+    uint64_t initState = frameMix ^ (pixel * 0x9E3779B97F4A7C15ul + 0xD2B74407B1CE6E93ul);
+    uint64_t initSeq = pixel ^ (frameMix >> 1u);
+    pcg32Seed(rng, initState, initSeq);
+    pcg32Advance(rng);
+    pcg32Advance(rng);
+    return rng;
+}
+
+Pcg32State CreateFrameRng(void)
+{
+    Pcg32State rng;
+    uint64_t frameKey = (uint64_t(pc.frame) << 32u) | uint64_t(pc.accumulationEpoch);
+    uint64_t initState = frameKey ^ 0xC0EF4D7A2B83A9D1ul;
+    uint64_t initSeq = frameKey ^ 0xDA3E39CB94B95BDBul;
+    pcg32Seed(rng, initState, initSeq);
+    pcg32Advance(rng);
+    pcg32Advance(rng);
+    return rng;
+}
+
+float sample1D(inout Pcg32State rng, float offset)
+{
+    return fract(pcg32Float(rng) + offset);
+}
+
+vec2 sample2D(inout Pcg32State rng, vec2 offset)
+{
+    return fract(pcg32Vec2(rng) + offset);
+}
 
 vec3 computeRayDir(uvec2 pix)
 {
@@ -473,22 +545,6 @@ void main()
 #endif
 
 #ifdef KERNEL_SHADE_SHADOW
-uint wangHash(uint s)
-{
-    s = (s ^ 61u) ^ (s >> 16);
-    s *= 9u;
-    s ^= (s >> 4);
-    s *= 0x27d4eb2du;
-    s ^= (s >> 15);
-    return s;
-}
-
-float rnd(inout uint s)
-{
-    s = wangHash(s);
-    return float(s) * (1.0 / 4294967296.0);
-}
-
 layout(std430, binding = B_ACCUM) buffer AccumBuf { vec4 accum[]; };
 layout(std430, binding = B_SPP) buffer SppBuf { uint spp[]; };
 layout(std430, binding = B_EPOCH) buffer EpochBuf { uint epochBuf[]; };
@@ -575,15 +631,14 @@ void onb(in vec3 n, out vec3 t, out vec3 b)
     b = cross(n, t);
 }
 
-vec3 sampleCosineHemisphere(inout uint s)
+vec3 sampleCosineHemisphere(inout Pcg32State rng, vec2 offset)
 {
-    float u1 = rnd(s);
-    float u2 = rnd(s);
-    float r = sqrt(u1);
-    float phi = 6.28318530718 * u2;
+    vec2 u = sample2D(rng, offset);
+    float r = sqrt(u.x);
+    float phi = 6.28318530718 * u.y;
     float x = r * cos(phi);
     float y = r * sin(phi);
-    float z = sqrt(max(0.0, 1.0 - u1));
+    float z = sqrt(max(0.0, 1.0 - u.x));
     return vec3(x, y, z);
 }
 
@@ -601,10 +656,16 @@ void main()
     }
     uint pix = id.y * pc.size.x + id.x;
 
-    uint seed = uint(pc.frame) ^ (pix * 0x9e3779b9u) ^ 0xA511E9B3u;
+    Pcg32State frameRng = CreateFrameRng();
+    vec2 cpJitter = sample2D(frameRng, vec2(0.0));
+    vec2 cpBrdf = sample2D(frameRng, vec2(0.0));
+    float cpScalar = sample1D(frameRng, 0.0);
+
+    Pcg32State rng = CreatePixelRng(pix);
 
     vec2 res = vec2(max(pc.size.x, 1u), max(pc.size.y, 1u));
-    vec2 jitter = vec2(rnd(seed), rnd(seed)) - 0.5;
+    vec2 jitterSample = sample2D(rng, cpJitter);
+    vec2 jitter = jitterSample - 0.5;
     vec2 uv = ((vec2(id) + 0.5 + jitter) / res) * 2.0 - 1.0;
     uv.x *= pc.aspect;
     float tcam = pc.tanHalfFovY;
@@ -643,14 +704,14 @@ void main()
         vec3 T;
         vec3 B;
         onb(n, T, B);
-        vec3 wiL = sampleCosineHemisphere(seed);
+        vec3 wiL = sampleCosineHemisphere(rng, cpBrdf);
         vec3 wi = normalize(wiL.x * T + wiL.y * B + wiL.z * n);
         beta *= alb;
 
         if (depth >= RR_DEPTH)
         {
             float p = clamp(max(max(beta.r, beta.g), beta.b), 0.05, 0.99);
-            if (rnd(seed) > p)
+            if (sample1D(rng, cpScalar) > p)
             {
                 break;
             }
