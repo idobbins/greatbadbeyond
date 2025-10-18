@@ -437,7 +437,8 @@ void main()
     }
     uint pix = id.y * pc.size.x + id.x;
 
-    vec3 ro = pc.camPos;
+    vec3 viewOrigin = pc.camPos;
+    vec3 ro = viewOrigin;
     vec3 rd = computeRayDir(id);
 
     float bestT = kHuge;
@@ -609,7 +610,8 @@ void main()
     float tcam = pc.tanHalfFovY;
     vec3 rd0 = normalize(uv.x * tcam * pc.camRight + uv.y * tcam * pc.camUp + pc.camFwd);
 
-    vec3 ro = pc.camPos;
+    vec3 viewOrigin = pc.camPos;
+    vec3 ro = viewOrigin;
     vec3 rd = rd0;
     vec3 L = vec3(0.0);
     vec3 beta = vec3(1.0);
@@ -680,16 +682,36 @@ void main()
         float denom = rd0.y;
         if (abs(denom) > 1e-6)
         {
-            float tg = (pc.groundY - ro.y) / denom;
+            float tg = (pc.groundY - viewOrigin.y) / denom;
             if (tg > 0.0)
             {
-                vec3 p = ro + rd0 * tg;
-                vec2 f = fract((p.xz - pc.gridMin.xz) * pc.gridInvCell.xz);
-                float w = 0.015;
-                bool onLine = (min(f.x, 1.0 - f.x) < w) || (min(f.y, 1.0 - f.y) < w);
-                if (onLine)
+                vec3 p = viewOrigin + rd0 * tg;
+                vec2 fineCoord = (p.xz - pc.gridMin.xz) * pc.gridInvCell.xz;
+                vec2 fineFrac = fract(fineCoord);
+                float fineEdgeX = min(fineFrac.x, 1.0 - fineFrac.x);
+                float fineEdgeZ = min(fineFrac.y, 1.0 - fineFrac.y);
+                float fineMask = ((fineEdgeX < 0.01) || (fineEdgeZ < 0.01)) ? 1.0 : 0.0;
+
+                float coarseMask = 0.0;
+                if (pc.coarseDim.x > 0u && pc.coarseDim.z > 0u)
                 {
-                    mapped = mix(mapped, vec3(0.0, 1.0, 0.0), 0.85);
+                    vec2 coarseCoord = (p.xz - pc.gridMin.xz) * pc.coarseInvCell.xz;
+                    vec2 coarseFrac = fract(coarseCoord);
+                    float coarseEdgeX = min(coarseFrac.x, 1.0 - coarseFrac.x);
+                    float coarseEdgeZ = min(coarseFrac.y, 1.0 - coarseFrac.y);
+                    if ((coarseEdgeX < 0.01) || (coarseEdgeZ < 0.01))
+                    {
+                        coarseMask = 1.0;
+                    }
+                }
+
+                if (coarseMask > 0.0)
+                {
+                    mapped = mix(mapped, vec3(1.0, 0.1, 0.1), 0.8);
+                }
+                else if (fineMask > 0.0)
+                {
+                    mapped = mix(mapped, vec3(0.0, 1.0, 0.0), 0.65);
                 }
             }
         }
