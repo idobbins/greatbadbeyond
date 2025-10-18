@@ -162,8 +162,8 @@ layout(std430, binding = B_SPP) buffer SppBuf { uint spp[]; };
 
 const vec3 kLightDir = normalize(vec3(0.4, 1.0, 0.2));
 const vec3 kPlaneAlb = vec3(0.8, 0.8, 0.8);
-const int MAX_DEPTH = 6;
-const int RR_DEPTH = 3;
+const int MAX_DEPTH = 2;
+const int RR_DEPTH = 2;
 
 bool traceNearest(vec3 ro, vec3 rd, out float bestT, out vec3 bestN, out int matId)
 {
