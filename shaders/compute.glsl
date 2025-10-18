@@ -392,36 +392,35 @@ bool gridTraverseNearest(vec3 ro, vec3 rd, float tLimit, out float bestT, out ve
 }
 
 #if defined(KERNEL_PRIMARY_INTERSECT) || defined(KERNEL_SHADE_SHADOW)
-bool findClosestSphere(vec3 ro, vec3 rd, inout float bestT, inout vec3 bestN, inout float bestId)
+bool findClosestSphere(vec3 ro, vec3 rd, float tLimit,
+                       inout float bestT, inout vec3 bestN, inout float bestId)
 {
-    bool hit = false;
     if (pc.gridDim.x > 0u && pc.coarseDim.x > 0u)
     {
         float t;
         vec3 n;
         float id;
-        if (gridTraverseNearest(ro, rd, kHuge, t, n, id, false))
+        if (gridTraverseNearest(ro, rd, tLimit, t, n, id, false))
         {
             bestT = t;
             bestN = n;
             bestId = id;
-            hit = true;
+            return true;
         }
+        return false;
     }
 
-    if (!hit)
+    bool hit = false;
+    for (uint i = 0u; i < pc.sphereCount; ++i)
     {
-        for (uint i = 0u; i < pc.sphereCount; ++i)
+        float t;
+        vec3 n;
+        if (intersectSphere(ro, rd, sphereCR[i], t, n) && t > 0.0 && t < tLimit && t < bestT)
         {
-            float t;
-            vec3 n;
-            if (intersectSphere(ro, rd, sphereCR[i], t, n) && (t < bestT))
-            {
-                bestT = t;
-                bestN = n;
-                bestId = float(i + 1u);
-                hit = true;
-            }
+            bestT = t;
+            bestN = n;
+            bestId = float(i + 1u);
+            hit = true;
         }
     }
     return hit;
@@ -445,10 +444,14 @@ void main()
     vec3 bestN = vec3(0.0);
     float bestId = -1.0;
 
-    findClosestSphere(ro, rd, bestT, bestN, bestId);
+    float tPlane;
+    vec3 nPlane;
+    bool planeHit = intersectPlaneY(ro, rd, pc.groundY, tPlane, nPlane);
 
-    float tPlane; vec3 nPlane;
-    if (intersectPlaneY(ro, rd, pc.groundY, tPlane, nPlane) && (tPlane < bestT))
+    float tLimit = planeHit ? tPlane : kHuge;
+    findClosestSphere(ro, rd, tLimit, bestT, bestN, bestId);
+
+    if (planeHit && (tPlane < bestT))
     {
         bestT = tPlane;
         bestN = nPlane;
@@ -500,25 +503,27 @@ bool traceNearest(vec3 ro, vec3 rd, out float bestT, out vec3 bestN, out int mat
     bestN = vec3(0.0);
     matId = -1;
     float bestId = -1.0;
-    bool hit = findClosestSphere(ro, rd, bestT, bestN, bestId);
 
     float tPlane;
     vec3 nPlane;
-    if (intersectPlaneY(ro, rd, pc.groundY, tPlane, nPlane) && (tPlane < bestT))
+    bool planeHit = intersectPlaneY(ro, rd, pc.groundY, tPlane, nPlane);
+
+    float tLimit = planeHit ? tPlane : kHuge;
+    bool sphereHit = findClosestSphere(ro, rd, tLimit, bestT, bestN, bestId);
+
+    if (sphereHit)
+    {
+        matId = int(bestId);
+    }
+
+    if (planeHit && (tPlane < bestT))
     {
         bestT = tPlane;
         bestN = nPlane;
-        bestId = 0.0;
-        hit = true;
+        matId = 0;
     }
 
-    if (!hit)
-    {
-        return false;
-    }
-
-    matId = int(bestId);
-    return true;
+    return sphereHit || planeHit;
 }
 
 bool occludedWorld(vec3 ro, vec3 rd, float maxT)
