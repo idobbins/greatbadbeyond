@@ -14,6 +14,7 @@ typedef struct ComputeDS {
     VkBuffer epoch;
     VkBuffer gridRanges;
     VkBuffer gridIndices;
+    VkBuffer gridCoarseCounts;
 } ComputeDS;
 
 void VulkanCreateDescriptorInfra(void);

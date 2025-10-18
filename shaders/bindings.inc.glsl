@@ -10,3 +10,4 @@
 // Uniform grid (flattened)
 #define B_GRID_RANGES 9
 #define B_GRID_INDICES 10
+#define B_GRID_COARSE_COUNTS 11

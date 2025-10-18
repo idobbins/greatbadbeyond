@@ -51,10 +51,18 @@ static void BuildUniformGrid(VkCommandBuffer cmd, uint32_t sphereCount)
         GLOBAL.Vulkan.gridInvCellX = 1.0f;
         GLOBAL.Vulkan.gridInvCellY = 1.0f;
         GLOBAL.Vulkan.gridInvCellZ = 1.0f;
+        GLOBAL.Vulkan.coarseDimX = 1u;
+        GLOBAL.Vulkan.coarseDimY = 1u;
+        GLOBAL.Vulkan.coarseDimZ = 1u;
+        GLOBAL.Vulkan.coarseInvCellX = 1.0f;
+        GLOBAL.Vulkan.coarseInvCellY = 1.0f;
+        GLOBAL.Vulkan.coarseInvCellZ = 1.0f;
+        GLOBAL.Vulkan.coarseFactor = 1u;
         return;
     }
 
-    const float cell = fmaxf(GLOBAL.Vulkan.sphereMaxRadius * 2.0f, 0.05f);
+    const float cell = fmaxf(GLOBAL.Vulkan.sphereMaxRadius * 2.5f, 0.05f);
+    const uint32_t coarseFactor = 4u;
     const float3 minW = { GLOBAL.Vulkan.worldMinX, GLOBAL.Vulkan.groundY, GLOBAL.Vulkan.worldMinZ };
 
     const float spanX = GLOBAL.Vulkan.worldMaxX - GLOBAL.Vulkan.worldMinX;
@@ -64,6 +72,11 @@ static void BuildUniformGrid(VkCommandBuffer cmd, uint32_t sphereCount)
     const uint32_t dimY = 1u;
     const uint32_t dimZ = (uint32_t)fmaxf(1.0f, ceilf(spanZ / cell));
     const uint32_t cellCount = dimX * dimY * dimZ;
+
+    const uint32_t coarseDimX = (dimX + coarseFactor - 1u) / coarseFactor;
+    const uint32_t coarseDimY = (dimY + coarseFactor - 1u) / coarseFactor;
+    const uint32_t coarseDimZ = (dimZ + coarseFactor - 1u) / coarseFactor;
+    const uint32_t coarseCount = coarseDimX * coarseDimY * coarseDimZ;
 
     const float invCell = 1.0f / cell;
     GLOBAL.Vulkan.gridDimX = dimX;
@@ -75,9 +88,20 @@ static void BuildUniformGrid(VkCommandBuffer cmd, uint32_t sphereCount)
     GLOBAL.Vulkan.gridInvCellX = invCell;
     GLOBAL.Vulkan.gridInvCellY = invCell;
     GLOBAL.Vulkan.gridInvCellZ = invCell;
+    const float coarseCell = cell * (float)coarseFactor;
+    const float invCoarseCell = 1.0f / coarseCell;
+    GLOBAL.Vulkan.coarseDimX = coarseDimX;
+    GLOBAL.Vulkan.coarseDimY = coarseDimY;
+    GLOBAL.Vulkan.coarseDimZ = coarseDimZ;
+    GLOBAL.Vulkan.coarseInvCellX = invCoarseCell;
+    GLOBAL.Vulkan.coarseInvCellY = (dimY > 0u) ? invCoarseCell : 0.0f;
+    GLOBAL.Vulkan.coarseInvCellZ = invCoarseCell;
+    GLOBAL.Vulkan.coarseFactor = coarseFactor;
 
     uint32_t *counts = (uint32_t *)calloc(cellCount, sizeof(uint32_t));
     Assert(counts != NULL, "Failed to allocate grid cell counts");
+    uint32_t *coarseCounts = (uint32_t *)calloc(coarseCount, sizeof(uint32_t));
+    Assert(coarseCounts != NULL, "Failed to allocate coarse grid counts");
 
     for (uint32_t i = 0; i < sphereCount; ++i)
     {
@@ -138,6 +162,27 @@ static void BuildUniformGrid(VkCommandBuffer cmd, uint32_t sphereCount)
 
     memcpy(cursor, starts, sizeof(uint32_t) * cellCount);
 
+    for (uint32_t z = 0u; z < dimZ; ++z)
+    {
+        for (uint32_t y = 0u; y < dimY; ++y)
+        {
+            for (uint32_t x = 0u; x < dimX; ++x)
+            {
+                const uint32_t cellIndex = (z * dimY + y) * dimX + x;
+                const uint32_t cellCountValue = counts[cellIndex];
+                if (cellCountValue == 0u)
+                {
+                    continue;
+                }
+                const uint32_t coarseX = x / coarseFactor;
+                const uint32_t coarseY = y / coarseFactor;
+                const uint32_t coarseZ = z / coarseFactor;
+                const uint32_t coarseIndex = (coarseZ * coarseDimY + coarseY) * coarseDimX + coarseX;
+                coarseCounts[coarseIndex] += cellCountValue;
+            }
+        }
+    }
+
     for (uint32_t i = 0; i < sphereCount; ++i)
     {
         const float cx = GLOBAL.Vulkan.sphereCRHost[i * 4u + 0u];
@@ -180,6 +225,7 @@ static void BuildUniformGrid(VkCommandBuffer cmd, uint32_t sphereCount)
 
     const VkDeviceSize rangesBytes = sizeof(uint32_t) * 2u * cellCount;
     const VkDeviceSize indicesBytes = sizeof(uint32_t) * (VkDeviceSize)indicesCapacity;
+    const VkDeviceSize coarseBytes = sizeof(uint32_t) * coarseCount;
 
     uint32_t *ranges = (uint32_t *)malloc((size_t)rangesBytes);
     Assert(ranges != NULL, "Failed to allocate grid ranges");
@@ -192,6 +238,7 @@ static void BuildUniformGrid(VkCommandBuffer cmd, uint32_t sphereCount)
 
     CreateOrResizeBuffer(rangesBytes, &GLOBAL.Vulkan.rt.gridRanges, &GLOBAL.Vulkan.rt.gridRangesAlloc);
     CreateOrResizeBuffer(indicesBytes, &GLOBAL.Vulkan.rt.gridIndices, &GLOBAL.Vulkan.rt.gridIndicesAlloc);
+    CreateOrResizeBuffer(coarseBytes, &GLOBAL.Vulkan.rt.gridCoarseCounts, &GLOBAL.Vulkan.rt.gridCoarseCountsAlloc);
 
     ComputeDS ds = {
         .targetView = GLOBAL.Vulkan.gradientImageView,
@@ -205,6 +252,7 @@ static void BuildUniformGrid(VkCommandBuffer cmd, uint32_t sphereCount)
         .epoch = GLOBAL.Vulkan.rt.epoch,
         .gridRanges = GLOBAL.Vulkan.rt.gridRanges,
         .gridIndices = GLOBAL.Vulkan.rt.gridIndices,
+        .gridCoarseCounts = GLOBAL.Vulkan.rt.gridCoarseCounts,
     };
 
     UpdateComputeDescriptorSet(&ds);
@@ -218,8 +266,12 @@ static void BuildUniformGrid(VkCommandBuffer cmd, uint32_t sphereCount)
     {
         vkCmdUpdateBuffer(cmd, GLOBAL.Vulkan.rt.gridIndices, 0, indicesBytes, indices);
     }
+    if (coarseBytes > 0)
+    {
+        vkCmdUpdateBuffer(cmd, GLOBAL.Vulkan.rt.gridCoarseCounts, 0, coarseBytes, coarseCounts);
+    }
 
-    VkBufferMemoryBarrier2 barriers[2] = {
+    VkBufferMemoryBarrier2 barriers[3] = {
         {
             .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
             .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
@@ -240,6 +292,16 @@ static void BuildUniformGrid(VkCommandBuffer cmd, uint32_t sphereCount)
             .offset = 0,
             .size = VK_WHOLE_SIZE,
         },
+        {
+            .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+            .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+            .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            .dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT,
+            .buffer = GLOBAL.Vulkan.rt.gridCoarseCounts,
+            .offset = 0,
+            .size = VK_WHOLE_SIZE,
+        },
     };
 
     VkDependencyInfo dep = {
@@ -251,6 +313,7 @@ static void BuildUniformGrid(VkCommandBuffer cmd, uint32_t sphereCount)
     vkCmdPipelineBarrier2(cmd, &dep);
 
     free(counts);
+    free(coarseCounts);
     free(starts);
     free(cursor);
     free(indices);
@@ -454,6 +517,7 @@ void RtRecordFrame(VkCommandBuffer commandBuffer, uint32_t imageIndex, VkExtent2
     Assert(GLOBAL.Vulkan.rt.epoch != VK_NULL_HANDLE, "Accumulation epoch buffer is not ready");
     Assert(GLOBAL.Vulkan.rt.gridRanges != VK_NULL_HANDLE, "Grid range buffer is not ready");
     Assert(GLOBAL.Vulkan.rt.gridIndices != VK_NULL_HANDLE, "Grid index buffer is not ready");
+    Assert(GLOBAL.Vulkan.rt.gridCoarseCounts != VK_NULL_HANDLE, "Grid coarse count buffer is not ready");
 
     VkResult resetResult = vkResetCommandBuffer(commandBuffer, 0);
     Assert(resetResult == VK_SUCCESS, "Failed to reset Vulkan command buffer");
@@ -602,6 +666,10 @@ void RtRecordFrame(VkCommandBuffer commandBuffer, uint32_t imageIndex, VkExtent2
         ._pad6 = 0.0f,
         .gridInvCell = { GLOBAL.Vulkan.gridInvCellX, GLOBAL.Vulkan.gridInvCellY, GLOBAL.Vulkan.gridInvCellZ },
         ._pad7 = 0.0f,
+        .coarseDim = { GLOBAL.Vulkan.coarseDimX, GLOBAL.Vulkan.coarseDimY, GLOBAL.Vulkan.coarseDimZ },
+        .coarseFactor = GLOBAL.Vulkan.coarseFactor,
+        .coarseInvCell = { GLOBAL.Vulkan.coarseInvCellX, GLOBAL.Vulkan.coarseInvCellY, GLOBAL.Vulkan.coarseInvCellZ },
+        ._pad8 = 0.0f,
     };
 
     const uint32_t localSizeX = (GLOBAL.Vulkan.computeLocalSizeX > 0u) ? GLOBAL.Vulkan.computeLocalSizeX : VULKAN_COMPUTE_LOCAL_SIZE;

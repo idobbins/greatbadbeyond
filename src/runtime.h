@@ -59,6 +59,8 @@ typedef struct VulkanBuffers {
     VmaAllocation gridRangesAlloc;
     VkBuffer gridIndices;  // uint sphere indices
     VmaAllocation gridIndicesAlloc;
+    VkBuffer gridCoarseCounts; // uint total sphere refs per coarse cell
+    VmaAllocation gridCoarseCountsAlloc;
 } VulkanBuffers;
 
 typedef struct Float3 {
@@ -156,6 +158,13 @@ typedef struct GlobalData {
         float gridInvCellY;
         float gridInvCellZ;
         bool showGrid;
+        uint32_t coarseDimX;
+        uint32_t coarseDimY;
+        uint32_t coarseDimZ;
+        float coarseInvCellX;
+        float coarseInvCellY;
+        float coarseInvCellZ;
+        uint32_t coarseFactor;
 
         uint32_t vendorId;
         uint32_t subgroupSize;

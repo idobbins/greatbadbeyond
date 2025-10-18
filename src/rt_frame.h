@@ -30,6 +30,10 @@ typedef struct PCPush {
     float _pad6;
     float gridInvCell[3];
     float _pad7;
+    uint32_t coarseDim[3];
+    uint32_t coarseFactor;
+    float coarseInvCell[3];
+    float _pad8;
 } PCPush;
 
 void RtUpdateSpawnArea(void);

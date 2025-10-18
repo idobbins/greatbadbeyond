@@ -243,6 +243,15 @@ void RtCreateSwapchainResources(void)
             &GLOBAL.Vulkan.rt.gridIndicesAlloc);
     }
 
+    if (GLOBAL.Vulkan.rt.gridCoarseCounts == VK_NULL_HANDLE)
+    {
+        CreateBuffer(
+            sizeof(uint32_t) * 1,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            &GLOBAL.Vulkan.rt.gridCoarseCounts,
+            &GLOBAL.Vulkan.rt.gridCoarseCountsAlloc);
+    }
+
     CreateGradientResources();
 
     ComputeDS resources = {
@@ -257,6 +266,7 @@ void RtCreateSwapchainResources(void)
         .epoch = GLOBAL.Vulkan.rt.epoch,
         .gridRanges = GLOBAL.Vulkan.rt.gridRanges,
         .gridIndices = GLOBAL.Vulkan.rt.gridIndices,
+        .gridCoarseCounts = GLOBAL.Vulkan.rt.gridCoarseCounts,
     };
 
     UpdateComputeDescriptorSet(&resources);
@@ -278,6 +288,7 @@ void RtDestroySwapchainResources(void)
     DestroyBuffer(&GLOBAL.Vulkan.rt.epoch, &GLOBAL.Vulkan.rt.epochAlloc);
     DestroyBuffer(&GLOBAL.Vulkan.rt.gridRanges, &GLOBAL.Vulkan.rt.gridRangesAlloc);
     DestroyBuffer(&GLOBAL.Vulkan.rt.gridIndices, &GLOBAL.Vulkan.rt.gridIndicesAlloc);
+    DestroyBuffer(&GLOBAL.Vulkan.rt.gridCoarseCounts, &GLOBAL.Vulkan.rt.gridCoarseCountsAlloc);
     GLOBAL.Vulkan.gridDimX = 0u;
     GLOBAL.Vulkan.gridDimY = 0u;
     GLOBAL.Vulkan.gridDimZ = 0u;
@@ -287,6 +298,13 @@ void RtDestroySwapchainResources(void)
     GLOBAL.Vulkan.gridInvCellX = 0.0f;
     GLOBAL.Vulkan.gridInvCellY = 0.0f;
     GLOBAL.Vulkan.gridInvCellZ = 0.0f;
+    GLOBAL.Vulkan.coarseDimX = 0u;
+    GLOBAL.Vulkan.coarseDimY = 0u;
+    GLOBAL.Vulkan.coarseDimZ = 0u;
+    GLOBAL.Vulkan.coarseInvCellX = 0.0f;
+    GLOBAL.Vulkan.coarseInvCellY = 0.0f;
+    GLOBAL.Vulkan.coarseInvCellZ = 0.0f;
+    GLOBAL.Vulkan.coarseFactor = 1u;
     GLOBAL.Vulkan.sceneInitialized = false;
     GLOBAL.Vulkan.accumulationEpoch = 0u;
 }

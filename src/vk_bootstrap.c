@@ -246,6 +246,13 @@ static void VulkanResetState(void)
     GLOBAL.Vulkan.gridInvCellY = 0.0f;
     GLOBAL.Vulkan.gridInvCellZ = 0.0f;
     GLOBAL.Vulkan.showGrid = false;
+    GLOBAL.Vulkan.coarseDimX = 0u;
+    GLOBAL.Vulkan.coarseDimY = 0u;
+    GLOBAL.Vulkan.coarseDimZ = 0u;
+    GLOBAL.Vulkan.coarseInvCellX = 0.0f;
+    GLOBAL.Vulkan.coarseInvCellY = 0.0f;
+    GLOBAL.Vulkan.coarseInvCellZ = 0.0f;
+    GLOBAL.Vulkan.coarseFactor = 1u;
     GLOBAL.Vulkan.vendorId = 0;
     GLOBAL.Vulkan.subgroupSize = 0;
     GLOBAL.Vulkan.computeLocalSizeX = VULKAN_COMPUTE_LOCAL_SIZE;

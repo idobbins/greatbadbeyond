@@ -15,6 +15,7 @@ layout(std430, binding = B_HIT_N)      buffer HitNBuf   { vec4  hitN[];     };
 
 layout(std430, binding = B_GRID_RANGES)  buffer GridRanges  { uvec2 gridRanges[];  };
 layout(std430, binding = B_GRID_INDICES) buffer GridIndices { uint  gridIndices[]; };
+layout(std430, binding = B_GRID_COARSE_COUNTS) buffer GridCoarseCounts { uint gridCoarseCounts[]; };
 
 layout(push_constant) uniform PC {
     uvec2 size;
@@ -38,6 +39,8 @@ layout(push_constant) uniform PC {
     uvec3 gridDim; uint showGrid;
     vec3  gridMin; float _pad6;
     vec3  gridInvCell; float _pad7;
+    uvec3 coarseDim; uint coarseFactor;
+    vec3  coarseInvCell; float _pad8;
 } pc;
 
 const float kHuge = 1e30;
@@ -116,20 +119,160 @@ uint cellIndex(uvec3 c)
     return (c.z * pc.gridDim.y + c.y) * pc.gridDim.x + c.x;
 }
 
+uint coarseCellIndex(uvec3 c)
+{
+    return (c.z * pc.coarseDim.y + c.y) * pc.coarseDim.x + c.x;
+}
+
+bool traverseFineCells(vec3 ro, vec3 rd, float tStart, float tEnd, uvec3 coarseCell,
+                       inout float bestT, inout vec3 bestN, inout float bestId, bool anyHit)
+{
+    vec3 cellSize = vec3(1.0) / pc.gridInvCell;
+    float t = max(tStart, 0.0);
+    vec3 p = ro + rd * t;
+    ivec3 cell = ivec3(floor((p - pc.gridMin) * pc.gridInvCell));
+
+    int fxMin = int(coarseCell.x) * int(pc.coarseFactor);
+    int fyMin = int(coarseCell.y) * int(pc.coarseFactor);
+    int fzMin = int(coarseCell.z) * int(pc.coarseFactor);
+
+    int fxMax = min(fxMin + int(pc.coarseFactor) - 1, int(pc.gridDim.x) - 1);
+    int fyMax = min(fyMin + int(pc.coarseFactor) - 1, int(pc.gridDim.y) - 1);
+    int fzMax = min(fzMin + int(pc.coarseFactor) - 1, int(pc.gridDim.z) - 1);
+
+    cell = clamp(cell, ivec3(fxMin, fyMin, fzMin), ivec3(fxMax, fyMax, fzMax));
+
+    ivec3 step = ivec3(sign(rd));
+    step = ivec3(step.x != 0 ? step.x : 1, step.y != 0 ? step.y : 1, step.z != 0 ? step.z : 1);
+    vec3 stepPositive = vec3(step.x > 0 ? 1.0 : 0.0, step.y > 0 ? 1.0 : 0.0, step.z > 0 ? 1.0 : 0.0);
+
+    vec3 nextBoundary = pc.gridMin + (vec3(cell) + stepPositive) * cellSize;
+    vec3 tMax = vec3(
+        (rd.x == 0.0) ? kHuge : (nextBoundary.x - ro.x) / rd.x,
+        (rd.y == 0.0) ? kHuge : (nextBoundary.y - ro.y) / rd.y,
+        (rd.z == 0.0) ? kHuge : (nextBoundary.z - ro.z) / rd.z);
+
+    vec3 tDelta = vec3(
+        (rd.x == 0.0) ? kHuge : cellSize.x / abs(rd.x),
+        (rd.y == 0.0) ? kHuge : cellSize.y / abs(rd.y),
+        (rd.z == 0.0) ? kHuge : cellSize.z / abs(rd.z));
+
+    while (t <= tEnd)
+    {
+        uint idx = cellIndex(uvec3(cell));
+        uvec2 range = gridRanges[idx];
+        for (uint k = 0u; k < range.y; ++k)
+        {
+            uint si = gridIndices[range.x + k];
+            float ts;
+            vec3 ns;
+            if (intersectSphere(ro, rd, sphereCR[si], ts, ns) && ts > 0.0 && ts < bestT)
+            {
+                bestT = ts;
+                bestN = ns;
+                bestId = float(si + 1u);
+                if (anyHit && ts < tEnd)
+                {
+                    return true;
+                }
+            }
+        }
+
+        float nextT = min(tMax.x, min(tMax.y, tMax.z));
+        if (bestT < nextT)
+        {
+            return true;
+        }
+
+        if (tMax.x <= tMax.y && tMax.x <= tMax.z)
+        {
+            t = tMax.x;
+            tMax.x += tDelta.x;
+            if (step.x > 0)
+            {
+                cell.x++;
+                if (cell.x > fxMax)
+                {
+                    break;
+                }
+            }
+            else
+            {
+                if (cell.x <= fxMin)
+                {
+                    break;
+                }
+                cell.x -= 1;
+            }
+        }
+        else if (tMax.y <= tMax.z)
+        {
+            t = tMax.y;
+            tMax.y += tDelta.y;
+            if (step.y > 0)
+            {
+                cell.y++;
+                if (cell.y > fyMax)
+                {
+                    break;
+                }
+            }
+            else
+            {
+                if (cell.y <= fyMin)
+                {
+                    break;
+                }
+                cell.y -= 1;
+            }
+        }
+        else
+        {
+            t = tMax.z;
+            tMax.z += tDelta.z;
+            if (step.z > 0)
+            {
+                cell.z++;
+                if (cell.z > fzMax)
+                {
+                    break;
+                }
+            }
+            else
+            {
+                if (cell.z <= fzMin)
+                {
+                    break;
+                }
+                cell.z -= 1;
+            }
+        }
+
+        if (t > tEnd)
+        {
+            break;
+        }
+    }
+
+    return (bestT < kHuge);
+}
+
 bool gridTraverseNearest(vec3 ro, vec3 rd, float tLimit, out float bestT, out vec3 bestN, out float bestId, bool anyHit)
 {
     bestT = kHuge;
     bestN = vec3(0.0);
     bestId = -1.0;
 
-    if (pc.gridDim.x == 0u || pc.gridDim.y == 0u || pc.gridDim.z == 0u)
+    if (pc.gridDim.x == 0u || pc.gridDim.y == 0u || pc.gridDim.z == 0u ||
+        pc.coarseDim.x == 0u || pc.coarseDim.y == 0u || pc.coarseDim.z == 0u ||
+        pc.coarseFactor == 0u)
     {
         return false;
     }
 
-    vec3 cellSize = vec3(1.0) / pc.gridInvCell;
+    vec3 cellSize = vec3(1.0) / pc.coarseInvCell;
     vec3 gmin = pc.gridMin;
-    vec3 gmax = pc.gridMin + vec3(pc.gridDim) * cellSize;
+    vec3 gmax = pc.gridMin + vec3(pc.coarseDim) * cellSize;
 
     float t0;
     float t1;
@@ -141,15 +284,13 @@ bool gridTraverseNearest(vec3 ro, vec3 rd, float tLimit, out float bestT, out ve
     t1 = min(t1, tLimit);
     float t = max(t0, 0.0);
     vec3 p = ro + rd * t;
-    ivec3 startCell = ivec3(floor((p - gmin) * pc.gridInvCell));
-    uvec3 cell = clampCell(startCell);
+    ivec3 startCell = ivec3(floor((p - gmin) * pc.coarseInvCell));
+    startCell = clamp(startCell, ivec3(0), ivec3(pc.coarseDim) - ivec3(1));
+    uvec3 cell = uvec3(startCell);
 
     ivec3 step = ivec3(sign(rd));
     step = ivec3(step.x != 0 ? step.x : 1, step.y != 0 ? step.y : 1, step.z != 0 ? step.z : 1);
-    vec3 stepPositive = vec3(
-        (step.x > 0) ? 1.0 : 0.0,
-        (step.y > 0) ? 1.0 : 0.0,
-        (step.z > 0) ? 1.0 : 0.0);
+    vec3 stepPositive = vec3(step.x > 0 ? 1.0 : 0.0, step.y > 0 ? 1.0 : 0.0, step.z > 0 ? 1.0 : 0.0);
 
     vec3 nextBoundary = gmin + (vec3(cell) + stepPositive) * cellSize;
     vec3 tMax = vec3(
@@ -164,41 +305,32 @@ bool gridTraverseNearest(vec3 ro, vec3 rd, float tLimit, out float bestT, out ve
 
     while (t <= t1)
     {
-        uint idx = cellIndex(cell);
-        uvec2 range = gridRanges[idx];
-        for (uint k = 0u; k < range.y; ++k)
+        uint idx = coarseCellIndex(cell);
+        if (gridCoarseCounts[idx] > 0u)
         {
-            uint si = gridIndices[range.x + k];
-            float ts;
-            vec3 ns;
-            if (intersectSphere(ro, rd, sphereCR[si], ts, ns) && ts > 0.0 && ts < bestT)
+            float cellExit = min(tMax.x, min(tMax.y, tMax.z));
+            float segmentEnd = min(cellExit, t1);
+            if (traverseFineCells(ro, rd, t, segmentEnd, cell, bestT, bestN, bestId, anyHit))
             {
-                bestT = ts;
-                bestN = ns;
-                bestId = float(si + 1u);
-                if (anyHit && ts < t1)
+                if (anyHit && bestT < segmentEnd)
                 {
                     return true;
                 }
             }
+            if (bestT < segmentEnd)
+            {
+                return (bestT < kHuge);
+            }
         }
 
-        float tnx = tMax.x;
-        float tny = tMax.y;
-        float tnz = tMax.z;
-        if (bestT < min(tnx, min(tny, tnz)))
+        if (tMax.x <= tMax.y && tMax.x <= tMax.z)
         {
-            break;
-        }
-
-        if (tnx <= tny && tnx <= tnz)
-        {
-            t = tnx;
+            t = tMax.x;
             tMax.x += tDelta.x;
             if (step.x > 0)
             {
                 cell.x++;
-                if (cell.x >= pc.gridDim.x)
+                if (cell.x >= pc.coarseDim.x)
                 {
                     break;
                 }
@@ -212,14 +344,14 @@ bool gridTraverseNearest(vec3 ro, vec3 rd, float tLimit, out float bestT, out ve
                 cell.x -= 1u;
             }
         }
-        else if (tny <= tnz)
+        else if (tMax.y <= tMax.z)
         {
-            t = tny;
+            t = tMax.y;
             tMax.y += tDelta.y;
             if (step.y > 0)
             {
                 cell.y++;
-                if (cell.y >= pc.gridDim.y)
+                if (cell.y >= pc.coarseDim.y)
                 {
                     break;
                 }
@@ -235,12 +367,12 @@ bool gridTraverseNearest(vec3 ro, vec3 rd, float tLimit, out float bestT, out ve
         }
         else
         {
-            t = tnz;
+            t = tMax.z;
             tMax.z += tDelta.z;
             if (step.z > 0)
             {
                 cell.z++;
-                if (cell.z >= pc.gridDim.z)
+                if (cell.z >= pc.coarseDim.z)
                 {
                     break;
                 }
@@ -263,7 +395,7 @@ bool gridTraverseNearest(vec3 ro, vec3 rd, float tLimit, out float bestT, out ve
 bool findClosestSphere(vec3 ro, vec3 rd, inout float bestT, inout vec3 bestN, inout float bestId)
 {
     bool hit = false;
-    if (pc.gridDim.x > 0u)
+    if (pc.gridDim.x > 0u && pc.coarseDim.x > 0u)
     {
         float t;
         vec3 n;
@@ -398,7 +530,7 @@ bool occludedWorld(vec3 ro, vec3 rd, float maxT)
         return true;
     }
 
-    if (pc.gridDim.x > 0u)
+    if (pc.gridDim.x > 0u && pc.coarseDim.x > 0u)
     {
         float t;
         vec3 n;
