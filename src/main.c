@@ -328,6 +328,10 @@ static void UpdateCameraControls(void)
         return;
     }
 
+    float3 oldPos = GLOBAL.Vulkan.cam.pos;
+    float oldYaw = GLOBAL.Vulkan.cam.yaw;
+    float oldPitch = GLOBAL.Vulkan.cam.pitch;
+
     static double lastTime = 0.0;
     double now = glfwGetTime();
     double delta = now - lastTime;
@@ -418,6 +422,22 @@ static void UpdateCameraControls(void)
     if (glfwGetKey(window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS)
     {
         GLOBAL.Vulkan.cam.pos.y -= speed * dt;
+    }
+
+    const float posThresholdSq = 1e-8f;
+    const float angleThreshold = 1e-5f;
+    float3 posDelta = {
+        GLOBAL.Vulkan.cam.pos.x - oldPos.x,
+        GLOBAL.Vulkan.cam.pos.y - oldPos.y,
+        GLOBAL.Vulkan.cam.pos.z - oldPos.z,
+    };
+    float distSq = posDelta.x * posDelta.x + posDelta.y * posDelta.y + posDelta.z * posDelta.z;
+    bool moved = distSq > posThresholdSq;
+    bool rotated = (fabsf(GLOBAL.Vulkan.cam.yaw - oldYaw) > angleThreshold) ||
+        (fabsf(GLOBAL.Vulkan.cam.pitch - oldPitch) > angleThreshold);
+    if (moved || rotated)
+    {
+        GLOBAL.Vulkan.resetAccumulation = true;
     }
 
     if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)

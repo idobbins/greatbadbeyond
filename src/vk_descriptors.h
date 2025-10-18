@@ -9,6 +9,8 @@ typedef struct ComputeDS {
     VkBuffer sphereAlb;
     VkBuffer hitT;
     VkBuffer hitN;
+    VkBuffer accum;
+    VkBuffer spp;
 } ComputeDS;
 
 void VulkanCreateDescriptorInfra(void);

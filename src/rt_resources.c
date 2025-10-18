@@ -172,6 +172,8 @@ void RtCreateSwapchainResources(void)
     VkDeviceSize hitTSize = sizeof(float) * pixels;
     VkDeviceSize hitNSize = sizeof(float) * 4 * pixels;
     VkDeviceSize sphereSize = sizeof(float) * 4 * (VkDeviceSize)RT_MAX_SPHERES;
+    VkDeviceSize accumSize = sizeof(float) * 4 * pixels;
+    VkDeviceSize sppSize = sizeof(uint32_t) * pixels;
     if (GLOBAL.Vulkan.rt.hitT == VK_NULL_HANDLE)
     {
         CreateBuffer(hitTSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, &GLOBAL.Vulkan.rt.hitT, &GLOBAL.Vulkan.rt.hitTAlloc);
@@ -194,6 +196,24 @@ void RtCreateSwapchainResources(void)
         CreateBuffer(sphereSize, sphereUsage, &GLOBAL.Vulkan.rt.sphereAlb, &GLOBAL.Vulkan.rt.sphereAlbAlloc);
     }
 
+    if (GLOBAL.Vulkan.rt.accum == VK_NULL_HANDLE)
+    {
+        CreateBuffer(
+            accumSize,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            &GLOBAL.Vulkan.rt.accum,
+            &GLOBAL.Vulkan.rt.accumAlloc);
+    }
+
+    if (GLOBAL.Vulkan.rt.spp == VK_NULL_HANDLE)
+    {
+        CreateBuffer(
+            sppSize,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            &GLOBAL.Vulkan.rt.spp,
+            &GLOBAL.Vulkan.rt.sppAlloc);
+    }
+
     CreateGradientResources();
 
     ComputeDS resources = {
@@ -203,11 +223,14 @@ void RtCreateSwapchainResources(void)
         .sphereAlb = GLOBAL.Vulkan.rt.sphereAlb,
         .hitT = GLOBAL.Vulkan.rt.hitT,
         .hitN = GLOBAL.Vulkan.rt.hitN,
+        .accum = GLOBAL.Vulkan.rt.accum,
+        .spp = GLOBAL.Vulkan.rt.spp,
     };
 
     UpdateComputeDescriptorSet(&resources);
 
     GLOBAL.Vulkan.sceneInitialized = false;
+    GLOBAL.Vulkan.resetAccumulation = true;
 }
 
 void RtDestroySwapchainResources(void)
@@ -217,5 +240,7 @@ void RtDestroySwapchainResources(void)
     DestroyBuffer(&GLOBAL.Vulkan.rt.hitN, &GLOBAL.Vulkan.rt.hitNAlloc);
     DestroyBuffer(&GLOBAL.Vulkan.rt.sphereCR, &GLOBAL.Vulkan.rt.sphereCRAlloc);
     DestroyBuffer(&GLOBAL.Vulkan.rt.sphereAlb, &GLOBAL.Vulkan.rt.sphereAlbAlloc);
+    DestroyBuffer(&GLOBAL.Vulkan.rt.accum, &GLOBAL.Vulkan.rt.accumAlloc);
+    DestroyBuffer(&GLOBAL.Vulkan.rt.spp, &GLOBAL.Vulkan.rt.sppAlloc);
     GLOBAL.Vulkan.sceneInitialized = false;
 }

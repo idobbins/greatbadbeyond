@@ -196,6 +196,8 @@ void RtRecordFrame(uint32_t imageIndex, VkExtent2D extent)
     Assert(GLOBAL.Vulkan.rt.sphereAlb != VK_NULL_HANDLE, "Sphere albedo buffer is not ready");
     Assert(GLOBAL.Vulkan.rt.hitT != VK_NULL_HANDLE, "Hit distance buffer is not ready");
     Assert(GLOBAL.Vulkan.rt.hitN != VK_NULL_HANDLE, "Hit normal buffer is not ready");
+    Assert(GLOBAL.Vulkan.rt.accum != VK_NULL_HANDLE, "Accum buffer is not ready");
+    Assert(GLOBAL.Vulkan.rt.spp != VK_NULL_HANDLE, "Sample count buffer is not ready");
 
     VkResult resetResult = vkResetCommandBuffer(GLOBAL.Vulkan.commandBuffer, 0);
     Assert(resetResult == VK_SUCCESS, "Failed to reset Vulkan command buffer");
@@ -235,6 +237,48 @@ void RtRecordFrame(uint32_t imageIndex, VkExtent2D extent)
     };
 
     vkCmdPipelineBarrier2(GLOBAL.Vulkan.commandBuffer, &toGeneralDependency);
+
+    bool needAccumReset = (!GLOBAL.Vulkan.gradientInitialized) ||
+        GLOBAL.Vulkan.resetAccumulation ||
+        (!GLOBAL.Vulkan.sceneInitialized);
+    if (needAccumReset)
+    {
+        // Clear progressive accumulation buffers after creation
+        vkCmdFillBuffer(GLOBAL.Vulkan.commandBuffer, GLOBAL.Vulkan.rt.accum, 0, VK_WHOLE_SIZE, 0);
+        vkCmdFillBuffer(GLOBAL.Vulkan.commandBuffer, GLOBAL.Vulkan.rt.spp, 0, VK_WHOLE_SIZE, 0);
+
+        VkBufferMemoryBarrier2 clearBarriers[2] = {
+            {
+                .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+                .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                .dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                .buffer = GLOBAL.Vulkan.rt.accum,
+                .offset = 0,
+                .size = VK_WHOLE_SIZE,
+            },
+            {
+                .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+                .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                .dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                .buffer = GLOBAL.Vulkan.rt.spp,
+                .offset = 0,
+                .size = VK_WHOLE_SIZE,
+            },
+        };
+
+        VkDependencyInfo clearDep = {
+            .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+            .bufferMemoryBarrierCount = ARRAY_SIZE(clearBarriers),
+            .pBufferMemoryBarriers = clearBarriers,
+        };
+
+        vkCmdPipelineBarrier2(GLOBAL.Vulkan.commandBuffer, &clearDep);
+        GLOBAL.Vulkan.resetAccumulation = false;
+    }
 
     Assert(GLOBAL.Vulkan.sphereTargetCount <= RT_MAX_SPHERES, "Sphere target count exceeds capacity");
     Assert(GLOBAL.Vulkan.sphereCount <= RT_MAX_SPHERES, "Sphere count exceeds capacity");

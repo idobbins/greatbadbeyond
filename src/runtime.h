@@ -47,6 +47,10 @@ typedef struct VulkanBuffers {
     VmaAllocation hitTAlloc;
     VkBuffer hitN;
     VmaAllocation hitNAlloc;
+    VkBuffer accum;
+    VmaAllocation accumAlloc;
+    VkBuffer spp;
+    VmaAllocation sppAlloc;
 } VulkanBuffers;
 
 typedef struct Float3 {
@@ -118,6 +122,7 @@ typedef struct GlobalData {
 
         bool gradientInitialized;
         bool sceneInitialized;
+        bool resetAccumulation;
 
         uint32_t sphereTargetCount;
         uint32_t sphereCount;

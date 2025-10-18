@@ -4,3 +4,5 @@
 #define B_SPHERE_ALB 3
 #define B_HIT_T 4
 #define B_HIT_N 5
+#define B_ACCUM 6
+#define B_SPP 7

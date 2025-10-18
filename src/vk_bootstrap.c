@@ -236,6 +236,7 @@ static void VulkanResetState(void)
     GLOBAL.Vulkan.computeLocalSizeY = VULKAN_COMPUTE_LOCAL_SIZE;
     GLOBAL.Vulkan.gradientInitialized = false;
     GLOBAL.Vulkan.sceneInitialized = false;
+    GLOBAL.Vulkan.resetAccumulation = false;
     GLOBAL.Vulkan.frameIndex = 0;
     GLOBAL.Vulkan.sphereCount = 0;
     GLOBAL.Vulkan.ready = false;
