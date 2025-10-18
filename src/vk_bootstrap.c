@@ -219,14 +219,15 @@ static void VulkanResetState(void)
     GLOBAL.Vulkan.blitPipeline = VK_NULL_HANDLE;
     GLOBAL.Vulkan.vma = NULL;
     GLOBAL.Vulkan.commandPool = VK_NULL_HANDLE;
-    GLOBAL.Vulkan.commandBuffer = VK_NULL_HANDLE;
+    memset(GLOBAL.Vulkan.commandBuffers, 0, sizeof(GLOBAL.Vulkan.commandBuffers));
     GLOBAL.Vulkan.gradientImage = VK_NULL_HANDLE;
     GLOBAL.Vulkan.gradientAlloc = NULL;
     GLOBAL.Vulkan.gradientImageView = VK_NULL_HANDLE;
     GLOBAL.Vulkan.gradientSampler = VK_NULL_HANDLE;
-    GLOBAL.Vulkan.imageAvailableSemaphore = VK_NULL_HANDLE;
+    memset(GLOBAL.Vulkan.imageAvailableSemaphores, 0, sizeof(GLOBAL.Vulkan.imageAvailableSemaphores));
     memset(GLOBAL.Vulkan.renderFinishedSemaphores, 0, sizeof(GLOBAL.Vulkan.renderFinishedSemaphores));
-    GLOBAL.Vulkan.frameFence = VK_NULL_HANDLE;
+    memset(GLOBAL.Vulkan.inFlightFences, 0, sizeof(GLOBAL.Vulkan.inFlightFences));
+    memset(GLOBAL.Vulkan.imagesInFlight, 0, sizeof(GLOBAL.Vulkan.imagesInFlight));
     GLOBAL.Vulkan.rt = (VulkanBuffers){ 0 };
     memset(GLOBAL.Vulkan.sphereCRHost, 0, sizeof(GLOBAL.Vulkan.sphereCRHost));
     memset(GLOBAL.Vulkan.sphereAlbHost, 0, sizeof(GLOBAL.Vulkan.sphereAlbHost));
@@ -238,6 +239,7 @@ static void VulkanResetState(void)
     GLOBAL.Vulkan.sceneInitialized = false;
     GLOBAL.Vulkan.resetAccumulation = false;
     GLOBAL.Vulkan.frameIndex = 0;
+    GLOBAL.Vulkan.currentFrame = 0;
     GLOBAL.Vulkan.sphereCount = 0;
     GLOBAL.Vulkan.ready = false;
     GLOBAL.Vulkan.debugEnabled = false;
@@ -310,11 +312,15 @@ static void VulkanCacheDeviceCapabilities(VkPhysicalDevice device)
     switch (GLOBAL.Vulkan.vendorId)
     {
         case 0x10DEu: /* NVIDIA */
+        case 0x8086u: /* Intel */
+        case 0x106Bu: /* Apple */
+            sizeX = 8u;
+            sizeY = 16u;
+            break;
         case 0x1002u: /* AMD */
         case 0x1022u: /* AMD (older PCI IDs) */
-        case 0x106Bu: /* Apple */
             sizeX = 16u;
-            sizeY = 8u;
+            sizeY = 16u;
             break;
         default:
             break;
@@ -513,12 +519,13 @@ static void VulkanDestroyCommandPool(void)
     {
         vkDestroyCommandPool(GLOBAL.Vulkan.device, GLOBAL.Vulkan.commandPool, NULL);
         GLOBAL.Vulkan.commandPool = VK_NULL_HANDLE;
+        memset(GLOBAL.Vulkan.commandBuffers, 0, sizeof(GLOBAL.Vulkan.commandBuffers));
     }
 }
 
 static void VulkanAllocateCommandBuffer(void)
 {
-    if (GLOBAL.Vulkan.commandBuffer != VK_NULL_HANDLE)
+    if (GLOBAL.Vulkan.commandBuffers[0] != VK_NULL_HANDLE)
     {
         return;
     }
@@ -529,17 +536,28 @@ static void VulkanAllocateCommandBuffer(void)
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
         .commandPool = GLOBAL.Vulkan.commandPool,
         .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-        .commandBufferCount = 1,
+        .commandBufferCount = VULKAN_FRAMES_IN_FLIGHT,
     };
 
-    VkResult result = vkAllocateCommandBuffers(GLOBAL.Vulkan.device, &allocInfo, &GLOBAL.Vulkan.commandBuffer);
-    Assert(result == VK_SUCCESS, "Failed to allocate Vulkan command buffer");
+    VkResult result = vkAllocateCommandBuffers(GLOBAL.Vulkan.device, &allocInfo, GLOBAL.Vulkan.commandBuffers);
+    Assert(result == VK_SUCCESS, "Failed to allocate Vulkan command buffers");
 }
 
 static void VulkanCreateSyncObjects(void)
 {
-    if ((GLOBAL.Vulkan.imageAvailableSemaphore != VK_NULL_HANDLE) &&
-        (GLOBAL.Vulkan.frameFence != VK_NULL_HANDLE))
+    bool ready = true;
+    for (uint32_t index = 0; index < VULKAN_FRAMES_IN_FLIGHT; index++)
+    {
+        if ((GLOBAL.Vulkan.imageAvailableSemaphores[index] == VK_NULL_HANDLE) ||
+            (GLOBAL.Vulkan.renderFinishedSemaphores[index] == VK_NULL_HANDLE) ||
+            (GLOBAL.Vulkan.inFlightFences[index] == VK_NULL_HANDLE))
+        {
+            ready = false;
+            break;
+        }
+    }
+
+    if (ready)
     {
         return;
     }
@@ -550,33 +568,62 @@ static void VulkanCreateSyncObjects(void)
         .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
     };
 
-    VkResult result = vkCreateSemaphore(GLOBAL.Vulkan.device, &semaphoreInfo, NULL, &GLOBAL.Vulkan.imageAvailableSemaphore);
-    Assert(result == VK_SUCCESS, "Failed to create Vulkan semaphore");
-
     VkFenceCreateInfo fenceInfo = {
         .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
         .flags = VK_FENCE_CREATE_SIGNALED_BIT,
     };
 
-    result = vkCreateFence(GLOBAL.Vulkan.device, &fenceInfo, NULL, &GLOBAL.Vulkan.frameFence);
-    Assert(result == VK_SUCCESS, "Failed to create Vulkan fence");
+    for (uint32_t index = 0; index < VULKAN_FRAMES_IN_FLIGHT; index++)
+    {
+        if (GLOBAL.Vulkan.imageAvailableSemaphores[index] == VK_NULL_HANDLE)
+        {
+            VkResult semaphoreResult = vkCreateSemaphore(GLOBAL.Vulkan.device, &semaphoreInfo, NULL, &GLOBAL.Vulkan.imageAvailableSemaphores[index]);
+            Assert(semaphoreResult == VK_SUCCESS, "Failed to create Vulkan image-available semaphore");
+        }
+
+        if (GLOBAL.Vulkan.renderFinishedSemaphores[index] == VK_NULL_HANDLE)
+        {
+            VkResult semaphoreResult = vkCreateSemaphore(GLOBAL.Vulkan.device, &semaphoreInfo, NULL, &GLOBAL.Vulkan.renderFinishedSemaphores[index]);
+            Assert(semaphoreResult == VK_SUCCESS, "Failed to create Vulkan render-finished semaphore");
+        }
+
+        if (GLOBAL.Vulkan.inFlightFences[index] == VK_NULL_HANDLE)
+        {
+            VkResult fenceResult = vkCreateFence(GLOBAL.Vulkan.device, &fenceInfo, NULL, &GLOBAL.Vulkan.inFlightFences[index]);
+            Assert(fenceResult == VK_SUCCESS, "Failed to create Vulkan in-flight fence");
+        }
+    }
+
+    GLOBAL.Vulkan.currentFrame = 0;
 
     LogInfo("Vulkan synchronization objects ready");
 }
 
 static void VulkanDestroySyncObjects(void)
 {
-    if (GLOBAL.Vulkan.frameFence != VK_NULL_HANDLE)
+    for (uint32_t index = 0; index < VULKAN_FRAMES_IN_FLIGHT; index++)
     {
-        vkDestroyFence(GLOBAL.Vulkan.device, GLOBAL.Vulkan.frameFence, NULL);
-        GLOBAL.Vulkan.frameFence = VK_NULL_HANDLE;
+        if (GLOBAL.Vulkan.inFlightFences[index] != VK_NULL_HANDLE)
+        {
+            vkDestroyFence(GLOBAL.Vulkan.device, GLOBAL.Vulkan.inFlightFences[index], NULL);
+            GLOBAL.Vulkan.inFlightFences[index] = VK_NULL_HANDLE;
+        }
+
+        if (GLOBAL.Vulkan.imageAvailableSemaphores[index] != VK_NULL_HANDLE)
+        {
+            vkDestroySemaphore(GLOBAL.Vulkan.device, GLOBAL.Vulkan.imageAvailableSemaphores[index], NULL);
+            GLOBAL.Vulkan.imageAvailableSemaphores[index] = VK_NULL_HANDLE;
+        }
+
+        if (GLOBAL.Vulkan.renderFinishedSemaphores[index] != VK_NULL_HANDLE)
+        {
+            vkDestroySemaphore(GLOBAL.Vulkan.device, GLOBAL.Vulkan.renderFinishedSemaphores[index], NULL);
+            GLOBAL.Vulkan.renderFinishedSemaphores[index] = VK_NULL_HANDLE;
+        }
     }
 
-    if (GLOBAL.Vulkan.imageAvailableSemaphore != VK_NULL_HANDLE)
-    {
-        vkDestroySemaphore(GLOBAL.Vulkan.device, GLOBAL.Vulkan.imageAvailableSemaphore, NULL);
-        GLOBAL.Vulkan.imageAvailableSemaphore = VK_NULL_HANDLE;
-    }
+    GLOBAL.Vulkan.currentFrame = 0;
+    memset(GLOBAL.Vulkan.imagesInFlight, 0, sizeof(GLOBAL.Vulkan.imagesInFlight));
 }
 
 static void VulkanCreateVmaAllocator(void)

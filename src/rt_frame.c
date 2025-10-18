@@ -179,10 +179,9 @@ void RtUpdateSpawnArea(void)
     UpdateSpawnArea();
 }
 
-void RtRecordFrame(uint32_t imageIndex, VkExtent2D extent)
+void RtRecordFrame(VkCommandBuffer commandBuffer, uint32_t imageIndex, VkExtent2D extent)
 {
-    Assert(GLOBAL.Vulkan.commandBuffer != VK_NULL_HANDLE, "Vulkan command buffer is not available");
-    Assert(GLOBAL.Vulkan.primaryIntersectPipe != VK_NULL_HANDLE, "Primary intersect pipeline is not ready");
+    Assert(commandBuffer != VK_NULL_HANDLE, "Vulkan command buffer is not available");
     Assert(GLOBAL.Vulkan.shadeShadowPipe != VK_NULL_HANDLE, "Shade shadow pipeline is not ready");
     Assert(GLOBAL.Vulkan.blitPipeline != VK_NULL_HANDLE, "Vulkan blit pipeline is not ready");
     Assert(GLOBAL.Vulkan.descriptorSet != VK_NULL_HANDLE, "Vulkan descriptor set is not ready");
@@ -198,8 +197,9 @@ void RtRecordFrame(uint32_t imageIndex, VkExtent2D extent)
     Assert(GLOBAL.Vulkan.rt.hitN != VK_NULL_HANDLE, "Hit normal buffer is not ready");
     Assert(GLOBAL.Vulkan.rt.accum != VK_NULL_HANDLE, "Accum buffer is not ready");
     Assert(GLOBAL.Vulkan.rt.spp != VK_NULL_HANDLE, "Sample count buffer is not ready");
+    Assert(GLOBAL.Vulkan.rt.epoch != VK_NULL_HANDLE, "Accumulation epoch buffer is not ready");
 
-    VkResult resetResult = vkResetCommandBuffer(GLOBAL.Vulkan.commandBuffer, 0);
+    VkResult resetResult = vkResetCommandBuffer(commandBuffer, 0);
     Assert(resetResult == VK_SUCCESS, "Failed to reset Vulkan command buffer");
 
     VkCommandBufferBeginInfo beginInfo = {
@@ -207,12 +207,12 @@ void RtRecordFrame(uint32_t imageIndex, VkExtent2D extent)
         .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
     };
 
-    VkResult beginResult = vkBeginCommandBuffer(GLOBAL.Vulkan.commandBuffer, &beginInfo);
+    VkResult beginResult = vkBeginCommandBuffer(commandBuffer, &beginInfo);
     Assert(beginResult == VK_SUCCESS, "Failed to begin Vulkan command buffer");
 
     VkImageMemoryBarrier2 toGeneral = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-        .srcStageMask = GLOBAL.Vulkan.gradientInitialized ? VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT : VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+        .srcStageMask = GLOBAL.Vulkan.gradientInitialized ? VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT : VK_PIPELINE_STAGE_2_NONE,
         .srcAccessMask = GLOBAL.Vulkan.gradientInitialized ? VK_ACCESS_2_SHADER_SAMPLED_READ_BIT : 0,
         .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
         .dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
@@ -236,47 +236,18 @@ void RtRecordFrame(uint32_t imageIndex, VkExtent2D extent)
         .pImageMemoryBarriers = &toGeneral,
     };
 
-    vkCmdPipelineBarrier2(GLOBAL.Vulkan.commandBuffer, &toGeneralDependency);
+    vkCmdPipelineBarrier2(commandBuffer, &toGeneralDependency);
 
     bool needAccumReset = (!GLOBAL.Vulkan.gradientInitialized) ||
         GLOBAL.Vulkan.resetAccumulation ||
         (!GLOBAL.Vulkan.sceneInitialized);
     if (needAccumReset)
     {
-        // Clear progressive accumulation buffers after creation
-        vkCmdFillBuffer(GLOBAL.Vulkan.commandBuffer, GLOBAL.Vulkan.rt.accum, 0, VK_WHOLE_SIZE, 0);
-        vkCmdFillBuffer(GLOBAL.Vulkan.commandBuffer, GLOBAL.Vulkan.rt.spp, 0, VK_WHOLE_SIZE, 0);
-
-        VkBufferMemoryBarrier2 clearBarriers[2] = {
-            {
-                .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-                .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
-                .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                .dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-                .buffer = GLOBAL.Vulkan.rt.accum,
-                .offset = 0,
-                .size = VK_WHOLE_SIZE,
-            },
-            {
-                .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-                .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
-                .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                .dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-                .buffer = GLOBAL.Vulkan.rt.spp,
-                .offset = 0,
-                .size = VK_WHOLE_SIZE,
-            },
-        };
-
-        VkDependencyInfo clearDep = {
-            .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-            .bufferMemoryBarrierCount = ARRAY_SIZE(clearBarriers),
-            .pBufferMemoryBarriers = clearBarriers,
-        };
-
-        vkCmdPipelineBarrier2(GLOBAL.Vulkan.commandBuffer, &clearDep);
+        GLOBAL.Vulkan.accumulationEpoch++;
+        if (GLOBAL.Vulkan.accumulationEpoch == 0u)
+        {
+            GLOBAL.Vulkan.accumulationEpoch = 1u;
+        }
         GLOBAL.Vulkan.resetAccumulation = false;
     }
 
@@ -301,8 +272,8 @@ void RtRecordFrame(uint32_t imageIndex, VkExtent2D extent)
         {
             if (sphereBytes > 0)
             {
-                vkCmdUpdateBuffer(GLOBAL.Vulkan.commandBuffer, GLOBAL.Vulkan.rt.sphereCR, 0, sphereBytes, GLOBAL.Vulkan.sphereCRHost);
-                vkCmdUpdateBuffer(GLOBAL.Vulkan.commandBuffer, GLOBAL.Vulkan.rt.sphereAlb, 0, sphereBytes, GLOBAL.Vulkan.sphereAlbHost);
+                vkCmdUpdateBuffer(commandBuffer, GLOBAL.Vulkan.rt.sphereCR, 0, sphereBytes, GLOBAL.Vulkan.sphereCRHost);
+                vkCmdUpdateBuffer(commandBuffer, GLOBAL.Vulkan.rt.sphereAlb, 0, sphereBytes, GLOBAL.Vulkan.sphereAlbHost);
 
                 VkBufferMemoryBarrier2 readyBarriers[2] = {
                     {
@@ -333,7 +304,7 @@ void RtRecordFrame(uint32_t imageIndex, VkExtent2D extent)
                     .pBufferMemoryBarriers = readyBarriers,
                 };
 
-                vkCmdPipelineBarrier2(GLOBAL.Vulkan.commandBuffer, &readyDependency);
+                vkCmdPipelineBarrier2(commandBuffer, &readyDependency);
             }
 
             GLOBAL.Vulkan.sceneInitialized = true;
@@ -344,20 +315,29 @@ void RtRecordFrame(uint32_t imageIndex, VkExtent2D extent)
         }
     }
 
+    const float aspect = (extent.height > 0u) ? ((float)extent.width / (float)extent.height) : 1.0f;
+
     PCPush pc = {
         .width = extent.width,
         .height = extent.height,
         .frame = frame,
         .sphereCount = GLOBAL.Vulkan.sphereCount,
+        .accumulationEpoch = GLOBAL.Vulkan.accumulationEpoch,
+        .tanHalfFovY = tanf(0.5f * GLOBAL.Vulkan.cam.fovY),
+        .aspect = aspect,
+        ._pad0 = 0.0f,
         .camPos = { GLOBAL.Vulkan.cam.pos.x, GLOBAL.Vulkan.cam.pos.y, GLOBAL.Vulkan.cam.pos.z },
-        .fovY = GLOBAL.Vulkan.cam.fovY,
+        ._pad1 = 0.0f,
         .camFwd = { GLOBAL.Vulkan.cam.fwd.x, GLOBAL.Vulkan.cam.fwd.y, GLOBAL.Vulkan.cam.fwd.z },
+        ._pad2 = 0.0f,
         .camRight = { GLOBAL.Vulkan.cam.right.x, GLOBAL.Vulkan.cam.right.y, GLOBAL.Vulkan.cam.right.z },
+        ._pad3 = 0.0f,
         .camUp = { GLOBAL.Vulkan.cam.up.x, GLOBAL.Vulkan.cam.up.y, GLOBAL.Vulkan.cam.up.z },
+        ._pad4 = 0.0f,
         .worldMin = { GLOBAL.Vulkan.worldMinX, GLOBAL.Vulkan.worldMinZ },
         .worldMax = { GLOBAL.Vulkan.worldMaxX, GLOBAL.Vulkan.worldMaxZ },
         .groundY = GLOBAL.Vulkan.groundY,
-        ._pad3 = { 0.0f, 0.0f, 0.0f },
+        ._pad5 = { 0.0f, 0.0f, 0.0f },
     };
 
     const uint32_t localSizeX = (GLOBAL.Vulkan.computeLocalSizeX > 0u) ? GLOBAL.Vulkan.computeLocalSizeX : VULKAN_COMPUTE_LOCAL_SIZE;
@@ -369,9 +349,9 @@ void RtRecordFrame(uint32_t imageIndex, VkExtent2D extent)
     const uint32_t groupCountX = (pc.width + localSizeX - 1u) / localSizeX;
     const uint32_t groupCountY = (pc.height + localSizeY - 1u) / localSizeY;
 
-    vkCmdBindPipeline(GLOBAL.Vulkan.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, GLOBAL.Vulkan.primaryIntersectPipe);
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, GLOBAL.Vulkan.shadeShadowPipe);
     vkCmdBindDescriptorSets(
-        GLOBAL.Vulkan.commandBuffer,
+        commandBuffer,
         VK_PIPELINE_BIND_POINT_COMPUTE,
         GLOBAL.Vulkan.computePipelineLayout,
         0,
@@ -380,63 +360,13 @@ void RtRecordFrame(uint32_t imageIndex, VkExtent2D extent)
         0,
         NULL);
     vkCmdPushConstants(
-        GLOBAL.Vulkan.commandBuffer,
+        commandBuffer,
         GLOBAL.Vulkan.computePipelineLayout,
         VK_SHADER_STAGE_COMPUTE_BIT,
         0,
         sizeof(pc),
         &pc);
-    vkCmdDispatch(GLOBAL.Vulkan.commandBuffer, groupCountX, groupCountY, 1);
-
-    VkBufferMemoryBarrier2 hitBarriers[2] = {
-        {
-            .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-            .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            .srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-            .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            .dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT,
-            .buffer = GLOBAL.Vulkan.rt.hitT,
-            .offset = 0,
-            .size = VK_WHOLE_SIZE,
-        },
-        {
-            .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-            .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            .srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-            .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            .dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT,
-            .buffer = GLOBAL.Vulkan.rt.hitN,
-            .offset = 0,
-            .size = VK_WHOLE_SIZE,
-        },
-    };
-
-    VkDependencyInfo hitDependency = {
-        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-        .bufferMemoryBarrierCount = ARRAY_SIZE(hitBarriers),
-        .pBufferMemoryBarriers = hitBarriers,
-    };
-
-    vkCmdPipelineBarrier2(GLOBAL.Vulkan.commandBuffer, &hitDependency);
-
-    vkCmdBindPipeline(GLOBAL.Vulkan.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, GLOBAL.Vulkan.shadeShadowPipe);
-    vkCmdBindDescriptorSets(
-        GLOBAL.Vulkan.commandBuffer,
-        VK_PIPELINE_BIND_POINT_COMPUTE,
-        GLOBAL.Vulkan.computePipelineLayout,
-        0,
-        1,
-        &GLOBAL.Vulkan.descriptorSet,
-        0,
-        NULL);
-    vkCmdPushConstants(
-        GLOBAL.Vulkan.commandBuffer,
-        GLOBAL.Vulkan.computePipelineLayout,
-        VK_SHADER_STAGE_COMPUTE_BIT,
-        0,
-        sizeof(pc),
-        &pc);
-    vkCmdDispatch(GLOBAL.Vulkan.commandBuffer, groupCountX, groupCountY, 1);
+    vkCmdDispatch(commandBuffer, groupCountX, groupCountY, 1);
 
     VkImageMemoryBarrier2 toRead = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
@@ -464,11 +394,11 @@ void RtRecordFrame(uint32_t imageIndex, VkExtent2D extent)
         .pImageMemoryBarriers = &toRead,
     };
 
-    vkCmdPipelineBarrier2(GLOBAL.Vulkan.commandBuffer, &toReadDependency);
+    vkCmdPipelineBarrier2(commandBuffer, &toReadDependency);
 
     VkImageMemoryBarrier2 swapchainPre = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-        .srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+        .srcStageMask = VK_PIPELINE_STAGE_2_NONE,
         .dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
         .srcAccessMask = 0,
         .dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
@@ -490,7 +420,7 @@ void RtRecordFrame(uint32_t imageIndex, VkExtent2D extent)
         .pImageMemoryBarriers = &swapchainPre,
     };
 
-    vkCmdPipelineBarrier2(GLOBAL.Vulkan.commandBuffer, &swapchainPreDependency);
+    vkCmdPipelineBarrier2(commandBuffer, &swapchainPreDependency);
 
     VkClearValue clearColor = {
         .color = { { 0.0f, 0.0f, 0.0f, 1.0f } },
@@ -516,10 +446,10 @@ void RtRecordFrame(uint32_t imageIndex, VkExtent2D extent)
         .pColorAttachments = &colorAttachment,
     };
 
-    vkCmdBeginRendering(GLOBAL.Vulkan.commandBuffer, &renderingInfo);
-    vkCmdBindPipeline(GLOBAL.Vulkan.commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, GLOBAL.Vulkan.blitPipeline);
+    vkCmdBeginRendering(commandBuffer, &renderingInfo);
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, GLOBAL.Vulkan.blitPipeline);
     vkCmdBindDescriptorSets(
-        GLOBAL.Vulkan.commandBuffer,
+        commandBuffer,
         VK_PIPELINE_BIND_POINT_GRAPHICS,
         GLOBAL.Vulkan.blitPipelineLayout,
         0,
@@ -528,13 +458,13 @@ void RtRecordFrame(uint32_t imageIndex, VkExtent2D extent)
         0,
         NULL);
 
-    vkCmdDraw(GLOBAL.Vulkan.commandBuffer, 3, 1, 0, 0);
-    vkCmdEndRendering(GLOBAL.Vulkan.commandBuffer);
+    vkCmdDraw(commandBuffer, 3, 1, 0, 0);
+    vkCmdEndRendering(commandBuffer);
 
     VkImageMemoryBarrier2 swapchainPost = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
         .srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-        .dstStageMask = VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT,
+        .dstStageMask = VK_PIPELINE_STAGE_2_NONE,
         .srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
         .dstAccessMask = 0,
         .oldLayout = VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
@@ -555,9 +485,9 @@ void RtRecordFrame(uint32_t imageIndex, VkExtent2D extent)
         .pImageMemoryBarriers = &swapchainPost,
     };
 
-    vkCmdPipelineBarrier2(GLOBAL.Vulkan.commandBuffer, &swapchainPostDependency);
+    vkCmdPipelineBarrier2(commandBuffer, &swapchainPostDependency);
 
-    VkResult endResult = vkEndCommandBuffer(GLOBAL.Vulkan.commandBuffer);
+    VkResult endResult = vkEndCommandBuffer(commandBuffer);
     Assert(endResult == VK_SUCCESS, "Failed to record Vulkan frame command buffer");
 
     GLOBAL.Vulkan.gradientInitialized = true;

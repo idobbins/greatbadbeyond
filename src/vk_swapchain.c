@@ -109,13 +109,13 @@ static VkPresentModeKHR VulkanChoosePresentMode(const VkPresentModeKHR *presentM
         return VK_PRESENT_MODE_FIFO_KHR;
     }
 #else
-    if (hasFifo)
-    {
-        return VK_PRESENT_MODE_FIFO_KHR;
-    }
     if (hasMailbox)
     {
         return VK_PRESENT_MODE_MAILBOX_KHR;
+    }
+    if (hasFifo)
+    {
+        return VK_PRESENT_MODE_FIFO_KHR;
     }
     if (hasImmediate)
     {
@@ -193,43 +193,11 @@ static VkCompositeAlphaFlagBitsKHR VulkanChooseCompositeAlpha(VkCompositeAlphaFl
     return VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
 }
 
-static void VulkanDestroySwapchainSemaphores(void)
+static void VulkanResetSwapchainTracking(void)
 {
     for (uint32_t index = 0; index < VULKAN_MAX_SWAPCHAIN_IMAGES; index++)
     {
-        if (GLOBAL.Vulkan.renderFinishedSemaphores[index] != VK_NULL_HANDLE)
-        {
-            vkDestroySemaphore(GLOBAL.Vulkan.device, GLOBAL.Vulkan.renderFinishedSemaphores[index], NULL);
-            GLOBAL.Vulkan.renderFinishedSemaphores[index] = VK_NULL_HANDLE;
-        }
-    }
-}
-
-static void VulkanCreateSwapchainSemaphores(void)
-{
-    Assert(GLOBAL.Vulkan.device != VK_NULL_HANDLE, "Vulkan logical device is not ready");
-    Assert(GLOBAL.Vulkan.swapchainImageCount <= VULKAN_MAX_SWAPCHAIN_IMAGES, "Vulkan swapchain image count out of range");
-
-    VkSemaphoreCreateInfo semaphoreInfo = {
-        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
-    };
-
-    for (uint32_t index = 0; index < GLOBAL.Vulkan.swapchainImageCount; index++)
-    {
-        if (GLOBAL.Vulkan.renderFinishedSemaphores[index] == VK_NULL_HANDLE)
-        {
-            VkResult result = vkCreateSemaphore(GLOBAL.Vulkan.device, &semaphoreInfo, NULL, &GLOBAL.Vulkan.renderFinishedSemaphores[index]);
-            Assert(result == VK_SUCCESS, "Failed to create Vulkan render-finished semaphore");
-        }
-    }
-
-    for (uint32_t index = GLOBAL.Vulkan.swapchainImageCount; index < VULKAN_MAX_SWAPCHAIN_IMAGES; index++)
-    {
-        if (GLOBAL.Vulkan.renderFinishedSemaphores[index] != VK_NULL_HANDLE)
-        {
-            vkDestroySemaphore(GLOBAL.Vulkan.device, GLOBAL.Vulkan.renderFinishedSemaphores[index], NULL);
-            GLOBAL.Vulkan.renderFinishedSemaphores[index] = VK_NULL_HANDLE;
-        }
+        GLOBAL.Vulkan.imagesInFlight[index] = VK_NULL_HANDLE;
     }
 }
 
@@ -323,7 +291,7 @@ void CreateSwapchain(void)
     GLOBAL.Vulkan.swapchainImageFormat = surfaceFormat.format;
     GLOBAL.Vulkan.swapchainExtent = extent;
 
-    VulkanCreateSwapchainSemaphores();
+    VulkanResetSwapchainTracking();
     RtCreateSwapchainResources();
     CreateBlitPipeline();
     VulkanRefreshReadyState();
@@ -355,7 +323,7 @@ void DestroySwapchain(void)
     memset(GLOBAL.Vulkan.swapchainImages, 0, sizeof(GLOBAL.Vulkan.swapchainImages));
     memset(GLOBAL.Vulkan.swapchainImageViews, 0, sizeof(GLOBAL.Vulkan.swapchainImageViews));
 
-    VulkanDestroySwapchainSemaphores();
+    VulkanResetSwapchainTracking();
 
     vkDestroySwapchainKHR(GLOBAL.Vulkan.device, GLOBAL.Vulkan.swapchain, NULL);
     GLOBAL.Vulkan.swapchain = VK_NULL_HANDLE;
@@ -403,22 +371,26 @@ void VulkanDrawFrame(void)
         return;
     }
 
-    Assert(GLOBAL.Vulkan.commandBuffer != VK_NULL_HANDLE, "Vulkan command buffer is not ready");
-    Assert(GLOBAL.Vulkan.imageAvailableSemaphore != VK_NULL_HANDLE, "Vulkan synchronization objects are not ready");
-    Assert(GLOBAL.Vulkan.frameFence != VK_NULL_HANDLE, "Vulkan frame fence is not ready");
+    const uint32_t frame = GLOBAL.Vulkan.currentFrame % VULKAN_FRAMES_IN_FLIGHT;
+    VkCommandBuffer commandBuffer = GLOBAL.Vulkan.commandBuffers[frame];
+    VkSemaphore imageAvailable = GLOBAL.Vulkan.imageAvailableSemaphores[frame];
+    VkSemaphore renderFinished = GLOBAL.Vulkan.renderFinishedSemaphores[frame];
+    VkFence inFlightFence = GLOBAL.Vulkan.inFlightFences[frame];
 
-    VkResult fenceResult = vkWaitForFences(GLOBAL.Vulkan.device, 1, &GLOBAL.Vulkan.frameFence, VK_TRUE, UINT64_MAX);
-    Assert(fenceResult == VK_SUCCESS, "Failed to wait for Vulkan frame fence");
+    Assert(commandBuffer != VK_NULL_HANDLE, "Vulkan command buffer is not ready");
+    Assert(imageAvailable != VK_NULL_HANDLE, "Vulkan image-available semaphore is not ready");
+    Assert(renderFinished != VK_NULL_HANDLE, "Vulkan render-finished semaphore is not ready");
+    Assert(inFlightFence != VK_NULL_HANDLE, "Vulkan in-flight fence is not ready");
 
-    fenceResult = vkResetFences(GLOBAL.Vulkan.device, 1, &GLOBAL.Vulkan.frameFence);
-    Assert(fenceResult == VK_SUCCESS, "Failed to reset Vulkan frame fence");
+    VkResult waitResult = vkWaitForFences(GLOBAL.Vulkan.device, 1, &inFlightFence, VK_TRUE, UINT64_MAX);
+    Assert(waitResult == VK_SUCCESS, "Failed to wait for Vulkan in-flight fence");
 
     uint32_t imageIndex = 0;
     VkResult acquireResult = vkAcquireNextImageKHR(
         GLOBAL.Vulkan.device,
         GLOBAL.Vulkan.swapchain,
         UINT64_MAX,
-        GLOBAL.Vulkan.imageAvailableSemaphore,
+        imageAvailable,
         VK_NULL_HANDLE,
         &imageIndex);
 
@@ -430,14 +402,21 @@ void VulkanDrawFrame(void)
 
     Assert((acquireResult == VK_SUCCESS) || (acquireResult == VK_SUBOPTIMAL_KHR), "Failed to acquire Vulkan swapchain image");
 
-    RtRecordFrame(imageIndex, extent);
+    if (GLOBAL.Vulkan.imagesInFlight[imageIndex] != VK_NULL_HANDLE)
+    {
+        VkResult imageWait = vkWaitForFences(GLOBAL.Vulkan.device, 1, &GLOBAL.Vulkan.imagesInFlight[imageIndex], VK_TRUE, UINT64_MAX);
+        Assert(imageWait == VK_SUCCESS, "Failed to wait for Vulkan swapchain image fence");
+        GLOBAL.Vulkan.imagesInFlight[imageIndex] = VK_NULL_HANDLE;
+    }
 
-    VkSemaphore renderFinishedSemaphore = GLOBAL.Vulkan.renderFinishedSemaphores[imageIndex];
-    Assert(renderFinishedSemaphore != VK_NULL_HANDLE, "Vulkan render-finished semaphore is not ready");
+    VkResult resetResult = vkResetFences(GLOBAL.Vulkan.device, 1, &inFlightFence);
+    Assert(resetResult == VK_SUCCESS, "Failed to reset Vulkan in-flight fence");
 
-    VkSemaphore waitSemaphores[] = { GLOBAL.Vulkan.imageAvailableSemaphore };
+    RtRecordFrame(commandBuffer, imageIndex, extent);
+
+    VkSemaphore waitSemaphores[] = { imageAvailable };
     VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
-    VkSemaphore signalSemaphores[] = { renderFinishedSemaphore };
+    VkSemaphore signalSemaphores[] = { renderFinished };
 
     VkSubmitInfo submitInfo = {
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
@@ -445,13 +424,15 @@ void VulkanDrawFrame(void)
         .pWaitSemaphores = waitSemaphores,
         .pWaitDstStageMask = waitStages,
         .commandBufferCount = 1,
-        .pCommandBuffers = &GLOBAL.Vulkan.commandBuffer,
+        .pCommandBuffers = &commandBuffer,
         .signalSemaphoreCount = ARRAY_SIZE(signalSemaphores),
         .pSignalSemaphores = signalSemaphores,
     };
 
-    VkResult submitResult = vkQueueSubmit(GLOBAL.Vulkan.queue, 1, &submitInfo, GLOBAL.Vulkan.frameFence);
+    VkResult submitResult = vkQueueSubmit(GLOBAL.Vulkan.queue, 1, &submitInfo, inFlightFence);
     Assert(submitResult == VK_SUCCESS, "Failed to submit Vulkan frame commands");
+
+    GLOBAL.Vulkan.imagesInFlight[imageIndex] = inFlightFence;
 
     VkPresentInfoKHR presentInfo = {
         .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
@@ -470,5 +451,5 @@ void VulkanDrawFrame(void)
     }
 
     Assert(presentResult == VK_SUCCESS, "Failed to present Vulkan swapchain image");
-    (void)imageIndex;
+    GLOBAL.Vulkan.currentFrame++;
 }

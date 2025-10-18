@@ -174,6 +174,7 @@ void RtCreateSwapchainResources(void)
     VkDeviceSize sphereSize = sizeof(float) * 4 * (VkDeviceSize)RT_MAX_SPHERES;
     VkDeviceSize accumSize = sizeof(float) * 4 * pixels;
     VkDeviceSize sppSize = sizeof(uint32_t) * pixels;
+    VkDeviceSize epochSize = sizeof(uint32_t) * pixels;
     if (GLOBAL.Vulkan.rt.hitT == VK_NULL_HANDLE)
     {
         CreateBuffer(hitTSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, &GLOBAL.Vulkan.rt.hitT, &GLOBAL.Vulkan.rt.hitTAlloc);
@@ -214,6 +215,15 @@ void RtCreateSwapchainResources(void)
             &GLOBAL.Vulkan.rt.sppAlloc);
     }
 
+    if (GLOBAL.Vulkan.rt.epoch == VK_NULL_HANDLE)
+    {
+        CreateBuffer(
+            epochSize,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            &GLOBAL.Vulkan.rt.epoch,
+            &GLOBAL.Vulkan.rt.epochAlloc);
+    }
+
     CreateGradientResources();
 
     ComputeDS resources = {
@@ -225,12 +235,14 @@ void RtCreateSwapchainResources(void)
         .hitN = GLOBAL.Vulkan.rt.hitN,
         .accum = GLOBAL.Vulkan.rt.accum,
         .spp = GLOBAL.Vulkan.rt.spp,
+        .epoch = GLOBAL.Vulkan.rt.epoch,
     };
 
     UpdateComputeDescriptorSet(&resources);
 
     GLOBAL.Vulkan.sceneInitialized = false;
     GLOBAL.Vulkan.resetAccumulation = true;
+    GLOBAL.Vulkan.accumulationEpoch = 0u;
 }
 
 void RtDestroySwapchainResources(void)
@@ -242,5 +254,7 @@ void RtDestroySwapchainResources(void)
     DestroyBuffer(&GLOBAL.Vulkan.rt.sphereAlb, &GLOBAL.Vulkan.rt.sphereAlbAlloc);
     DestroyBuffer(&GLOBAL.Vulkan.rt.accum, &GLOBAL.Vulkan.rt.accumAlloc);
     DestroyBuffer(&GLOBAL.Vulkan.rt.spp, &GLOBAL.Vulkan.rt.sppAlloc);
+    DestroyBuffer(&GLOBAL.Vulkan.rt.epoch, &GLOBAL.Vulkan.rt.epochAlloc);
     GLOBAL.Vulkan.sceneInitialized = false;
+    GLOBAL.Vulkan.accumulationEpoch = 0u;
 }

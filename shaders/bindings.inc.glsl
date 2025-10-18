@@ -6,3 +6,4 @@
 #define B_HIT_N 5
 #define B_ACCUM 6
 #define B_SPP 7
+#define B_EPOCH 8

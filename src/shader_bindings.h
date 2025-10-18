@@ -9,4 +9,5 @@ enum ShaderBinding {
     B_HIT_N = 5,
     B_ACCUM = 6,
     B_SPP = 7,
+    B_EPOCH = 8,
 };

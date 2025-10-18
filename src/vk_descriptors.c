@@ -10,7 +10,7 @@ void VulkanCreateDescriptorInfra(void)
 
     if (GLOBAL.Vulkan.descriptorSetLayout == VK_NULL_HANDLE)
     {
-        VkDescriptorSetLayoutBinding bindings[8] = {
+        VkDescriptorSetLayoutBinding bindings[9] = {
             {
                 .binding = B_TARGET,
                 .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
@@ -59,6 +59,12 @@ void VulkanCreateDescriptorInfra(void)
                 .descriptorCount = 1,
                 .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
             },
+            {
+                .binding = B_EPOCH,
+                .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .descriptorCount = 1,
+                .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+            },
         };
 
         VkDescriptorSetLayoutCreateInfo layoutInfo = {
@@ -75,9 +81,10 @@ void VulkanCreateDescriptorInfra(void)
 
     if (GLOBAL.Vulkan.descriptorPool == VK_NULL_HANDLE)
     {
-        VkDescriptorPoolSize poolSizes[8] = {
+        VkDescriptorPoolSize poolSizes[9] = {
             { .type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .descriptorCount = 1 },
             { .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1 },
+            { .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1 },
             { .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1 },
             { .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1 },
             { .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1 },
@@ -147,6 +154,7 @@ void UpdateComputeDescriptorSet(const ComputeDS *resources)
     Assert(resources->hitN != VK_NULL_HANDLE, "Hit normal buffer is not ready");
     Assert(resources->accum != VK_NULL_HANDLE, "Accumulation buffer is not ready");
     Assert(resources->spp != VK_NULL_HANDLE, "Sample count buffer is not ready");
+    Assert(resources->epoch != VK_NULL_HANDLE, "Accumulation epoch buffer is not ready");
 
     VkDescriptorImageInfo storage = {
         .imageView = resources->targetView,
@@ -195,7 +203,13 @@ void UpdateComputeDescriptorSet(const ComputeDS *resources)
         .range = VK_WHOLE_SIZE,
     };
 
-    VkWriteDescriptorSet writes[8] = {
+    VkDescriptorBufferInfo epoch = {
+        .buffer = resources->epoch,
+        .offset = 0,
+        .range = VK_WHOLE_SIZE,
+    };
+
+    VkWriteDescriptorSet writes[9] = {
         {
             .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
             .dstSet = GLOBAL.Vulkan.descriptorSet,
@@ -259,6 +273,14 @@ void UpdateComputeDescriptorSet(const ComputeDS *resources)
             .descriptorCount = 1,
             .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
             .pBufferInfo = &spp,
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = GLOBAL.Vulkan.descriptorSet,
+            .dstBinding = B_EPOCH,
+            .descriptorCount = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .pBufferInfo = &epoch,
         },
     };
 

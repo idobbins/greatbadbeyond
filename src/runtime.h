@@ -33,6 +33,7 @@
 #define VULKAN_MAX_SURFACE_FORMATS 64
 #define VULKAN_MAX_PRESENT_MODES 16
 #define VULKAN_MAX_SHADER_SIZE (1024 * 1024)
+#define VULKAN_FRAMES_IN_FLIGHT 2
 #define VULKAN_COMPUTE_LOCAL_SIZE 16
 #define VULKAN_MAX_PATH_LENGTH 512
 #define RT_MAX_SPHERES 512u
@@ -51,6 +52,8 @@ typedef struct VulkanBuffers {
     VmaAllocation accumAlloc;
     VkBuffer spp;
     VmaAllocation sppAlloc;
+    VkBuffer epoch;
+    VmaAllocation epochAlloc;
 } VulkanBuffers;
 
 typedef struct Float3 {
@@ -109,20 +112,22 @@ typedef struct GlobalData {
         VkPipeline blitPipeline;
         VmaAllocator vma;
         VkCommandPool commandPool;
-        VkCommandBuffer commandBuffer;
+        VkCommandBuffer commandBuffers[VULKAN_FRAMES_IN_FLIGHT];
         VkImage gradientImage;
         VmaAllocation gradientAlloc;
         VkImageView gradientImageView;
         VkSampler gradientSampler;
-        VkSemaphore imageAvailableSemaphore;
-        VkSemaphore renderFinishedSemaphores[VULKAN_MAX_SWAPCHAIN_IMAGES];
-        VkFence frameFence;
+        VkSemaphore imageAvailableSemaphores[VULKAN_FRAMES_IN_FLIGHT];
+        VkSemaphore renderFinishedSemaphores[VULKAN_FRAMES_IN_FLIGHT];
+        VkFence inFlightFences[VULKAN_FRAMES_IN_FLIGHT];
+        VkFence imagesInFlight[VULKAN_MAX_SWAPCHAIN_IMAGES];
 
         VulkanBuffers rt;
 
         bool gradientInitialized;
         bool sceneInitialized;
         bool resetAccumulation;
+        uint32_t accumulationEpoch;
 
         uint32_t sphereTargetCount;
         uint32_t sphereCount;
@@ -143,6 +148,7 @@ typedef struct GlobalData {
 
         Camera cam;
         uint32_t frameIndex;
+        uint32_t currentFrame;
 
         bool ready;
         bool debugEnabled;

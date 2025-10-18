@@ -17,16 +17,20 @@ layout(push_constant) uniform PC {
     uvec2 size;
     uint frame;
     uint sphereCount;
+    uint accumulationEpoch;
 
-    vec3 camPos;   float fovY;
-    vec3 camFwd;   float _pad0;
-    vec3 camRight; float _pad1;
-    vec3 camUp;    float _pad2;
+    float tanHalfFovY;
+    float aspect;
+    float _pad0;
+    vec3 camPos;   float _pad1;
+    vec3 camFwd;   float _pad2;
+    vec3 camRight; float _pad3;
+    vec3 camUp;    float _pad4;
 
     vec2 worldMin;
     vec2 worldMax;
     float groundY;
-    float _pad3[3];
+    float _pad5[3];
 } pc;
 
 const float kHuge = 1e30;
@@ -36,9 +40,9 @@ vec3 computeRayDir(uvec2 pix)
 {
     vec2 res = vec2(max(pc.size.x, 1u), max(pc.size.y, 1u));
     vec2 uv = (vec2(pix) + vec2(0.5)) / res * 2.0 - 1.0;
-    uv.x *= res.x / res.y;
+    uv.x *= pc.aspect;
 
-    float t = tan(0.5 * pc.fovY);
+    float t = pc.tanHalfFovY;
     return normalize(uv.x * t * pc.camRight + uv.y * t * pc.camUp + pc.camFwd);
 }
 
@@ -159,6 +163,7 @@ float rnd(inout uint s)
 
 layout(std430, binding = B_ACCUM) buffer AccumBuf { vec4 accum[]; };
 layout(std430, binding = B_SPP) buffer SppBuf { uint spp[]; };
+layout(std430, binding = B_EPOCH) buffer EpochBuf { uint epochBuf[]; };
 
 const vec3 kLightDir = normalize(vec3(0.4, 1.0, 0.2));
 const vec3 kPlaneAlb = vec3(0.8, 0.8, 0.8);
@@ -263,8 +268,8 @@ void main()
     vec2 res = vec2(max(pc.size.x, 1u), max(pc.size.y, 1u));
     vec2 jitter = vec2(rnd(seed), rnd(seed)) - 0.5;
     vec2 uv = ((vec2(id) + 0.5 + jitter) / res) * 2.0 - 1.0;
-    uv.x *= res.x / res.y;
-    float tcam = tan(0.5 * pc.fovY);
+    uv.x *= pc.aspect;
+    float tcam = pc.tanHalfFovY;
     vec3 rd0 = normalize(uv.x * tcam * pc.camRight + uv.y * tcam * pc.camUp + pc.camFwd);
 
     vec3 ro = pc.camPos;
@@ -315,6 +320,13 @@ void main()
 
         ro = pos;
         rd = wi;
+    }
+
+    if (epochBuf[pix] != pc.accumulationEpoch)
+    {
+        accum[pix] = vec4(0.0);
+        spp[pix] = 0u;
+        epochBuf[pix] = pc.accumulationEpoch;
     }
 
     uint oldCount = spp[pix];
