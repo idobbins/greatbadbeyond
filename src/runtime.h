@@ -36,7 +36,7 @@
 #define VULKAN_FRAMES_IN_FLIGHT 2
 #define VULKAN_COMPUTE_LOCAL_SIZE 16
 #define VULKAN_MAX_PATH_LENGTH 512
-#define RT_MAX_SPHERES 256u
+#define RT_MAX_SPHERES 10000u
 #define FRAME_TIME_SAMPLES 240
 
 typedef struct VulkanBuffers {
@@ -54,6 +54,11 @@ typedef struct VulkanBuffers {
     VmaAllocation sppAlloc;
     VkBuffer epoch;
     VmaAllocation epochAlloc;
+    // Uniform grid
+    VkBuffer gridRanges;   // uvec2 {start,count} per cell
+    VmaAllocation gridRangesAlloc;
+    VkBuffer gridIndices;  // uint sphere indices
+    VmaAllocation gridIndicesAlloc;
 } VulkanBuffers;
 
 typedef struct Float3 {
@@ -140,6 +145,17 @@ typedef struct GlobalData {
         float worldMinZ;
         float worldMaxX;
         float worldMaxZ;
+        // Uniform grid metadata
+        uint32_t gridDimX;
+        uint32_t gridDimY;
+        uint32_t gridDimZ;
+        float gridMinX;
+        float gridMinY;
+        float gridMinZ;
+        float gridInvCellX;
+        float gridInvCellY;
+        float gridInvCellZ;
+        bool showGrid;
 
         uint32_t vendorId;
         uint32_t subgroupSize;

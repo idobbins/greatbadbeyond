@@ -224,6 +224,25 @@ void RtCreateSwapchainResources(void)
             &GLOBAL.Vulkan.rt.epochAlloc);
     }
 
+    // Small placeholders; real data uploaded after grid build.
+    if (GLOBAL.Vulkan.rt.gridRanges == VK_NULL_HANDLE)
+    {
+        CreateBuffer(
+            sizeof(uint32_t) * 2,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            &GLOBAL.Vulkan.rt.gridRanges,
+            &GLOBAL.Vulkan.rt.gridRangesAlloc);
+    }
+
+    if (GLOBAL.Vulkan.rt.gridIndices == VK_NULL_HANDLE)
+    {
+        CreateBuffer(
+            sizeof(uint32_t) * 4,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            &GLOBAL.Vulkan.rt.gridIndices,
+            &GLOBAL.Vulkan.rt.gridIndicesAlloc);
+    }
+
     CreateGradientResources();
 
     ComputeDS resources = {
@@ -236,6 +255,8 @@ void RtCreateSwapchainResources(void)
         .accum = GLOBAL.Vulkan.rt.accum,
         .spp = GLOBAL.Vulkan.rt.spp,
         .epoch = GLOBAL.Vulkan.rt.epoch,
+        .gridRanges = GLOBAL.Vulkan.rt.gridRanges,
+        .gridIndices = GLOBAL.Vulkan.rt.gridIndices,
     };
 
     UpdateComputeDescriptorSet(&resources);
@@ -255,6 +276,17 @@ void RtDestroySwapchainResources(void)
     DestroyBuffer(&GLOBAL.Vulkan.rt.accum, &GLOBAL.Vulkan.rt.accumAlloc);
     DestroyBuffer(&GLOBAL.Vulkan.rt.spp, &GLOBAL.Vulkan.rt.sppAlloc);
     DestroyBuffer(&GLOBAL.Vulkan.rt.epoch, &GLOBAL.Vulkan.rt.epochAlloc);
+    DestroyBuffer(&GLOBAL.Vulkan.rt.gridRanges, &GLOBAL.Vulkan.rt.gridRangesAlloc);
+    DestroyBuffer(&GLOBAL.Vulkan.rt.gridIndices, &GLOBAL.Vulkan.rt.gridIndicesAlloc);
+    GLOBAL.Vulkan.gridDimX = 0u;
+    GLOBAL.Vulkan.gridDimY = 0u;
+    GLOBAL.Vulkan.gridDimZ = 0u;
+    GLOBAL.Vulkan.gridMinX = 0.0f;
+    GLOBAL.Vulkan.gridMinY = 0.0f;
+    GLOBAL.Vulkan.gridMinZ = 0.0f;
+    GLOBAL.Vulkan.gridInvCellX = 0.0f;
+    GLOBAL.Vulkan.gridInvCellY = 0.0f;
+    GLOBAL.Vulkan.gridInvCellZ = 0.0f;
     GLOBAL.Vulkan.sceneInitialized = false;
     GLOBAL.Vulkan.accumulationEpoch = 0u;
 }

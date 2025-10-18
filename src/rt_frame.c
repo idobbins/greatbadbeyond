@@ -1,7 +1,261 @@
 #include "runtime.h"
 #include "rt_frame.h"
+#include "vk_descriptors.h"
+#include "vk_mem_alloc.h"
 
 #include <math.h>
+#include <stdlib.h>
+#include <string.h>
+
+static void CreateOrResizeBuffer(VkDeviceSize size, VkBuffer *buf, VmaAllocation *alloc)
+{
+    Assert(buf != NULL, "Grid buffer handle pointer is null");
+    Assert(alloc != NULL, "Grid buffer allocation pointer is null");
+    Assert(GLOBAL.Vulkan.vma != NULL, "VMA allocator is not ready");
+    Assert(size > 0, "Grid buffer size must be greater than zero");
+
+    if (*buf != VK_NULL_HANDLE)
+    {
+        vmaDestroyBuffer(GLOBAL.Vulkan.vma, *buf, *alloc);
+        *buf = VK_NULL_HANDLE;
+        *alloc = NULL;
+    }
+
+    VkBufferCreateInfo info = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size = size,
+        .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+    };
+
+    VmaAllocationCreateInfo allocInfo = {
+        .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
+    };
+
+    VkResult result = vmaCreateBuffer(GLOBAL.Vulkan.vma, &info, &allocInfo, buf, alloc, NULL);
+    Assert(result == VK_SUCCESS, "Failed to create uniform grid buffer");
+}
+
+static void BuildUniformGrid(VkCommandBuffer cmd, uint32_t sphereCount)
+{
+    Assert(cmd != VK_NULL_HANDLE, "Command buffer is not ready");
+
+    if (sphereCount == 0u)
+    {
+        GLOBAL.Vulkan.gridDimX = 1u;
+        GLOBAL.Vulkan.gridDimY = 1u;
+        GLOBAL.Vulkan.gridDimZ = 1u;
+        GLOBAL.Vulkan.gridMinX = GLOBAL.Vulkan.worldMinX;
+        GLOBAL.Vulkan.gridMinY = GLOBAL.Vulkan.groundY;
+        GLOBAL.Vulkan.gridMinZ = GLOBAL.Vulkan.worldMinZ;
+        GLOBAL.Vulkan.gridInvCellX = 1.0f;
+        GLOBAL.Vulkan.gridInvCellY = 1.0f;
+        GLOBAL.Vulkan.gridInvCellZ = 1.0f;
+        return;
+    }
+
+    const float cell = fmaxf(GLOBAL.Vulkan.sphereMaxRadius * 2.0f, 0.05f);
+    const float3 minW = { GLOBAL.Vulkan.worldMinX, GLOBAL.Vulkan.groundY, GLOBAL.Vulkan.worldMinZ };
+
+    const float spanX = GLOBAL.Vulkan.worldMaxX - GLOBAL.Vulkan.worldMinX;
+    const float spanZ = GLOBAL.Vulkan.worldMaxZ - GLOBAL.Vulkan.worldMinZ;
+
+    const uint32_t dimX = (uint32_t)fmaxf(1.0f, ceilf(spanX / cell));
+    const uint32_t dimY = 1u;
+    const uint32_t dimZ = (uint32_t)fmaxf(1.0f, ceilf(spanZ / cell));
+    const uint32_t cellCount = dimX * dimY * dimZ;
+
+    const float invCell = 1.0f / cell;
+    GLOBAL.Vulkan.gridDimX = dimX;
+    GLOBAL.Vulkan.gridDimY = dimY;
+    GLOBAL.Vulkan.gridDimZ = dimZ;
+    GLOBAL.Vulkan.gridMinX = minW.x;
+    GLOBAL.Vulkan.gridMinY = minW.y;
+    GLOBAL.Vulkan.gridMinZ = minW.z;
+    GLOBAL.Vulkan.gridInvCellX = invCell;
+    GLOBAL.Vulkan.gridInvCellY = invCell;
+    GLOBAL.Vulkan.gridInvCellZ = invCell;
+
+    uint32_t *counts = (uint32_t *)calloc(cellCount, sizeof(uint32_t));
+    Assert(counts != NULL, "Failed to allocate grid cell counts");
+
+    for (uint32_t i = 0; i < sphereCount; ++i)
+    {
+        const float cx = GLOBAL.Vulkan.sphereCRHost[i * 4u + 0u];
+        const float cy = GLOBAL.Vulkan.sphereCRHost[i * 4u + 1u];
+        const float cz = GLOBAL.Vulkan.sphereCRHost[i * 4u + 2u];
+        const float r = GLOBAL.Vulkan.sphereCRHost[i * 4u + 3u];
+        const float minx = cx - r;
+        const float maxx = cx + r;
+        const float miny = fmaxf(minW.y, cy - r);
+        const float maxy = cy + r;
+        const float minz = cz - r;
+        const float maxz = cz + r;
+
+        int ix0 = (int)floorf((minx - minW.x) * invCell);
+        int ix1 = (int)floorf((maxx - minW.x) * invCell);
+        int iy0 = (int)floorf((miny - minW.y) * invCell);
+        int iy1 = (int)floorf((maxy - minW.y) * invCell);
+        int iz0 = (int)floorf((minz - minW.z) * invCell);
+        int iz1 = (int)floorf((maxz - minW.z) * invCell);
+
+        if (ix0 < 0) { ix0 = 0; }
+        if (iy0 < 0) { iy0 = 0; }
+        if (iz0 < 0) { iz0 = 0; }
+        if (ix1 >= (int)dimX) { ix1 = (int)dimX - 1; }
+        if (iy1 >= (int)dimY) { iy1 = (int)dimY - 1; }
+        if (iz1 >= (int)dimZ) { iz1 = (int)dimZ - 1; }
+
+        for (int z = iz0; z <= iz1; ++z)
+        {
+            for (int y = iy0; y <= iy1; ++y)
+            {
+                for (int x = ix0; x <= ix1; ++x)
+                {
+                    const uint32_t idx = (uint32_t)((z * (int)dimY + y) * (int)dimX + x);
+                    counts[idx]++;
+                }
+            }
+        }
+    }
+
+    uint32_t *starts = (uint32_t *)malloc(sizeof(uint32_t) * cellCount);
+    Assert(starts != NULL, "Failed to allocate grid cell starts");
+
+    uint32_t total = 0u;
+    for (uint32_t c = 0u; c < cellCount; ++c)
+    {
+        starts[c] = total;
+        total += counts[c];
+    }
+
+    uint32_t indicesCapacity = (total > 0u) ? total : 1u;
+    uint32_t *indices = (uint32_t *)malloc(sizeof(uint32_t) * indicesCapacity);
+    Assert(indices != NULL, "Failed to allocate grid indices");
+
+    uint32_t *cursor = (uint32_t *)malloc(sizeof(uint32_t) * cellCount);
+    Assert(cursor != NULL, "Failed to allocate grid index cursors");
+
+    memcpy(cursor, starts, sizeof(uint32_t) * cellCount);
+
+    for (uint32_t i = 0; i < sphereCount; ++i)
+    {
+        const float cx = GLOBAL.Vulkan.sphereCRHost[i * 4u + 0u];
+        const float cy = GLOBAL.Vulkan.sphereCRHost[i * 4u + 1u];
+        const float cz = GLOBAL.Vulkan.sphereCRHost[i * 4u + 2u];
+        const float r = GLOBAL.Vulkan.sphereCRHost[i * 4u + 3u];
+        const float minx = cx - r;
+        const float maxx = cx + r;
+        const float miny = fmaxf(minW.y, cy - r);
+        const float maxy = cy + r;
+        const float minz = cz - r;
+        const float maxz = cz + r;
+
+        int ix0 = (int)floorf((minx - minW.x) * invCell);
+        int ix1 = (int)floorf((maxx - minW.x) * invCell);
+        int iy0 = (int)floorf((miny - minW.y) * invCell);
+        int iy1 = (int)floorf((maxy - minW.y) * invCell);
+        int iz0 = (int)floorf((minz - minW.z) * invCell);
+        int iz1 = (int)floorf((maxz - minW.z) * invCell);
+
+        if (ix0 < 0) { ix0 = 0; }
+        if (iy0 < 0) { iy0 = 0; }
+        if (iz0 < 0) { iz0 = 0; }
+        if (ix1 >= (int)dimX) { ix1 = (int)dimX - 1; }
+        if (iy1 >= (int)dimY) { iy1 = (int)dimY - 1; }
+        if (iz1 >= (int)dimZ) { iz1 = (int)dimZ - 1; }
+
+        for (int z = iz0; z <= iz1; ++z)
+        {
+            for (int y = iy0; y <= iy1; ++y)
+            {
+                for (int x = ix0; x <= ix1; ++x)
+                {
+                    const uint32_t cellIndex = (uint32_t)((z * (int)dimY + y) * (int)dimX + x);
+                    indices[cursor[cellIndex]++] = i;
+                }
+            }
+        }
+    }
+
+    const VkDeviceSize rangesBytes = sizeof(uint32_t) * 2u * cellCount;
+    const VkDeviceSize indicesBytes = sizeof(uint32_t) * (VkDeviceSize)indicesCapacity;
+
+    uint32_t *ranges = (uint32_t *)malloc((size_t)rangesBytes);
+    Assert(ranges != NULL, "Failed to allocate grid ranges");
+
+    for (uint32_t c = 0u; c < cellCount; ++c)
+    {
+        ranges[c * 2u + 0u] = starts[c];
+        ranges[c * 2u + 1u] = counts[c];
+    }
+
+    CreateOrResizeBuffer(rangesBytes, &GLOBAL.Vulkan.rt.gridRanges, &GLOBAL.Vulkan.rt.gridRangesAlloc);
+    CreateOrResizeBuffer(indicesBytes, &GLOBAL.Vulkan.rt.gridIndices, &GLOBAL.Vulkan.rt.gridIndicesAlloc);
+
+    ComputeDS ds = {
+        .targetView = GLOBAL.Vulkan.gradientImageView,
+        .targetSampler = GLOBAL.Vulkan.gradientSampler,
+        .sphereCR = GLOBAL.Vulkan.rt.sphereCR,
+        .sphereAlb = GLOBAL.Vulkan.rt.sphereAlb,
+        .hitT = GLOBAL.Vulkan.rt.hitT,
+        .hitN = GLOBAL.Vulkan.rt.hitN,
+        .accum = GLOBAL.Vulkan.rt.accum,
+        .spp = GLOBAL.Vulkan.rt.spp,
+        .epoch = GLOBAL.Vulkan.rt.epoch,
+        .gridRanges = GLOBAL.Vulkan.rt.gridRanges,
+        .gridIndices = GLOBAL.Vulkan.rt.gridIndices,
+    };
+
+    UpdateComputeDescriptorSet(&ds);
+
+    if (rangesBytes > 0)
+    {
+        vkCmdUpdateBuffer(cmd, GLOBAL.Vulkan.rt.gridRanges, 0, rangesBytes, ranges);
+    }
+
+    if (indicesBytes > 0)
+    {
+        vkCmdUpdateBuffer(cmd, GLOBAL.Vulkan.rt.gridIndices, 0, indicesBytes, indices);
+    }
+
+    VkBufferMemoryBarrier2 barriers[2] = {
+        {
+            .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+            .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+            .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            .dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT,
+            .buffer = GLOBAL.Vulkan.rt.gridRanges,
+            .offset = 0,
+            .size = VK_WHOLE_SIZE,
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+            .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+            .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            .dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT,
+            .buffer = GLOBAL.Vulkan.rt.gridIndices,
+            .offset = 0,
+            .size = VK_WHOLE_SIZE,
+        },
+    };
+
+    VkDependencyInfo dep = {
+        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+        .bufferMemoryBarrierCount = ARRAY_SIZE(barriers),
+        .pBufferMemoryBarriers = barriers,
+    };
+
+    vkCmdPipelineBarrier2(cmd, &dep);
+
+    free(counts);
+    free(starts);
+    free(cursor);
+    free(indices);
+    free(ranges);
+}
 
 static uint32_t WangHash(uint32_t value)
 {
@@ -198,6 +452,8 @@ void RtRecordFrame(VkCommandBuffer commandBuffer, uint32_t imageIndex, VkExtent2
     Assert(GLOBAL.Vulkan.rt.accum != VK_NULL_HANDLE, "Accum buffer is not ready");
     Assert(GLOBAL.Vulkan.rt.spp != VK_NULL_HANDLE, "Sample count buffer is not ready");
     Assert(GLOBAL.Vulkan.rt.epoch != VK_NULL_HANDLE, "Accumulation epoch buffer is not ready");
+    Assert(GLOBAL.Vulkan.rt.gridRanges != VK_NULL_HANDLE, "Grid range buffer is not ready");
+    Assert(GLOBAL.Vulkan.rt.gridIndices != VK_NULL_HANDLE, "Grid index buffer is not ready");
 
     VkResult resetResult = vkResetCommandBuffer(commandBuffer, 0);
     Assert(resetResult == VK_SUCCESS, "Failed to reset Vulkan command buffer");
@@ -307,6 +563,8 @@ void RtRecordFrame(VkCommandBuffer commandBuffer, uint32_t imageIndex, VkExtent2
                 vkCmdPipelineBarrier2(commandBuffer, &readyDependency);
             }
 
+            BuildUniformGrid(commandBuffer, placed);
+
             GLOBAL.Vulkan.sceneInitialized = true;
         }
         else
@@ -338,6 +596,12 @@ void RtRecordFrame(VkCommandBuffer commandBuffer, uint32_t imageIndex, VkExtent2
         .worldMax = { GLOBAL.Vulkan.worldMaxX, GLOBAL.Vulkan.worldMaxZ },
         .groundY = GLOBAL.Vulkan.groundY,
         ._pad5 = { 0.0f, 0.0f, 0.0f },
+        .gridDim = { GLOBAL.Vulkan.gridDimX, GLOBAL.Vulkan.gridDimY, GLOBAL.Vulkan.gridDimZ },
+        .showGrid = GLOBAL.Vulkan.showGrid ? 1u : 0u,
+        .gridMin = { GLOBAL.Vulkan.gridMinX, GLOBAL.Vulkan.gridMinY, GLOBAL.Vulkan.gridMinZ },
+        ._pad6 = 0.0f,
+        .gridInvCell = { GLOBAL.Vulkan.gridInvCellX, GLOBAL.Vulkan.gridInvCellY, GLOBAL.Vulkan.gridInvCellZ },
+        ._pad7 = 0.0f,
     };
 
     const uint32_t localSizeX = (GLOBAL.Vulkan.computeLocalSizeX > 0u) ? GLOBAL.Vulkan.computeLocalSizeX : VULKAN_COMPUTE_LOCAL_SIZE;

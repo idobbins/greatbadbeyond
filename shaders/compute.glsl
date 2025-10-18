@@ -8,10 +8,13 @@ layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z = 1) in;
 
 layout(binding = B_TARGET, rgba8) uniform writeonly image2D uTarget;
 
-layout(std430, binding = B_SPHERE_CR) buffer SphereCR  { vec4 sphereCR[];  };
+layout(std430, binding = B_SPHERE_CR)  buffer SphereCR  { vec4 sphereCR[];  };
 layout(std430, binding = B_SPHERE_ALB) buffer SphereAlb { vec4 sphereAlb[]; };
-layout(std430, binding = B_HIT_T) buffer HitTBuf { float hitT[]; };
-layout(std430, binding = B_HIT_N) buffer HitNBuf { vec4 hitN[]; };
+layout(std430, binding = B_HIT_T)      buffer HitTBuf   { float hitT[];     };
+layout(std430, binding = B_HIT_N)      buffer HitNBuf   { vec4  hitN[];     };
+
+layout(std430, binding = B_GRID_RANGES)  buffer GridRanges  { uvec2 gridRanges[];  };
+layout(std430, binding = B_GRID_INDICES) buffer GridIndices { uint  gridIndices[]; };
 
 layout(push_constant) uniform PC {
     uvec2 size;
@@ -31,6 +34,10 @@ layout(push_constant) uniform PC {
     vec2 worldMax;
     float groundY;
     float _pad5[3];
+
+    uvec3 gridDim; uint showGrid;
+    vec3  gridMin; float _pad6;
+    vec3  gridInvCell; float _pad7;
 } pc;
 
 const float kHuge = 1e30;
@@ -85,19 +92,204 @@ bool intersectPlaneY(vec3 ro, vec3 rd, float y, out float t, out vec3 n)
     return true;
 }
 
+bool intersectAABB(vec3 ro, vec3 rd, vec3 bmin, vec3 bmax, out float t0, out float t1)
+{
+    vec3 inv = 1.0 / rd;
+    vec3 tlo = (bmin - ro) * inv;
+    vec3 thi = (bmax - ro) * inv;
+    vec3 tminv = min(tlo, thi);
+    vec3 tmaxv = max(tlo, thi);
+    t0 = max(max(tminv.x, tminv.y), tminv.z);
+    t1 = min(min(tmaxv.x, tmaxv.y), tmaxv.z);
+    return t1 >= max(t0, 0.0);
+}
+
+uvec3 clampCell(ivec3 c)
+{
+    ivec3 maxC = ivec3(pc.gridDim) - ivec3(1);
+    ivec3 clamped = clamp(c, ivec3(0), maxC);
+    return uvec3(clamped);
+}
+
+uint cellIndex(uvec3 c)
+{
+    return (c.z * pc.gridDim.y + c.y) * pc.gridDim.x + c.x;
+}
+
+bool gridTraverseNearest(vec3 ro, vec3 rd, float tLimit, out float bestT, out vec3 bestN, out float bestId, bool anyHit)
+{
+    bestT = kHuge;
+    bestN = vec3(0.0);
+    bestId = -1.0;
+
+    if (pc.gridDim.x == 0u || pc.gridDim.y == 0u || pc.gridDim.z == 0u)
+    {
+        return false;
+    }
+
+    vec3 cellSize = vec3(1.0) / pc.gridInvCell;
+    vec3 gmin = pc.gridMin;
+    vec3 gmax = pc.gridMin + vec3(pc.gridDim) * cellSize;
+
+    float t0;
+    float t1;
+    if (!intersectAABB(ro, rd, gmin, gmax, t0, t1))
+    {
+        return false;
+    }
+
+    t1 = min(t1, tLimit);
+    float t = max(t0, 0.0);
+    vec3 p = ro + rd * t;
+    ivec3 startCell = ivec3(floor((p - gmin) * pc.gridInvCell));
+    uvec3 cell = clampCell(startCell);
+
+    ivec3 step = ivec3(sign(rd));
+    step = ivec3(step.x != 0 ? step.x : 1, step.y != 0 ? step.y : 1, step.z != 0 ? step.z : 1);
+    vec3 stepPositive = vec3(
+        (step.x > 0) ? 1.0 : 0.0,
+        (step.y > 0) ? 1.0 : 0.0,
+        (step.z > 0) ? 1.0 : 0.0);
+
+    vec3 nextBoundary = gmin + (vec3(cell) + stepPositive) * cellSize;
+    vec3 tMax = vec3(
+        (rd.x == 0.0) ? kHuge : (nextBoundary.x - ro.x) / rd.x,
+        (rd.y == 0.0) ? kHuge : (nextBoundary.y - ro.y) / rd.y,
+        (rd.z == 0.0) ? kHuge : (nextBoundary.z - ro.z) / rd.z);
+
+    vec3 tDelta = vec3(
+        (rd.x == 0.0) ? kHuge : cellSize.x / abs(rd.x),
+        (rd.y == 0.0) ? kHuge : cellSize.y / abs(rd.y),
+        (rd.z == 0.0) ? kHuge : cellSize.z / abs(rd.z));
+
+    while (t <= t1)
+    {
+        uint idx = cellIndex(cell);
+        uvec2 range = gridRanges[idx];
+        for (uint k = 0u; k < range.y; ++k)
+        {
+            uint si = gridIndices[range.x + k];
+            float ts;
+            vec3 ns;
+            if (intersectSphere(ro, rd, sphereCR[si], ts, ns) && ts > 0.0 && ts < bestT)
+            {
+                bestT = ts;
+                bestN = ns;
+                bestId = float(si + 1u);
+                if (anyHit && ts < t1)
+                {
+                    return true;
+                }
+            }
+        }
+
+        float tnx = tMax.x;
+        float tny = tMax.y;
+        float tnz = tMax.z;
+        if (bestT < min(tnx, min(tny, tnz)))
+        {
+            break;
+        }
+
+        if (tnx <= tny && tnx <= tnz)
+        {
+            t = tnx;
+            tMax.x += tDelta.x;
+            if (step.x > 0)
+            {
+                cell.x++;
+                if (cell.x >= pc.gridDim.x)
+                {
+                    break;
+                }
+            }
+            else
+            {
+                if (cell.x == 0u)
+                {
+                    break;
+                }
+                cell.x -= 1u;
+            }
+        }
+        else if (tny <= tnz)
+        {
+            t = tny;
+            tMax.y += tDelta.y;
+            if (step.y > 0)
+            {
+                cell.y++;
+                if (cell.y >= pc.gridDim.y)
+                {
+                    break;
+                }
+            }
+            else
+            {
+                if (cell.y == 0u)
+                {
+                    break;
+                }
+                cell.y -= 1u;
+            }
+        }
+        else
+        {
+            t = tnz;
+            tMax.z += tDelta.z;
+            if (step.z > 0)
+            {
+                cell.z++;
+                if (cell.z >= pc.gridDim.z)
+                {
+                    break;
+                }
+            }
+            else
+            {
+                if (cell.z == 0u)
+                {
+                    break;
+                }
+                cell.z -= 1u;
+            }
+        }
+    }
+
+    return (bestT < kHuge);
+}
+
 #if defined(KERNEL_PRIMARY_INTERSECT) || defined(KERNEL_SHADE_SHADOW)
 bool findClosestSphere(vec3 ro, vec3 rd, inout float bestT, inout vec3 bestN, inout float bestId)
 {
     bool hit = false;
-    for (uint i = 0u; i < pc.sphereCount; ++i)
+    if (pc.gridDim.x > 0u)
     {
-        float t; vec3 n;
-        if (intersectSphere(ro, rd, sphereCR[i], t, n) && (t < bestT))
+        float t;
+        vec3 n;
+        float id;
+        if (gridTraverseNearest(ro, rd, kHuge, t, n, id, false))
         {
             bestT = t;
             bestN = n;
-            bestId = float(i + 1u);
+            bestId = id;
             hit = true;
+        }
+    }
+
+    if (!hit)
+    {
+        for (uint i = 0u; i < pc.sphereCount; ++i)
+        {
+            float t;
+            vec3 n;
+            if (intersectSphere(ro, rd, sphereCR[i], t, n) && (t < bestT))
+            {
+                bestT = t;
+                bestN = n;
+                bestId = float(i + 1u);
+                hit = true;
+            }
         }
     }
     return hit;
@@ -204,6 +396,14 @@ bool occludedWorld(vec3 ro, vec3 rd, float maxT)
     if (intersectPlaneY(ro, rd, pc.groundY, tPlane, nPlane) && tPlane > 0.0 && tPlane < maxT)
     {
         return true;
+    }
+
+    if (pc.gridDim.x > 0u)
+    {
+        float t;
+        vec3 n;
+        float id;
+        return gridTraverseNearest(ro, rd, maxT, t, n, id, true);
     }
 
     for (uint i = 0u; i < pc.sphereCount; ++i)
@@ -337,6 +537,27 @@ void main()
 
     vec3 avg = sum / float(newCount);
     vec3 mapped = sqrt(clamp(avg, 0.0, 1.0));
+
+    if (pc.showGrid != 0u && pc.gridDim.x > 0u)
+    {
+        float denom = rd0.y;
+        if (abs(denom) > 1e-6)
+        {
+            float tg = (pc.groundY - ro.y) / denom;
+            if (tg > 0.0)
+            {
+                vec3 p = ro + rd0 * tg;
+                vec2 f = fract((p.xz - pc.gridMin.xz) * pc.gridInvCell.xz);
+                float w = 0.015;
+                bool onLine = (min(f.x, 1.0 - f.x) < w) || (min(f.y, 1.0 - f.y) < w);
+                if (onLine)
+                {
+                    mapped = mix(mapped, vec3(0.0, 1.0, 0.0), 0.85);
+                }
+            }
+        }
+    }
+
     imageStore(uTarget, ivec2(id), vec4(mapped, 1.0));
 }
 #endif

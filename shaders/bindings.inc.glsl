@@ -7,3 +7,6 @@
 #define B_ACCUM 6
 #define B_SPP 7
 #define B_EPOCH 8
+// Uniform grid (flattened)
+#define B_GRID_RANGES 9
+#define B_GRID_INDICES 10

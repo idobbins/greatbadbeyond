@@ -10,7 +10,7 @@ void VulkanCreateDescriptorInfra(void)
 
     if (GLOBAL.Vulkan.descriptorSetLayout == VK_NULL_HANDLE)
     {
-        VkDescriptorSetLayoutBinding bindings[9] = {
+        VkDescriptorSetLayoutBinding bindings[11] = {
             {
                 .binding = B_TARGET,
                 .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
@@ -65,6 +65,18 @@ void VulkanCreateDescriptorInfra(void)
                 .descriptorCount = 1,
                 .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
             },
+            {
+                .binding = B_GRID_RANGES,
+                .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .descriptorCount = 1,
+                .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+            },
+            {
+                .binding = B_GRID_INDICES,
+                .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .descriptorCount = 1,
+                .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+            },
         };
 
         VkDescriptorSetLayoutCreateInfo layoutInfo = {
@@ -81,9 +93,11 @@ void VulkanCreateDescriptorInfra(void)
 
     if (GLOBAL.Vulkan.descriptorPool == VK_NULL_HANDLE)
     {
-        VkDescriptorPoolSize poolSizes[9] = {
+        VkDescriptorPoolSize poolSizes[11] = {
             { .type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .descriptorCount = 1 },
             { .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1 },
+            { .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1 },
+            { .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1 },
             { .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1 },
             { .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1 },
             { .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1 },
@@ -155,6 +169,8 @@ void UpdateComputeDescriptorSet(const ComputeDS *resources)
     Assert(resources->accum != VK_NULL_HANDLE, "Accumulation buffer is not ready");
     Assert(resources->spp != VK_NULL_HANDLE, "Sample count buffer is not ready");
     Assert(resources->epoch != VK_NULL_HANDLE, "Accumulation epoch buffer is not ready");
+    Assert(resources->gridRanges != VK_NULL_HANDLE, "Grid range buffer is not ready");
+    Assert(resources->gridIndices != VK_NULL_HANDLE, "Grid index buffer is not ready");
 
     VkDescriptorImageInfo storage = {
         .imageView = resources->targetView,
@@ -209,7 +225,19 @@ void UpdateComputeDescriptorSet(const ComputeDS *resources)
         .range = VK_WHOLE_SIZE,
     };
 
-    VkWriteDescriptorSet writes[9] = {
+    VkDescriptorBufferInfo gridRanges = {
+        .buffer = resources->gridRanges,
+        .offset = 0,
+        .range = VK_WHOLE_SIZE,
+    };
+
+    VkDescriptorBufferInfo gridIndices = {
+        .buffer = resources->gridIndices,
+        .offset = 0,
+        .range = VK_WHOLE_SIZE,
+    };
+
+    VkWriteDescriptorSet writes[11] = {
         {
             .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
             .dstSet = GLOBAL.Vulkan.descriptorSet,
@@ -281,6 +309,22 @@ void UpdateComputeDescriptorSet(const ComputeDS *resources)
             .descriptorCount = 1,
             .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
             .pBufferInfo = &epoch,
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = GLOBAL.Vulkan.descriptorSet,
+            .dstBinding = B_GRID_RANGES,
+            .descriptorCount = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .pBufferInfo = &gridRanges,
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = GLOBAL.Vulkan.descriptorSet,
+            .dstBinding = B_GRID_INDICES,
+            .descriptorCount = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .pBufferInfo = &gridIndices,
         },
     };
 

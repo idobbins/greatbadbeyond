@@ -24,6 +24,12 @@ typedef struct PCPush {
     float worldMax[2];
     float groundY;
     float _pad5[3];
+    uint32_t gridDim[3];
+    uint32_t showGrid;
+    float gridMin[3];
+    float _pad6;
+    float gridInvCell[3];
+    float _pad7;
 } PCPush;
 
 void RtUpdateSpawnArea(void);
