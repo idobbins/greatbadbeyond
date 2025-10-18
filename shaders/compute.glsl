@@ -1,7 +1,6 @@
 #version 450
 
 #include "bindings.inc.glsl"
-#include "blue_noise.inc.glsl"
 
 layout(constant_id = 0) const uint WG_X = 16u;
 layout(constant_id = 1) const uint WG_Y = 16u;
@@ -47,37 +46,22 @@ layout(push_constant) uniform PC {
 const float kHuge = 1e30;
 const float kSurfaceBias = 1e-3;
 
-uint wangHash(uint s)
+float SafeRayComponent(float v)
 {
-    s = (s ^ 61u) ^ (s >> 16);
-    s *= 9u;
-    s ^= (s >> 4);
-    s *= 0x27d4eb2du;
-    s ^= (s >> 15);
-    return s;
+    float av = abs(v);
+    if (av < 1e-6)
+    {
+        return (v >= 0.0) ? 1e-6 : -1e-6;
+    }
+    return v;
 }
 
-float rnd(inout uint s)
+vec3 SafeRayDir(vec3 dir)
 {
-    s = wangHash(s);
-    return float(s) * (1.0 / 4294967296.0);
-}
-
-uint HashPixelSalt(uvec2 pixel, uint salt)
-{
-    uint x = pixel.x * 1664525u + 1013904223u;
-    uint y = pixel.y * 22695477u + 1u;
-    return wangHash(x ^ y ^ salt);
-}
-
-vec2 FetchBlueNoise(uvec2 pixel, uint salt)
-{
-    const uint mask = kBlueNoiseDim - 1u;
-    uint h = HashPixelSalt(pixel, salt);
-    uint x = (pixel.x + h) & mask;
-    uint y = (pixel.y + (h * 73u)) & mask;
-    uint index = y * kBlueNoiseDim + x;
-    return kBlueNoise[index];
+    return vec3(
+        SafeRayComponent(dir.x),
+        SafeRayComponent(dir.y),
+        SafeRayComponent(dir.z));
 }
 
 vec3 computeRayDir(uvec2 pix)
@@ -100,9 +84,26 @@ bool intersectSphere(vec3 ro, vec3 rd, vec4 cr, out float t, out vec3 n)
     {
         return false;
     }
-    h = sqrt(h);
-    float t0 = -b - h;
-    float t1 = -b + h;
+    float sqrtH = sqrt(h);
+    float t0;
+    float t1;
+    float q = (b > 0.0) ? (-b - sqrtH) : (-b + sqrtH);
+    if (abs(q) < 1e-6)
+    {
+        t0 = -b - sqrtH;
+        t1 = -b + sqrtH;
+    }
+    else
+    {
+        t0 = q;
+        t1 = c / q;
+    }
+    if (t0 > t1)
+    {
+        float temp = t0;
+        t0 = t1;
+        t1 = temp;
+    }
     t = (t0 > 0.0) ? t0 : ((t1 > 0.0) ? t1 : -1.0);
     if (t <= 0.0)
     {
@@ -131,7 +132,8 @@ bool intersectPlaneY(vec3 ro, vec3 rd, float y, out float t, out vec3 n)
 
 bool intersectAABB(vec3 ro, vec3 rd, vec3 bmin, vec3 bmax, out float t0, out float t1)
 {
-    vec3 inv = 1.0 / rd;
+    vec3 dir = SafeRayDir(rd);
+    vec3 inv = 1.0 / dir;
     vec3 tlo = (bmin - ro) * inv;
     vec3 thi = (bmax - ro) * inv;
     vec3 tminv = min(tlo, thi);
@@ -181,15 +183,21 @@ bool traverseFineCells(vec3 ro, vec3 rd, float tStart, float tEnd, uvec3 coarseC
     vec3 stepPositive = vec3(step.x > 0 ? 1.0 : 0.0, step.y > 0 ? 1.0 : 0.0, step.z > 0 ? 1.0 : 0.0);
 
     vec3 nextBoundary = pc.gridMin + (vec3(cell) + stepPositive) * cellSize;
+    float safeRx = SafeRayComponent(rd.x);
+    float safeRy = SafeRayComponent(rd.y);
+    float safeRz = SafeRayComponent(rd.z);
+    bool axisLockedX = abs(rd.x) < 1e-6;
+    bool axisLockedY = abs(rd.y) < 1e-6;
+    bool axisLockedZ = abs(rd.z) < 1e-6;
     vec3 tMax = vec3(
-        (rd.x == 0.0) ? kHuge : (nextBoundary.x - ro.x) / rd.x,
-        (rd.y == 0.0) ? kHuge : (nextBoundary.y - ro.y) / rd.y,
-        (rd.z == 0.0) ? kHuge : (nextBoundary.z - ro.z) / rd.z);
+        axisLockedX ? kHuge : (nextBoundary.x - ro.x) / safeRx,
+        axisLockedY ? kHuge : (nextBoundary.y - ro.y) / safeRy,
+        axisLockedZ ? kHuge : (nextBoundary.z - ro.z) / safeRz);
 
     vec3 tDelta = vec3(
-        (rd.x == 0.0) ? kHuge : cellSize.x / abs(rd.x),
-        (rd.y == 0.0) ? kHuge : cellSize.y / abs(rd.y),
-        (rd.z == 0.0) ? kHuge : cellSize.z / abs(rd.z));
+        axisLockedX ? kHuge : cellSize.x / abs(safeRx),
+        axisLockedY ? kHuge : cellSize.y / abs(safeRy),
+        axisLockedZ ? kHuge : cellSize.z / abs(safeRz));
 
     while (t <= tEnd)
     {
@@ -327,15 +335,21 @@ bool gridTraverseNearest(vec3 ro, vec3 rd, float tLimit, out float bestT, out ve
     vec3 stepPositive = vec3(step.x > 0 ? 1.0 : 0.0, step.y > 0 ? 1.0 : 0.0, step.z > 0 ? 1.0 : 0.0);
 
     vec3 nextBoundary = gmin + (vec3(cell) + stepPositive) * cellSize;
+    float safeRx = SafeRayComponent(rd.x);
+    float safeRy = SafeRayComponent(rd.y);
+    float safeRz = SafeRayComponent(rd.z);
+    bool axisLockedX = abs(rd.x) < 1e-6;
+    bool axisLockedY = abs(rd.y) < 1e-6;
+    bool axisLockedZ = abs(rd.z) < 1e-6;
     vec3 tMax = vec3(
-        (rd.x == 0.0) ? kHuge : (nextBoundary.x - ro.x) / rd.x,
-        (rd.y == 0.0) ? kHuge : (nextBoundary.y - ro.y) / rd.y,
-        (rd.z == 0.0) ? kHuge : (nextBoundary.z - ro.z) / rd.z);
+        axisLockedX ? kHuge : (nextBoundary.x - ro.x) / safeRx,
+        axisLockedY ? kHuge : (nextBoundary.y - ro.y) / safeRy,
+        axisLockedZ ? kHuge : (nextBoundary.z - ro.z) / safeRz);
 
     vec3 tDelta = vec3(
-        (rd.x == 0.0) ? kHuge : cellSize.x / abs(rd.x),
-        (rd.y == 0.0) ? kHuge : cellSize.y / abs(rd.y),
-        (rd.z == 0.0) ? kHuge : cellSize.z / abs(rd.z));
+        axisLockedX ? kHuge : cellSize.x / abs(safeRx),
+        axisLockedY ? kHuge : cellSize.y / abs(safeRy),
+        axisLockedZ ? kHuge : cellSize.z / abs(safeRz));
 
     while (t <= t1)
     {
@@ -507,6 +521,22 @@ void main()
 #endif
 
 #ifdef KERNEL_SHADE_SHADOW
+uint wangHash(uint s)
+{
+    s = (s ^ 61u) ^ (s >> 16);
+    s *= 9u;
+    s ^= (s >> 4);
+    s *= 0x27d4eb2du;
+    s ^= (s >> 15);
+    return s;
+}
+
+float rnd(inout uint s)
+{
+    s = wangHash(s);
+    return float(s) * (1.0 / 4294967296.0);
+}
+
 layout(std430, binding = B_ACCUM) buffer AccumBuf { vec4 accum[]; };
 layout(std430, binding = B_SPP) buffer SppBuf { uint spp[]; };
 layout(std430, binding = B_EPOCH) buffer EpochBuf { uint epochBuf[]; };
@@ -593,10 +623,10 @@ void onb(in vec3 n, out vec3 t, out vec3 b)
     b = cross(n, t);
 }
 
-vec3 sampleCosineHemisphere(inout uint s, vec2 cp)
+vec3 sampleCosineHemisphere(inout uint s)
 {
-    float u1 = fract(rnd(s) + cp.x);
-    float u2 = fract(rnd(s) + cp.y);
+    float u1 = rnd(s);
+    float u2 = rnd(s);
     float r = sqrt(u1);
     float phi = 6.28318530718 * u2;
     float x = r * cos(phi);
@@ -620,12 +650,9 @@ void main()
     uint pix = id.y * pc.size.x + id.x;
 
     uint seed = uint(pc.frame) ^ (pix * 0x9e3779b9u) ^ 0xA511E9B3u;
-    uint jitterSalt = pc.frame + pc.accumulationEpoch * 131u;
-    vec2 jitterNoise = FetchBlueNoise(id, jitterSalt);
 
     vec2 res = vec2(max(pc.size.x, 1u), max(pc.size.y, 1u));
-    vec2 jitterBase = vec2(rnd(seed), rnd(seed));
-    vec2 jitter = fract(jitterBase + jitterNoise) - 0.5;
+    vec2 jitter = vec2(rnd(seed), rnd(seed)) - 0.5;
     vec2 uv = ((vec2(id) + 0.5 + jitter) / res) * 2.0 - 1.0;
     uv.x *= pc.aspect;
     float tcam = pc.tanHalfFovY;
@@ -664,19 +691,14 @@ void main()
         vec3 T;
         vec3 B;
         onb(n, T, B);
-        uint brdfSalt = pc.frame * 17u + pc.accumulationEpoch * 97u + uint(depth) * 131u;
-        vec2 brdfNoise = FetchBlueNoise(id + uvec2(uint(depth) * 19u, uint(depth) * 53u), brdfSalt);
-        vec3 wiL = sampleCosineHemisphere(seed, brdfNoise);
+        vec3 wiL = sampleCosineHemisphere(seed);
         vec3 wi = normalize(wiL.x * T + wiL.y * B + wiL.z * n);
         beta *= alb;
 
         if (depth >= RR_DEPTH)
         {
             float p = clamp(max(max(beta.r, beta.g), beta.b), 0.05, 0.99);
-            uint rrSalt = brdfSalt + 37u;
-            float rrNoise = FetchBlueNoise(id, rrSalt).x;
-            float rrSample = fract(rnd(seed) + rrNoise);
-            if (rrSample > p)
+            if (rnd(seed) > p)
             {
                 break;
             }
