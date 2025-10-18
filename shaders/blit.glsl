@@ -30,20 +30,35 @@ layout(location = 0) out vec4 outColor;
 
 layout(binding = B_SAMPLER) uniform sampler2D uGradient;
 
-// How much to blend the blurred image over the original.
-// Tweak between 0.20–0.45 to taste.
+// Blend factor for applying tent filtered result over the original
 #ifndef POST_AA_STRENGTH
 #define POST_AA_STRENGTH 0.35
 #endif
+
+// Eight by eight Bayer matrix mapped to [-0.5, +0.5]
+float bayer8x8(ivec2 p)
+{
+    const int M[64] = int[64](
+         0, 32,  8, 40,  2, 34, 10, 42,
+        48, 16, 56, 24, 50, 18, 58, 26,
+        12, 44,  4, 36, 14, 46,  6, 38,
+        60, 28, 52, 20, 62, 30, 54, 22,
+         3, 35, 11, 43,  1, 33,  9, 41,
+        51, 19, 59, 27, 49, 17, 57, 25,
+        15, 47,  7, 39, 13, 45,  5, 37,
+        63, 31, 55, 23, 61, 29, 53, 21
+    );
+    int index = (p.y & 7) * 8 + (p.x & 7);
+    return (float(M[index]) / 63.0) - 0.5;
+}
 
 void main()
 {
     vec4 c = texture(uGradient, vUV);
 
-    // 3x3 tent filter: (1 2 1; 2 4 2; 1 2 1) / 16
-    // Cheap, stable, and good at killing moiré.
-    ivec2 sz = textureSize(uGradient, 0);
-    vec2 texel = 1.0 / vec2(max(sz, ivec2(1)));
+    // Apply 3x3 tent weights to reduce residual moire shimmer
+    ivec2 textureSize0 = textureSize(uGradient, 0);
+    vec2 texel = 1.0 / vec2(max(textureSize0, ivec2(1)));
 
     vec2 dx = vec2(texel.x, 0.0);
     vec2 dy = vec2(0.0, texel.y);
@@ -62,6 +77,16 @@ void main()
                  (s1 + s3 + s5 + s7) * 2.0 +
                  (s0 + s2 + s6 + s8)) * (1.0 / 16.0);
 
-    outColor = mix(c, tent, POST_AA_STRENGTH);
+    vec4 filtered = mix(c, tent, POST_AA_STRENGTH);
+
+    // The compute stage outputs gamma corrected color
+    vec3 rgb = filtered.rgb;
+
+    // Apply ordered dithering with amplitude close to one UNORM LSB
+    float dither = bayer8x8(ivec2(gl_FragCoord.xy));
+    const float amplitude = 1.0 / 255.0;
+    rgb += dither * amplitude;
+
+    outColor = vec4(clamp(rgb, 0.0, 1.0), 1.0);
 }
 #endif
