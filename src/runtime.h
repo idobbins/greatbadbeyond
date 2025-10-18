@@ -36,7 +36,7 @@
 #define VULKAN_FRAMES_IN_FLIGHT 2
 #define VULKAN_COMPUTE_LOCAL_SIZE 16
 #define VULKAN_MAX_PATH_LENGTH 512
-#define RT_MAX_SPHERES 100000u
+#define RT_MAX_SPHERES 1000000u
 #define FRAME_TIME_SAMPLES 240
 
 typedef struct VulkanBuffers {
@@ -140,6 +140,7 @@ typedef struct GlobalData {
         uint32_t sphereCount;
         float sphereMinRadius;
         float sphereMaxRadius;
+        float sphereTargetDensity;
         float sphereCRHost[RT_MAX_SPHERES * 4];
         float sphereAlbHost[RT_MAX_SPHERES * 4];
         float groundY;

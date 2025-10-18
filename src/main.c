@@ -169,6 +169,7 @@ static void InitWindow(void)
     GLOBAL.Vulkan.sphereCount = RT_MAX_SPHERES;
     GLOBAL.Vulkan.sphereMinRadius = 0.15f;
     GLOBAL.Vulkan.sphereMaxRadius = 0.35f;
+    GLOBAL.Vulkan.sphereTargetDensity = 0.0f;
     GLOBAL.Vulkan.groundY = 0.0f;
     GLOBAL.Vulkan.worldMinX = 0.0f;
     GLOBAL.Vulkan.worldMinZ = 0.0f;

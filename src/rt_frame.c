@@ -372,9 +372,26 @@ static uint32_t GenerateSphereData(uint32_t seed)
     Assert(baseMaxX > baseMinX, "Sphere spawn range X is invalid");
     Assert(baseMaxZ > baseMinZ, "Sphere spawn range Z is invalid");
 
-    const uint32_t maxAttempts = 256u;
+    const uint32_t maxAttempts = 1024u;
     uint32_t rng = seed ^ 0x9e3779b9u;
     uint32_t placed = 0u;
+
+    float spanX = baseMaxX - baseMinX;
+    float spanZ = baseMaxZ - baseMinZ;
+    float cellSize = fmaxf(maxRadius * 2.0f, 0.05f);
+    Assert(spanX > 0.0f && spanZ > 0.0f, "Sphere spawn area is invalid");
+
+    uint32_t gridDimX = (uint32_t)fmaxf(1.0f, ceilf(spanX / cellSize));
+    uint32_t gridDimZ = (uint32_t)fmaxf(1.0f, ceilf(spanZ / cellSize));
+    uint32_t gridCellCount = gridDimX * gridDimZ;
+
+    uint32_t *cellHeads = (uint32_t *)malloc(sizeof(uint32_t) * gridCellCount);
+    Assert(cellHeads != NULL, "Failed to allocate sphere occupancy grid");
+    uint32_t *cellNext = (uint32_t *)malloc(sizeof(uint32_t) * desiredCount);
+    Assert(cellNext != NULL, "Failed to allocate sphere occupancy links");
+
+    memset(cellHeads, 0xFF, sizeof(uint32_t) * gridCellCount);
+    memset(cellNext, 0xFF, sizeof(uint32_t) * desiredCount);
 
     for (uint32_t i = 0; i < desiredCount; ++i)
     {
@@ -398,18 +415,50 @@ static uint32_t GenerateSphereData(uint32_t seed)
             float x = Lerp(minX, maxX, Rand01(&rng));
             float z = Lerp(minZ, maxZ, Rand01(&rng));
 
+            int cellX = (int)floorf((x - baseMinX) / cellSize);
+            int cellZ = (int)floorf((z - baseMinZ) / cellSize);
+            if (cellX < 0) { cellX = 0; }
+            if (cellZ < 0) { cellZ = 0; }
+            if (cellX >= (int)gridDimX) { cellX = (int)gridDimX - 1; }
+            if (cellZ >= (int)gridDimZ) { cellZ = (int)gridDimZ - 1; }
+
             bool overlaps = false;
-            for (uint32_t j = 0; j < placed; ++j)
+            for (int nz = cellZ - 1; nz <= cellZ + 1; ++nz)
             {
-                float ox = GLOBAL.Vulkan.sphereCRHost[j * 4u + 0u];
-                float oz = GLOBAL.Vulkan.sphereCRHost[j * 4u + 2u];
-                float oradius = GLOBAL.Vulkan.sphereCRHost[j * 4u + 3u];
-                float dx = x - ox;
-                float dz = z - oz;
-                float minDist = radius + oradius;
-                if ((dx * dx + dz * dz) < (minDist * minDist))
+                if ((nz < 0) || (nz >= (int)gridDimZ))
                 {
-                    overlaps = true;
+                    continue;
+                }
+                for (int nx = cellX - 1; nx <= cellX + 1; ++nx)
+                {
+                    if ((nx < 0) || (nx >= (int)gridDimX))
+                    {
+                        continue;
+                    }
+                    uint32_t cellIndex = (uint32_t)nz * gridDimX + (uint32_t)nx;
+                    uint32_t head = cellHeads[cellIndex];
+                    while (head != UINT32_MAX)
+                    {
+                        float ox = GLOBAL.Vulkan.sphereCRHost[head * 4u + 0u];
+                        float oz = GLOBAL.Vulkan.sphereCRHost[head * 4u + 2u];
+                        float oradius = GLOBAL.Vulkan.sphereCRHost[head * 4u + 3u];
+                        float dx = x - ox;
+                        float dz = z - oz;
+                        float minDist = radius + oradius;
+                        if ((dx * dx + dz * dz) < (minDist * minDist))
+                        {
+                            overlaps = true;
+                            break;
+                        }
+                        head = cellNext[head];
+                    }
+                    if (overlaps)
+                    {
+                        break;
+                    }
+                }
+                if (overlaps)
+                {
                     break;
                 }
             }
@@ -433,6 +482,10 @@ static uint32_t GenerateSphereData(uint32_t seed)
             GLOBAL.Vulkan.sphereAlbHost[i * 4u + 2u] = blue;
             GLOBAL.Vulkan.sphereAlbHost[i * 4u + 3u] = 1.0f;
 
+            uint32_t targetCell = (uint32_t)cellZ * gridDimX + (uint32_t)cellX;
+            cellNext[i] = cellHeads[targetCell];
+            cellHeads[targetCell] = i;
+
             placed++;
             success = true;
             break;
@@ -449,6 +502,9 @@ static uint32_t GenerateSphereData(uint32_t seed)
     {
         LogWarn("Placed %u spheres out of %u requested", placed, desiredCount);
     }
+
+    free(cellHeads);
+    free(cellNext);
 
     GLOBAL.Vulkan.sphereCount = placed;
     return placed;
@@ -468,27 +524,36 @@ static void UpdateSpawnArea(void)
         baseCellSize = radius * 2.05f;
     }
 
+    float density = GLOBAL.Vulkan.sphereTargetDensity;
+    if (density <= 0.0f)
+    {
+        float cellArea = baseCellSize * baseCellSize;
+        if (cellArea <= 0.0f)
+        {
+            cellArea = 1.0f;
+        }
+        density = 1.0f / cellArea;
+    }
+    density = fmaxf(density, 1e-6f);
+
     uint32_t count = GLOBAL.Vulkan.sphereTargetCount;
-    if (count < 16)
+    if (count == 0u)
     {
-        count = 16;
+        count = 1u;
     }
 
-    float area = (float)count * baseCellSize * baseCellSize;
-    float side = sqrtf(area);
-    float half = side * 0.5f;
-
-    if (GLOBAL.Vulkan.worldMinX >= GLOBAL.Vulkan.worldMaxX)
+    float area = (float)count / density;
+    if (area <= 0.0f)
     {
-        GLOBAL.Vulkan.worldMinX = -half;
-        GLOBAL.Vulkan.worldMaxX = half;
+        area = baseCellSize * baseCellSize;
     }
 
-    if (GLOBAL.Vulkan.worldMinZ >= GLOBAL.Vulkan.worldMaxZ)
-    {
-        GLOBAL.Vulkan.worldMinZ = -half;
-        GLOBAL.Vulkan.worldMaxZ = half;
-    }
+    float half = 0.5f * sqrtf(area);
+
+    GLOBAL.Vulkan.worldMinX = -half;
+    GLOBAL.Vulkan.worldMaxX = half;
+    GLOBAL.Vulkan.worldMinZ = -half;
+    GLOBAL.Vulkan.worldMaxZ = half;
 }
 
 void RtUpdateSpawnArea(void)
