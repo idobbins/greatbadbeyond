@@ -1,7 +1,7 @@
 #version 450
-#extension GL_ARB_gpu_shader_int64 : enable
 
 #include "bindings.inc.glsl"
+#include "blue_noise.inc.glsl"
 
 layout(constant_id = 0) const uint WG_X = 16u;
 layout(constant_id = 1) const uint WG_Y = 16u;
@@ -46,76 +46,38 @@ layout(push_constant) uniform PC {
 
 const float kHuge = 1e30;
 const float kSurfaceBias = 1e-3;
-const float kOneOverUint = 1.0 / 4294967296.0;
 
-const uint64_t kPcgMultiplier = 6364136223846793005ul;
-
-struct Pcg32State {
-    uint64_t state;
-    uint64_t inc;
-};
-
-uint pcg32Advance(inout Pcg32State rng)
+uint wangHash(uint s)
 {
-    uint64_t oldState = rng.state;
-    rng.state = oldState * kPcgMultiplier + rng.inc;
-    uint xorshifted = uint(((oldState >> 18u) ^ oldState) >> 27u);
-    uint rot = uint(oldState >> 59u);
-    return (xorshifted >> rot) | (xorshifted << ((uint(0u) - rot) & 31u));
+    s = (s ^ 61u) ^ (s >> 16);
+    s *= 9u;
+    s ^= (s >> 4);
+    s *= 0x27d4eb2du;
+    s ^= (s >> 15);
+    return s;
 }
 
-void pcg32Seed(out Pcg32State rng, uint64_t initState, uint64_t initSeq)
+float rnd(inout uint s)
 {
-    rng.state = 0ul;
-    rng.inc = (initSeq << 1u) | 1ul;
-    pcg32Advance(rng);
-    rng.state += initState;
-    pcg32Advance(rng);
+    s = wangHash(s);
+    return float(s) * (1.0 / 4294967296.0);
 }
 
-float pcg32Float(inout Pcg32State rng)
+uint HashPixelSalt(uvec2 pixel, uint salt)
 {
-    return float(pcg32Advance(rng)) * kOneOverUint;
+    uint x = pixel.x * 1664525u + 1013904223u;
+    uint y = pixel.y * 22695477u + 1u;
+    return wangHash(x ^ y ^ salt);
 }
 
-vec2 pcg32Vec2(inout Pcg32State rng)
+vec2 FetchBlueNoise(uvec2 pixel, uint salt)
 {
-    return vec2(pcg32Float(rng), pcg32Float(rng));
-}
-
-Pcg32State CreatePixelRng(uint pix)
-{
-    Pcg32State rng;
-    uint64_t pixel = uint64_t(pix);
-    uint64_t frameMix = (uint64_t(pc.accumulationEpoch) << 32u) ^ uint64_t(pc.frame);
-    uint64_t initState = frameMix ^ (pixel * 0x9E3779B97F4A7C15ul + 0xD2B74407B1CE6E93ul);
-    uint64_t initSeq = pixel ^ (frameMix >> 1u);
-    pcg32Seed(rng, initState, initSeq);
-    pcg32Advance(rng);
-    pcg32Advance(rng);
-    return rng;
-}
-
-Pcg32State CreateFrameRng(void)
-{
-    Pcg32State rng;
-    uint64_t frameKey = (uint64_t(pc.frame) << 32u) | uint64_t(pc.accumulationEpoch);
-    uint64_t initState = frameKey ^ 0xC0EF4D7A2B83A9D1ul;
-    uint64_t initSeq = frameKey ^ 0xDA3E39CB94B95BDBul;
-    pcg32Seed(rng, initState, initSeq);
-    pcg32Advance(rng);
-    pcg32Advance(rng);
-    return rng;
-}
-
-float sample1D(inout Pcg32State rng, float offset)
-{
-    return fract(pcg32Float(rng) + offset);
-}
-
-vec2 sample2D(inout Pcg32State rng, vec2 offset)
-{
-    return fract(pcg32Vec2(rng) + offset);
+    const uint mask = kBlueNoiseDim - 1u;
+    uint h = HashPixelSalt(pixel, salt);
+    uint x = (pixel.x + h) & mask;
+    uint y = (pixel.y + (h * 73u)) & mask;
+    uint index = y * kBlueNoiseDim + x;
+    return kBlueNoise[index];
 }
 
 vec3 computeRayDir(uvec2 pix)
@@ -631,14 +593,15 @@ void onb(in vec3 n, out vec3 t, out vec3 b)
     b = cross(n, t);
 }
 
-vec3 sampleCosineHemisphere(inout Pcg32State rng, vec2 offset)
+vec3 sampleCosineHemisphere(inout uint s, vec2 cp)
 {
-    vec2 u = sample2D(rng, offset);
-    float r = sqrt(u.x);
-    float phi = 6.28318530718 * u.y;
+    float u1 = fract(rnd(s) + cp.x);
+    float u2 = fract(rnd(s) + cp.y);
+    float r = sqrt(u1);
+    float phi = 6.28318530718 * u2;
     float x = r * cos(phi);
     float y = r * sin(phi);
-    float z = sqrt(max(0.0, 1.0 - u.x));
+    float z = sqrt(max(0.0, 1.0 - u1));
     return vec3(x, y, z);
 }
 
@@ -656,16 +619,13 @@ void main()
     }
     uint pix = id.y * pc.size.x + id.x;
 
-    Pcg32State frameRng = CreateFrameRng();
-    vec2 cpJitter = sample2D(frameRng, vec2(0.0));
-    vec2 cpBrdf = sample2D(frameRng, vec2(0.0));
-    float cpScalar = sample1D(frameRng, 0.0);
-
-    Pcg32State rng = CreatePixelRng(pix);
+    uint seed = uint(pc.frame) ^ (pix * 0x9e3779b9u) ^ 0xA511E9B3u;
+    uint jitterSalt = pc.frame + pc.accumulationEpoch * 131u;
+    vec2 jitterNoise = FetchBlueNoise(id, jitterSalt);
 
     vec2 res = vec2(max(pc.size.x, 1u), max(pc.size.y, 1u));
-    vec2 jitterSample = sample2D(rng, cpJitter);
-    vec2 jitter = jitterSample - 0.5;
+    vec2 jitterBase = vec2(rnd(seed), rnd(seed));
+    vec2 jitter = fract(jitterBase + jitterNoise) - 0.5;
     vec2 uv = ((vec2(id) + 0.5 + jitter) / res) * 2.0 - 1.0;
     uv.x *= pc.aspect;
     float tcam = pc.tanHalfFovY;
@@ -704,14 +664,19 @@ void main()
         vec3 T;
         vec3 B;
         onb(n, T, B);
-        vec3 wiL = sampleCosineHemisphere(rng, cpBrdf);
+        uint brdfSalt = pc.frame * 17u + pc.accumulationEpoch * 97u + uint(depth) * 131u;
+        vec2 brdfNoise = FetchBlueNoise(id + uvec2(uint(depth) * 19u, uint(depth) * 53u), brdfSalt);
+        vec3 wiL = sampleCosineHemisphere(seed, brdfNoise);
         vec3 wi = normalize(wiL.x * T + wiL.y * B + wiL.z * n);
         beta *= alb;
 
         if (depth >= RR_DEPTH)
         {
             float p = clamp(max(max(beta.r, beta.g), beta.b), 0.05, 0.99);
-            if (sample1D(rng, cpScalar) > p)
+            uint rrSalt = brdfSalt + 37u;
+            float rrNoise = FetchBlueNoise(id, rrSalt).x;
+            float rrSample = fract(rnd(seed) + rrNoise);
+            if (rrSample > p)
             {
                 break;
             }
