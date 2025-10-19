@@ -8,21 +8,8 @@
 #include <iostream>
 #include <mutex>
 #include <span>
-#include <string_view>
 
-template<>
-struct Config<Window>
-{
-    uint32_t width = 1280;
-    uint32_t height = 720;
-    std::string_view title = "callandor";
-    bool resizable = false;
-};
-
-struct Window
-{
-    GLFWwindow *handle = nullptr;
-};
+using namespace std;
 
 static bool glfwInitialized = false;
 
@@ -34,7 +21,7 @@ static GLFWwindow *CreateGlfwWindow(const Config<Window> &config);
 void ErrorCallback(int code, const char *desc)
 {
     const char *message = desc != nullptr ? desc : "no description";
-    std::cerr << "[glfw][error " << code << "] " << message << '\n';
+    cerr << "[glfw][error " << code << "] " << message << '\n';
 }
 
 Window Create(const Config<Window> &config)
@@ -74,35 +61,40 @@ bool IsReady(Window &window)
     return window.handle != nullptr;
 }
 
+bool IsKeyPressed(Window &window, int key)
+{
+    if (window.handle == nullptr) {
+        return false;
+    }
+
+    int state = glfwGetKey(window.handle, key);
+    return state == GLFW_PRESS;
+}
+
 void Poll(Window &window)
 {
     (void)window;
     glfwPollEvents();
 }
 
-void FramebufferSize(const Window &window, uint32_t &width, uint32_t &height)
+std::pair<uint32_t, uint32_t> FramebufferSize(const Window &window)
 {
+    auto out = make_pair(0, 0);
     if (window.handle == nullptr) {
-        width = 0;
-        height = 0;
-        return;
+        return out;
     }
 
-    int framebufferWidth = 0;
-    int framebufferHeight = 0;
-    glfwGetFramebufferSize(window.handle, &framebufferWidth, &framebufferHeight);
+    glfwGetFramebufferSize(window.handle, &out.first, &out.second);
 
-    width = static_cast<uint32_t>(framebufferWidth);
-    height = static_cast<uint32_t>(framebufferHeight);
+    return out;
 }
 
-template<>
 std::span<const PlatformExtension> Enumerate()
 {
     InitializeGlfwContext();
 
     static std::array<const char *, 8> cache{};
-    static uint32_t count = 0;
+    static std::uint32_t count = 0;
     static std::once_flag once;
 
     std::call_once(once, [] {
@@ -111,7 +103,7 @@ std::span<const PlatformExtension> Enumerate()
         Assert(count > 0, "glfwGetRequiredInstanceExtensions returned no extensions");
         Assert(count <= cache.size(), "Too many GLFW-required extensions for cache");
 
-        for (uint32_t index = 0; index < count; ++index) {
+        for (std::uint32_t index = 0; index < count; ++index) {
             cache[index] = extensions[index];
         }
     });
