@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <span>
 
 //------------------------------------------------------------------------------------
@@ -9,7 +10,7 @@
 template<typename T>struct Config;
 
 struct Window;
-using PlatformExtension = const char *const;
+using PlatformExtension = const char *;
 
 // Vulkan (c library) forward declarations
 struct VkInstance_T;
@@ -35,7 +36,9 @@ void Destroy(Window &window);
 void ErrorCallback(int error, const char *description);
 bool ShouldClose(Window &window);
 bool IsReady(Window &window);
-// std::span<PlatformExtension> Enumerate();
+void Poll(Window &window);
+void FramebufferSize(const Window &window, uint32_t &width, uint32_t &height);
+// std::span<const PlatformExtension> Enumerate(); instantiated via type specialization
 
 //------------------------------------------------------------------------------------
 // Vulkan Functions (Module: vulkan)
