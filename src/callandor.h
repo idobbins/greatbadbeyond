@@ -14,6 +14,8 @@ struct Window;
 struct VkInstance_T;
 typedef VkInstance_T* VkInstance;
 
+struct VkExtensionProperties;
+
 struct VkSurfaceKHR_T;
 typedef VkSurfaceKHR_T *VkSurfaceKHR;
 
@@ -45,6 +47,10 @@ void Destroy(VkInstance &instance);
 VkSurfaceKHR Create(const Config<VkSurfaceKHR> &config);
 void Destroy(VkSurfaceKHR &surface);
 
-std::span<const VkPhysicalDevice> Enumerate(const VkInstance &instance);
+template <typename T>
+std::span<const T> Enumerate();
+
+template <typename T>
+std::span<const T> Enumerate(const VkInstance &instance);
 
 // Shader management functions

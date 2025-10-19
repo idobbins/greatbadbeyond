@@ -9,7 +9,25 @@
 
 using namespace std;
 
-span<const VkPhysicalDevice> Enumerate(const VkInstance &instance) {
+template <>
+span<const VkExtensionProperties> Enumerate()
+{
+    static array<VkExtensionProperties, 256> cache{};
+    static uint32_t count = 0;
+    static once_flag once;
+
+    call_once(once, [] {
+        vkEnumerateInstanceExtensionProperties(nullptr, &count, nullptr);
+        Assert(count <= cache.size(), "Too many instance extensions for cache");
+        vkEnumerateInstanceExtensionProperties(nullptr, &count, cache.data());
+    });
+
+    return {cache.data(), count};
+}
+
+template <>
+span<const VkPhysicalDevice> Enumerate(const VkInstance &instance)
+{
     static array<VkPhysicalDevice, MaxPhysicalDevices> cache{};
     static uint32_t count = 0;
     static once_flag once;
