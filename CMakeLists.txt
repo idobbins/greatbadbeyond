@@ -5,11 +5,11 @@ if(WIN32)
       CACHE FILEPATH "LLVM resource compiler" FORCE)
 endif()
 
-project(callandor LANGUAGES C CXX)
+project(callandor LANGUAGES CXX)
 
-set(CMAKE_C_STANDARD 17)
-set(CMAKE_C_STANDARD_REQUIRED ON)
-set(CMAKE_C_EXTENSIONS OFF)
+set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 include(FetchContent)
@@ -29,7 +29,7 @@ FetchContent_MakeAvailable(glfw)
 find_package(Vulkan REQUIRED)
 
 add_executable(${PROJECT_NAME}
-  src/main.c
+  src/main.cpp
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
