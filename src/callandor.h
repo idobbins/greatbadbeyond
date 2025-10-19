@@ -1,7 +1,7 @@
 #pragma once
 
-#include <cstdint>
-#include <pair>
+#include <vulkan/vulkan.h>
+
 #include <span>
 #include <string_view>
 
@@ -18,15 +18,15 @@ using PlatformExtension = const char *;
 template<>
 struct Config<Window>
 {
-    std::uint32_t width = 1280;
-    std::uint32_t height = 720;
-    std::string_view title = "callandor";
-    bool resizable = false;
+    std::uint32_t width;
+    std::uint32_t height;
+    std::string_view title;
+    bool resizable;
 };
 
 struct Window
 {
-    GLFWwindow *handle = nullptr;
+    GLFWwindow *handle;
 };
 
 // Vulkan (c library) forward declarations
@@ -48,15 +48,16 @@ struct InstanceConfig;
 // Window Functions (Module: window)
 //------------------------------------------------------------------------------------
 
-Window Create(const Config<Window> &config);
-void Destroy(Window &window);
-void ErrorCallback(int error, const char *description);
-bool ShouldClose(Window &window);
-bool IsReady(Window &window);
-bool IsKeyPressed(Window &window, int key);
-void Poll(Window &window);
-std::pair<std::uint32_t, std::uint32_t> FramebufferSize(const Window &window);
-std::span<const PlatformExtension> Enumerate();
+void WindowErrorCallback(int code, const char *description);
+
+void CreateWindow();
+void DestroyWindow();
+bool WindowShouldClose();
+bool IsWindowReady();
+bool IsKeyPressed();
+void Poll();
+int FramebufferSize(const Window &window);
+int Enumerate();
 
 //------------------------------------------------------------------------------------
 // Vulkan Functions (Module: vulkan)
