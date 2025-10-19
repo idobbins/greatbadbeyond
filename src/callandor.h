@@ -45,9 +45,6 @@ void Destroy(VkInstance &instance);
 VkSurfaceKHR Create(const Config<VkSurfaceKHR> &config);
 void Destroy(VkSurfaceKHR &surface);
 
-template<typename T>
-std::span<T> Enumerate();
-// Enumerate VkPhysicalDevice
-// Enumerate VkQueueFamilyProperties for a given VkPhysicalDevice
+std::span<const VkPhysicalDevice> Enumerate(const VkInstance &instance);
 
 // Shader management functions
