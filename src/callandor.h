@@ -9,6 +9,7 @@
 template<typename T>struct Config;
 
 struct Window;
+using PlatformExtension = const char *const;
 
 // Vulkan (c library) forward declarations
 struct VkInstance_T;
@@ -31,8 +32,10 @@ struct InstanceConfig;
 
 Window Create(const Config<Window> &config);
 void Destroy(Window &window);
-bool IsDone(Window &window);
+void ErrorCallback(int error, const char *description);
+bool ShouldClose(Window &window);
 bool IsReady(Window &window);
+// std::span<PlatformExtension> Enumerate();
 
 //------------------------------------------------------------------------------------
 // Vulkan Functions (Module: vulkan)
