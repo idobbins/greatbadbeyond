@@ -4,6 +4,8 @@
 #include <cstdlib>
 #include <string_view>
 
+#include <config.h>
+
 inline void Assert(bool condition, std::string_view message)
 {
     if (!condition) {
@@ -24,7 +26,7 @@ inline void LogError(const char *format, ...)
 {
     va_list args;
     va_start(args, format);
-    LogWrite(stderr, "error:", format, args);
+    LogWrite(stderr, LogErrorPrefix, format, args);
     va_end(args);
 }
 
@@ -32,7 +34,7 @@ inline void LogWarn(const char *format, ...)
 {
     va_list args;
     va_start(args, format);
-    LogWrite(stderr, "warn :", format, args);
+    LogWrite(stderr, LogWarnPrefix, format, args);
     va_end(args);
 }
 
@@ -40,6 +42,6 @@ inline void LogInfo(const char *format, ...)
 {
     va_list args;
     va_start(args, format);
-    LogWrite(stdout, "info :", format, args);
+    LogWrite(stdout, LogInfoPrefix, format, args);
     va_end(args);
 }

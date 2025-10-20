@@ -1,4 +1,5 @@
 #include <callandor.h>
+#include <config.h>
 #include <runtime.h>
 
 #include <GLFW/glfw3.h>
@@ -61,7 +62,7 @@ void CloseGlfwContext()
 
 span<const char *> GetPlatformVulkanExtensions()
 {
-    static array<const char*, 8> cache {};
+    static array<const char*, MaxPlatformInstanceExtensions> cache {};
     static uint32_t count = 0;
     static bool ready = false;
 
@@ -94,8 +95,8 @@ void InitWindow()
     glfwWindowHint(GLFW_COCOA_RETINA_FRAMEBUFFER, GLFW_FALSE);
 // #endif
 
-    Platform.Window.title = "Callandor";
-    Platform.Window.handle = glfwCreateWindow(1280, 720, Platform.Window.title.data(), nullptr, nullptr);
+    Platform.Window.title = DefaultWindowTitle;
+    Platform.Window.handle = glfwCreateWindow(DefaultWindowWidth, DefaultWindowHeight, Platform.Window.title.data(), nullptr, nullptr);
 
     Platform.Window.ready = true;
 }

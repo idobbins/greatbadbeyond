@@ -1,4 +1,5 @@
 #include <callandor.h>
+#include <config.h>
 #include <runtime.h>
 
 #include <vulkan/vulkan.h>
@@ -23,15 +24,8 @@ static VkDebugUtilsMessengerCreateInfoEXT VulkanMakeDebugMessengerCreateInfo(voi
 {
    VkDebugUtilsMessengerCreateInfoEXT createInfo = {
       .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
-      .messageSeverity =
-          VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT |
-          VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT |
-          VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
-          VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT,
-      .messageType =
-          VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
-          VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
-          VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT,
+      .messageSeverity = DefaultDebugSeverityMask,
+      .messageType = DefaultDebugTypeMask,
       .pfnUserCallback = NULL,
       .pUserData = NULL,
   };
@@ -84,12 +78,12 @@ void InitInstance(bool debug)
 {
    VkApplicationInfo app_info {
       .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
-      .pApplicationName = "",
-      .pEngineName = ""
+      .pApplicationName = DefaultApplicationName,
+      .pEngineName = DefaultEngineName
    };
 
    // stack-only extensions
-   static array<byte, 1024> extensionBuffer;
+   static array<byte, InstanceExtensionScratchBytes> extensionBuffer;
    static pmr::monotonic_buffer_resource extensionStackOnlyResource {
       extensionBuffer.data(),
       extensionBuffer.size(),
@@ -113,7 +107,7 @@ void InitInstance(bool debug)
 #endif
 
    // stack-only layers
-   static array<byte, 1024> layerBuffer;
+   static array<byte, InstanceLayerScratchBytes> layerBuffer;
    static pmr::monotonic_buffer_resource layerStackOnlyResource {
       layerBuffer.data(),
       layerBuffer.size(),
@@ -123,7 +117,7 @@ void InitInstance(bool debug)
 
    if (debug)
    {
-      layers.push_back("VK_LAYER_KHRONOS_validation");
+      layers.push_back(ValidationLayerName);
    }
 
    for (auto ext: extensions)
