@@ -25,7 +25,7 @@ static struct VulkanData
    VkPhysicalDevice physicalDevice;
    VkDevice device;
    VkQueue universalQueue;
-   uint32_t universalQueueFamily;
+   u32 universalQueueFamily;
 
    bool validationLayersEnabled;
    bool physicalDeviceReady;
@@ -33,20 +33,7 @@ static struct VulkanData
 
 } Vulkan;
 
-static VkDebugUtilsMessengerCreateInfoEXT VulkanMakeDebugMessengerCreateInfo(void)
-{
-   VkDebugUtilsMessengerCreateInfoEXT createInfo = {
-      .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
-      .messageSeverity = DefaultDebugSeverityMask,
-      .messageType = DefaultDebugTypeMask,
-      .pfnUserCallback = NULL,
-      .pUserData = NULL,
-  };
-
-   return createInfo;
-}
-
-static VKAPI_ATTR VkBool32 VKAPI_CALL VulkanDebugCallback(
+VKAPI_ATTR VkBool32 VKAPI_CALL VulkanDebugCallback(
     VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
     VkDebugUtilsMessageTypeFlagsEXT messageType,
     const VkDebugUtilsMessengerCallbackDataEXT *callbackData,
@@ -148,17 +135,20 @@ void InitInstance(const VulkanConfig &config)
    }
 
    VkDebugUtilsMessengerCreateInfoEXT debugCreateInfo = { };
-   const void *next = nullptr;
    if (config.debug)
    {
-      debugCreateInfo = VulkanMakeDebugMessengerCreateInfo();
-      debugCreateInfo.pfnUserCallback = VulkanDebugCallback;
-      next = &debugCreateInfo;
+      debugCreateInfo = {
+         .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
+         .messageSeverity = DefaultDebugSeverityMask,
+         .messageType = DefaultDebugTypeMask,
+         .pfnUserCallback = VulkanDebugCallback,
+         .pUserData = nullptr,
+      };
    }
 
    VkInstanceCreateInfo createInfo = {
       .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
-      .pNext = next,
+      .pNext = config.debug ? &debugCreateInfo : nullptr,
       .flags = config.portability ? VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR : 0u,
       .pApplicationInfo = &app_info,
       .enabledLayerCount = static_cast<uint32_t>(layers.size()),
