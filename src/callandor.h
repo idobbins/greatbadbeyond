@@ -1,8 +1,9 @@
 #pragma once
 
-#include <span>
+#include <vulkan/vulkan.h>
+#include <GLFW/glfw3.h>
 
-struct GLFWwindow;
+#include <span>
 
 struct Vec2
 {
@@ -14,6 +15,12 @@ struct Size
 {
     int width;
     int height;
+};
+
+struct VulkanConfig
+{
+    bool debug;
+    bool portability;
 };
 
 //------------------------------------------------------------------------------------
@@ -45,11 +52,13 @@ void PollEvents();
 // Vulkan Functions (Module: vulkan)
 //------------------------------------------------------------------------------------
 
-void InitVulkan(bool debug = false);
-void CloseVulkan(bool debug = false);
+void InitVulkan(const VulkanConfig &config);
+void CloseVulkan(const VulkanConfig &config);
 
-void InitInstance(bool debug = false);
-void CloseInstance(bool debug = false);
+void InitInstance(const VulkanConfig &config);
+void CloseInstance(const VulkanConfig &config);
 
 void InitSurface();
 void CloseSurface();
+
+std::span<const VkPhysicalDevice> GetPhysicalDevices();

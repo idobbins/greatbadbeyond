@@ -9,21 +9,27 @@ int main()
     InitGlfwContext();
     InitWindow();
 
-#ifdef NDEBUG
-    InitVulkan();
+    VulkanConfig config = {};
+
+#ifndef NDEBUG
+    config.debug = true;
 #else
-    InitVulkan(true);
+    config.debug = false;
 #endif
 
-    while(!WindowShouldClose())
+#if defined(__APPLE__)
+    config.portability = true;
+#else
+    config.portability = false;
+#endif
+
+    InitVulkan(config);
+
+    while (!WindowShouldClose())
     {
         PollEvents();
     }
-#ifdef NDEBUG
-    CloseVulkan();
-#else
-    CloseVulkan(true);
-#endif
+    CloseVulkan(config);
 
     CloseWindow();
     CloseGlfwContext();

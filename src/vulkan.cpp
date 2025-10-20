@@ -2,8 +2,8 @@
 #include <config.h>
 #include <runtime.h>
 
-#include <GLFW/glfw3.h>
 #include <vulkan/vulkan.h>
+#include <GLFW/glfw3.h>
 
 #include <array>
 #include <iostream>
@@ -66,19 +66,19 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL VulkanDebugCallback(
    return VK_FALSE;
 }
 
-void InitVulkan(bool debug)
+void InitVulkan(const VulkanConfig &config)
 {
-   InitInstance(debug);
+   InitInstance(config);
    InitSurface();
 }
 
-void CloseVulkan(bool debug)
+void CloseVulkan(const VulkanConfig &config)
 {
    CloseSurface();
-   CloseInstance(debug);
+   CloseInstance(config);
 }
 
-void InitInstance(bool debug)
+void InitInstance(const VulkanConfig &config)
 {
    VkApplicationInfo app_info {
       .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
@@ -101,14 +101,15 @@ void InitInstance(bool debug)
       extensions.push_back(ext);
    }
 
-   if (debug)
+   if (config.debug)
    {
       extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
    }
 
-#if defined(__APPLE__)
-   extensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
-#endif
+   if (config.portability)
+   {
+      extensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+   }
 
    // stack-only layers
    static array<byte, InstanceLayerScratchBytes> layerBuffer;
@@ -119,7 +120,7 @@ void InitInstance(bool debug)
    };
    static pmr::vector<const char *> layers {&layerStackOnlyResource };
 
-   if (debug)
+   if (config.debug)
    {
       layers.push_back(ValidationLayerName);
    }
@@ -131,7 +132,7 @@ void InitInstance(bool debug)
 
    VkDebugUtilsMessengerCreateInfoEXT debugCreateInfo = { };
    const void *next = nullptr;
-   if (debug)
+   if (config.debug)
    {
       debugCreateInfo = VulkanMakeDebugMessengerCreateInfo();
       debugCreateInfo.pfnUserCallback = VulkanDebugCallback;
@@ -141,9 +142,7 @@ void InitInstance(bool debug)
    VkInstanceCreateInfo createInfo = {
       .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
       .pNext = next,
-#if defined(__APPLE__)
-      .flags = VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR,
-#endif
+      .flags = config.portability ? VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR : 0u,
       .pApplicationInfo = &app_info,
       .enabledLayerCount = static_cast<uint32_t>(layers.size()),
       .ppEnabledLayerNames = layers.data(),
@@ -157,9 +156,9 @@ void InitInstance(bool debug)
    Vulkan.validationLayersEnabled = (layers.size() > 0);
 }
 
-void CloseInstance(bool debug)
+void CloseInstance(const VulkanConfig &config)
 {
-   (void)debug;
+   (void)config;
 
    if (Vulkan.instance != VK_NULL_HANDLE)
    {
@@ -192,4 +191,32 @@ void CloseSurface()
 
    vkDestroySurfaceKHR(Vulkan.instance, Vulkan.surface, nullptr);
    Vulkan.surface = VK_NULL_HANDLE;
+}
+
+span<const VkPhysicalDevice> GetPhysicalDevices()
+{
+   static array<VkPhysicalDevice, MaxPhysicalDevices> cache {};
+   static uint32_t count = 0;
+   static bool ready = false;
+
+   if (ready)
+   {
+      return {cache.data(), count};
+   }
+
+   Assert(Vulkan.instance != VK_NULL_HANDLE, "Vulkan instance must be created before enumerating physical devices");
+
+   uint32_t physicalDeviceCount = 0;
+   VkResult result = vkEnumeratePhysicalDevices(Vulkan.instance, &physicalDeviceCount, nullptr);
+   Assert(result == VK_SUCCESS, "vkEnumeratePhysicalDevices (count) failed");
+   Assert(physicalDeviceCount > 0, "No Vulkan-capable GPUs found");
+   Assert(physicalDeviceCount <= cache.size(), "Too many Vulkan physical devices for cache");
+
+   result = vkEnumeratePhysicalDevices(Vulkan.instance, &physicalDeviceCount, cache.data());
+   Assert(result == VK_SUCCESS, "vkEnumeratePhysicalDevices (fill) failed");
+
+   count = physicalDeviceCount;
+   ready = true;
+
+   return {cache.data(), count};
 }
