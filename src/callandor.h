@@ -1,5 +1,6 @@
 #pragma once
 
+#include <utility>
 #include <span>
 
 //------------------------------------------------------------------------------------
@@ -17,8 +18,7 @@ void InitWindow();
 void CloseWindow();
 bool WindowShouldClose();
 bool IsWindowReady();
-int GetFramebufferHeight();
-int GetFramebufferWidth();
+std::pair<int, int> GetFramebufferSize();
 
 // Input-related functions
 bool IsKeyPressed();

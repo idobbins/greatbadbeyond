@@ -10,6 +10,9 @@ int main()
 
     InitWindow();
 
+    auto [w, h] = GetFramebufferSize();
+    cout << w << "x" << h << endl;
+
     while(!WindowShouldClose())
     {
         PollEvents();

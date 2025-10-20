@@ -6,10 +6,11 @@
 #include <array>
 #include <iostream>
 #include <string_view>
+#include <utility>
 
 using namespace std;
 
-struct PlatformData
+static struct PlatformData
 {
     struct
     {
@@ -95,7 +96,7 @@ void InitWindow()
 #endif
 
     Platform.Window.title = "Callandor";
-    Platform.Window.handle = glfwCreateWindow(1270, 720, Platform.Window.title.data(), nullptr, nullptr);
+    Platform.Window.handle = glfwCreateWindow(1280, 720, Platform.Window.title.data(), nullptr, nullptr);
 
     Platform.Window.ready = true;
 }
@@ -128,16 +129,19 @@ bool IsWindowReady()
     return Platform.Window.ready;
 }
 
-int GetFramebufferHeight()
+pair<int, int> GetFramebufferSize()
 {
+    auto size = make_pair(0, 0);
 
+    if (!Platform.Window.ready)
+    {
+        return size;
+    }
+
+    glfwGetFramebufferSize(Platform.Window.handle, &size.first, &size.second);
+
+    return size;
 }
-
-int GetFramebufferWidth()
-{
-
-}
-
 
 void PollEvents()
 {
