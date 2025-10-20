@@ -71,16 +71,16 @@ struct VulkanConfig
 void GlfwErrorCallback(i32 code, cstr description);
 void InitGlfwContext();
 void CloseGlfwContext();
-std::span<cstr> GetPlatformVulkanExtensions();
+auto GetPlatformVulkanExtensions() -> std::span<cstr>;
 
 // Window-specific functions
 void InitWindow();
 void CloseWindow();
-bool WindowShouldClose();
-bool IsWindowReady();
-Size GetWindowSize();
-Size GetFramebufferSize();
-GLFWwindow *GetWindowHandle();
+auto WindowShouldClose() -> bool;
+auto IsWindowReady() -> bool;
+auto GetWindowSize() -> Size;
+auto GetFramebufferSize() -> Size;
+auto GetWindowHandle() -> GLFWwindow *;
 
 // Input-related functions
 bool IsKeyPressed();
@@ -93,11 +93,11 @@ void PollEvents();
 //------------------------------------------------------------------------------------
 
 // Top-level-related functions
-VKAPI_ATTR VkBool32 VKAPI_CALL VulkanDebugCallback(
-VkDebugUtilsMessageSeverityFlagBitsEXT,
-VkDebugUtilsMessageTypeFlagsEXT ,
-const VkDebugUtilsMessengerCallbackDataEXT *,
-void *);
+auto VulkanDebugCallback(
+    VkDebugUtilsMessageSeverityFlagBitsEXT,
+    VkDebugUtilsMessageTypeFlagsEXT ,
+    const VkDebugUtilsMessengerCallbackDataEXT *,
+    void *) -> VKAPI_ATTR VkBool32 VKAPI_CALL;
 
 void InitVulkan(const VulkanConfig &config);
 void CloseVulkan(const VulkanConfig &config);
@@ -111,26 +111,31 @@ void InitSurface();
 void CloseSurface();
 
 // Physical device-related functions
-std::span<const VkPhysicalDevice> GetPhysicalDevices();
+auto GetPhysicalDeviceFeatures() -> VkPhysicalDeviceFeatures2;
+auto EnsurePhysicalDeviceSufficient() -> bool;
+auto GetPhysicalDevices() -> std::span<const VkPhysicalDevice>;
 void SetPhysicalDevice();
 
 // Surface AND Physical device-realted functions
-VkSurfaceCapabilitiesKHR GetPhysicalDeviceSurfaceCapabilities();
-std::span<const VkSurfaceFormatKHR> GetPhysicalDeviceSurfaceFormats();
-std::span<const VkPresentModeKHR> GetPhysicalDeviceSurfacePresentModes();
+auto GetPhysicalDeviceSurfaceCapabilities() -> VkSurfaceCapabilitiesKHR;
+auto GetPhysicalDeviceSurfaceFormats()      -> std::span<const VkSurfaceFormatKHR>;
+auto GetPhysicalDeviceSurfacePresentModes() -> std::span<const VkPresentModeKHR>;
 
 // Logical device-related functions
+auto GetDeviceExtensionProperties() -> std::span<const VkExtensionProperties>;
+bool CheckDeviceExtensionSupport(std::span<cstr> exts);
+
 void InitDevice(const VulkanConfig &config);
 void CloseDevice();
 
 // queue-related functions
-std::span<const VkQueueFamilyProperties> GetQueueFamilyProperties(const VkPhysicalDevice& device);
-bool GetUniversalQueue(const VkPhysicalDevice& device, VkSurfaceKHR surface, u32 *family);
+auto GetQueueFamilyProperties(const VkPhysicalDevice& device) -> std::span<const VkQueueFamilyProperties>;
+auto GetUniversalQueue(const VkPhysicalDevice& device, VkSurfaceKHR surface, u32 *family) -> bool;
 
-VkQueue GetGraphicsQueue();
-VkQueue GetComputeQueue();
-VkQueue GetTransferQueue();
-VkQueue GetPresentQueue();
+auto GetGraphicsQueue() -> VkQueue;
+auto GetComputeQueue()  -> VkQueue;
+auto GetTransferQueue() -> VkQueue;
+auto GetPresentQueue()  -> VkQueue;
 void GetQueueFamilies();
 
 
