@@ -7,9 +7,10 @@
 //------------------------------------------------------------------------------------
 
 // Glfw-specific functions
+void GlfwErrorCallback(int code, const char *description);
 void InitGlfwContext();
 void CloseGlfwContext();
-void GlfwErrorCallback(int code, const char *description);
+std::span<const char *> GetPlatformVulkanExtensions();
 
 // Window-specific functions
 void InitWindow();
@@ -18,7 +19,6 @@ bool WindowShouldClose();
 bool IsWindowReady();
 int GetFramebufferHeight();
 int GetFramebufferWidth();
-std::span<const char *> GetWindowVulkanExtensions();
 
 // Input-related functions
 bool IsKeyPressed();

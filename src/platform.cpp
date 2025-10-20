@@ -24,6 +24,12 @@ struct PlatformData
     } Window;
 } Platform;
 
+void GlfwErrorCallback(int code, const char *description)
+{
+    const char *message = description != nullptr ? description: "no description";
+    cerr << "[glfw][error " << code << "] " << message << endl;
+}
+
 void InitGlfwContext()
 {
     if (Platform.Glfw.ready)
@@ -50,13 +56,9 @@ void CloseGlfwContext()
     Platform.Glfw.ready = false;
 }
 
-void GlfwErrorCallback(int code, const char *description)
-{
-    const char *message = description != nullptr ? description: "no description";
-    cerr << "[glfw][error " << code << "] " << message << endl;
-}
 
-std::span<const char *> GetWindowVulkanExtensions()
+
+span<const char *> GetPlatformVulkanExtensions()
 {
     static array<const char*, 8> cache {};
     static uint32_t count = 0;

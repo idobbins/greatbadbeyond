@@ -8,7 +8,7 @@ int main()
 {
     InitGlfwContext();
 
-    auto exts = GetWindowVulkanExtensions();
+    auto exts = GetPlatformVulkanExtensions();
 
     for (auto ext : exts)
     {
