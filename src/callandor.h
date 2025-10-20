@@ -62,3 +62,4 @@ void InitSurface();
 void CloseSurface();
 
 std::span<const VkPhysicalDevice> GetPhysicalDevices();
+std::span<const VkQueueFamilyProperties> GetQueueFamilyProperties(const VkPhysicalDevice& device);

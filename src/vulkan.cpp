@@ -220,3 +220,51 @@ span<const VkPhysicalDevice> GetPhysicalDevices()
 
    return {cache.data(), count};
 }
+
+span<const VkQueueFamilyProperties> GetQueueFamilyProperties(const VkPhysicalDevice &device)
+{
+   Assert(device != VK_NULL_HANDLE, "Physical device handle is null");
+
+   struct QueueFamilyCacheEntry
+   {
+      VkPhysicalDevice physicalDevice;
+      array<VkQueueFamilyProperties, MaxQueueFamilies> properties;
+      uint32_t count;
+      bool ready;
+   };
+
+   static array<QueueFamilyCacheEntry, MaxPhysicalDevices> cache {};
+   static uint32_t cacheCount = 0;
+
+   for (uint32_t index = 0; index < cacheCount; ++index)
+   {
+      QueueFamilyCacheEntry &entry = cache[index];
+      if (entry.ready && (entry.physicalDevice == device))
+      {
+         return {entry.properties.data(), entry.count};
+      }
+   }
+
+   Assert(cacheCount < cache.size(), "Too many queue family cache entries");
+
+   QueueFamilyCacheEntry &entry = cache[cacheCount];
+   entry = QueueFamilyCacheEntry {
+      .physicalDevice = device,
+      .properties = {},
+      .count = 0,
+      .ready = false
+   };
+
+   uint32_t familyCount = 0;
+   vkGetPhysicalDeviceQueueFamilyProperties(device, &familyCount, nullptr);
+   Assert(familyCount > 0, "Physical device has no queue families");
+   Assert(familyCount <= entry.properties.size(), "Too many queue families for cache entry");
+
+   vkGetPhysicalDeviceQueueFamilyProperties(device, &familyCount, entry.properties.data());
+
+   entry.count = familyCount;
+   entry.ready = true;
+   cacheCount += 1;
+
+   return {entry.properties.data(), entry.count};
+}

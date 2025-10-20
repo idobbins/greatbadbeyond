@@ -6,6 +6,7 @@
 #include <vulkan/vulkan_core.h>
 
 static constexpr uint32_t MaxPhysicalDevices = 16;
+static constexpr uint32_t MaxQueueFamilies = 16;
 static constexpr uint32_t MaxPlatformInstanceExtensions = 8;
 
 static constexpr std::size_t InstanceExtensionScratchBytes = 1024;
