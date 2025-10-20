@@ -6,7 +6,6 @@
 #include <array>
 #include <iostream>
 #include <string_view>
-#include <utility>
 
 using namespace std;
 
@@ -91,9 +90,9 @@ void InitWindow()
     glfwDefaultWindowHints();
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
-#if defined(__APPLE__)
+// #if defined(__APPLE__)
     glfwWindowHint(GLFW_COCOA_RETINA_FRAMEBUFFER, GLFW_FALSE);
-#endif
+// #endif
 
     Platform.Window.title = "Callandor";
     Platform.Window.handle = glfwCreateWindow(1280, 720, Platform.Window.title.data(), nullptr, nullptr);
@@ -129,16 +128,40 @@ bool IsWindowReady()
     return Platform.Window.ready;
 }
 
-pair<int, int> GetFramebufferSize()
+Size GetWindowSize()
 {
-    auto size = make_pair(0, 0);
+    Size size = {0, 0};
 
     if (!Platform.Window.ready)
     {
         return size;
     }
 
-    glfwGetFramebufferSize(Platform.Window.handle, &size.first, &size.second);
+    int width = 0;
+    int height = 0;
+    glfwGetWindowSize(Platform.Window.handle, &width, &height);
+
+    size.width = width;
+    size.height = height;
+
+    return size;
+}
+
+Size GetFramebufferSize()
+{
+    Size size = {0, 0};
+
+    if (!Platform.Window.ready)
+    {
+        return size;
+    }
+
+    int width = 0;
+    int height = 0;
+    glfwGetFramebufferSize(Platform.Window.handle, &width, &height);
+
+    size.width = width;
+    size.height = height;
 
     return size;
 }

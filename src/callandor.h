@@ -1,7 +1,18 @@
 #pragma once
 
-#include <utility>
 #include <span>
+
+struct Vec2
+{
+    float x;
+    float y;
+};
+
+struct Size
+{
+    int width;
+    int height;
+};
 
 //------------------------------------------------------------------------------------
 // Window and Platform Functions (Module: platform)
@@ -18,7 +29,8 @@ void InitWindow();
 void CloseWindow();
 bool WindowShouldClose();
 bool IsWindowReady();
-std::pair<int, int> GetFramebufferSize();
+Size GetWindowSize();
+Size GetFramebufferSize();
 
 // Input-related functions
 bool IsKeyPressed();
@@ -38,4 +50,3 @@ void CloseInstance();
 
 void InitSurface();
 void CloseSurface();
-
