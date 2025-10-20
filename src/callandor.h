@@ -45,7 +45,7 @@ void PollEvents();
 void InitVulkan();
 void CloseVulkan();
 
-void InitInstance();
+void InitInstance(bool debug = false);
 void CloseInstance();
 
 void InitSurface();

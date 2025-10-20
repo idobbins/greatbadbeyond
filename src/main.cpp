@@ -7,11 +7,9 @@ using namespace std;
 int main()
 {
     InitGlfwContext();
-
     InitWindow();
 
-    auto [w, h] = GetFramebufferSize();
-    cout << w << "x" << h << endl;
+    InitVulkan();
 
     while(!WindowShouldClose())
     {
@@ -19,7 +17,6 @@ int main()
     }
 
     CloseWindow();
-
     CloseGlfwContext();
 
     return 0;

@@ -12,3 +12,34 @@ inline void Assert(bool condition, std::string_view message)
         std::exit(EXIT_FAILURE);
     }
 }
+
+inline void LogWrite(FILE *stream, const char *prefix, const char *format, va_list args)
+{
+    fprintf(stream, "%s ", prefix);
+    vfprintf(stream, format, args);
+    fputc('\n', stream);
+}
+
+inline void LogError(const char *format, ...)
+{
+    va_list args;
+    va_start(args, format);
+    LogWrite(stderr, "error:", format, args);
+    va_end(args);
+}
+
+inline void LogWarn(const char *format, ...)
+{
+    va_list args;
+    va_start(args, format);
+    LogWrite(stderr, "warn :", format, args);
+    va_end(args);
+}
+
+inline void LogInfo(const char *format, ...)
+{
+    va_list args;
+    va_start(args, format);
+    LogWrite(stdout, "info :", format, args);
+    va_end(args);
+}
