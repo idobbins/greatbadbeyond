@@ -17,8 +17,11 @@ static struct VulkanData
 {
    VkInstance instance;
    VkSurfaceKHR surface;
+   VkPhysicalDevice physicalDevice;
+   uint32_t universalQueueFamily;
 
    bool validationLayersEnabled;
+   bool physicalDeviceReady;
 
 } Vulkan;
 
@@ -70,6 +73,7 @@ void InitVulkan(const VulkanConfig &config)
 {
    InitInstance(config);
    InitSurface();
+   SetPhysicalDevice();
 }
 
 void CloseVulkan(const VulkanConfig &config)
@@ -167,6 +171,9 @@ void CloseInstance(const VulkanConfig &config)
    }
 
    Vulkan.validationLayersEnabled = false;
+   Vulkan.physicalDevice = VK_NULL_HANDLE;
+   Vulkan.universalQueueFamily = 0;
+   Vulkan.physicalDeviceReady = false;
 }
 
 void InitSurface()
@@ -267,4 +274,69 @@ span<const VkQueueFamilyProperties> GetQueueFamilyProperties(const VkPhysicalDev
    cacheCount += 1;
 
    return {entry.properties.data(), entry.count};
+}
+
+bool GetUniversalQueue(const VkPhysicalDevice &device, VkSurfaceKHR surface, uint32_t *family)
+{
+   Assert(family != nullptr, "Queue family output pointer is null");
+   Assert(surface != VK_NULL_HANDLE, "Vulkan surface handle is null");
+
+   span<const VkQueueFamilyProperties> properties = GetQueueFamilyProperties(device);
+   Assert(!properties.empty(), "Physical device reports zero queue families");
+
+   const VkQueueFlags universalMask = VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT;
+
+   for (uint32_t index = 0; index < properties.size(); ++index)
+   {
+      VkBool32 present = VK_FALSE;
+      VkResult result = vkGetPhysicalDeviceSurfaceSupportKHR(device, index, surface, &present);
+      Assert(result == VK_SUCCESS, "Failed to query Vulkan surface support");
+
+      const VkQueueFamilyProperties &familyProperties = properties[index];
+
+      if ((present == VK_TRUE) &&
+          ((familyProperties.queueFlags & universalMask) != 0) &&
+          (familyProperties.queueCount > 0))
+      {
+         *family = index;
+         return true;
+      }
+   }
+
+   return false;
+}
+
+void SetPhysicalDevice()
+{
+   if (Vulkan.physicalDeviceReady)
+   {
+      return;
+   }
+
+   Assert(Vulkan.instance != VK_NULL_HANDLE, "Vulkan instance must be created before selecting a physical device");
+   Assert(Vulkan.surface != VK_NULL_HANDLE, "Vulkan surface must be created before selecting a physical device");
+
+   span<const VkPhysicalDevice> devices = GetPhysicalDevices();
+   Assert(!devices.empty(), "No Vulkan physical devices available");
+
+   for (const VkPhysicalDevice &device : devices)
+   {
+      uint32_t queueFamily = 0;
+      if (!GetUniversalQueue(device, Vulkan.surface, &queueFamily))
+      {
+         continue;
+      }
+
+      VkPhysicalDeviceProperties properties = {};
+      vkGetPhysicalDeviceProperties(device, &properties);
+
+      Vulkan.physicalDevice = device;
+      Vulkan.universalQueueFamily = queueFamily;
+      Vulkan.physicalDeviceReady = true;
+
+      LogInfo("[vulkan] Selected physical device: %s", properties.deviceName);
+      return;
+   }
+
+   Assert(false, "Failed to find a Vulkan physical device with universal queue support");
 }

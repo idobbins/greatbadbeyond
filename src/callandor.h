@@ -63,3 +63,5 @@ void CloseSurface();
 
 std::span<const VkPhysicalDevice> GetPhysicalDevices();
 std::span<const VkQueueFamilyProperties> GetQueueFamilyProperties(const VkPhysicalDevice& device);
+bool GetUniversalQueue(const VkPhysicalDevice& device, VkSurfaceKHR surface, uint32_t *family);
+void SetPhysicalDevice();
