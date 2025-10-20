@@ -167,6 +167,12 @@ Size GetFramebufferSize()
     return size;
 }
 
+GLFWwindow *GetWindowHandle()
+{
+    Assert(Platform.Window.ready && Platform.Window.handle != nullptr, "Window is not ready");
+    return Platform.Window.handle;
+}
+
 void PollEvents()
 {
     glfwPollEvents();

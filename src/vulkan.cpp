@@ -2,6 +2,7 @@
 #include <config.h>
 #include <runtime.h>
 
+#include <GLFW/glfw3.h>
 #include <vulkan/vulkan.h>
 
 #include <array>
@@ -15,6 +16,7 @@ using namespace std;
 static struct VulkanData
 {
    VkInstance instance;
+   VkSurfaceKHR surface;
 
    bool validationLayersEnabled;
 
@@ -67,10 +69,12 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL VulkanDebugCallback(
 void InitVulkan(bool debug)
 {
    InitInstance(debug);
+   InitSurface();
 }
 
 void CloseVulkan(bool debug)
 {
+   CloseSurface();
    CloseInstance(debug);
 }
 
@@ -164,4 +168,28 @@ void CloseInstance(bool debug)
    }
 
    Vulkan.validationLayersEnabled = false;
+}
+
+void InitSurface()
+{
+   Assert(Vulkan.instance != VK_NULL_HANDLE, "Vulkan instance must be created before the surface");
+
+   GLFWwindow *window = GetWindowHandle();
+   Assert(window != nullptr, "GLFW window handle is null");
+
+   VkResult result = glfwCreateWindowSurface(Vulkan.instance, window, nullptr, &Vulkan.surface);
+   Assert(result == VK_SUCCESS, "Failed to create Vulkan surface");
+}
+
+void CloseSurface()
+{
+   if (Vulkan.surface == VK_NULL_HANDLE)
+   {
+      return;
+   }
+
+   Assert(Vulkan.instance != VK_NULL_HANDLE, "Vulkan instance must be valid when destroying the surface");
+
+   vkDestroySurfaceKHR(Vulkan.instance, Vulkan.surface, nullptr);
+   Vulkan.surface = VK_NULL_HANDLE;
 }

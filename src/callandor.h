@@ -2,6 +2,8 @@
 
 #include <span>
 
+struct GLFWwindow;
+
 struct Vec2
 {
     float x;
@@ -31,6 +33,7 @@ bool WindowShouldClose();
 bool IsWindowReady();
 Size GetWindowSize();
 Size GetFramebufferSize();
+GLFWwindow *GetWindowHandle();
 
 // Input-related functions
 bool IsKeyPressed();
