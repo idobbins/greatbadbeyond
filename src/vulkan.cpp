@@ -6,6 +6,7 @@
 #include <GLFW/glfw3.h>
 
 #include <array>
+#include <cstring>
 #include <iostream>
 #include <memory_resource>
 #include <ostream>
@@ -13,15 +14,22 @@
 
 using namespace std;
 
+#ifndef VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME
+#define VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME "VK_KHR_portability_subset"
+#endif
+
 static struct VulkanData
 {
    VkInstance instance;
    VkSurfaceKHR surface;
    VkPhysicalDevice physicalDevice;
+   VkDevice device;
+   VkQueue universalQueue;
    uint32_t universalQueueFamily;
 
    bool validationLayersEnabled;
    bool physicalDeviceReady;
+   bool deviceReady;
 
 } Vulkan;
 
@@ -74,10 +82,12 @@ void InitVulkan(const VulkanConfig &config)
    InitInstance(config);
    InitSurface();
    SetPhysicalDevice();
+   InitDevice(config);
 }
 
 void CloseVulkan(const VulkanConfig &config)
 {
+   CloseDevice();
    CloseSurface();
    CloseInstance(config);
 }
@@ -87,7 +97,10 @@ void InitInstance(const VulkanConfig &config)
    VkApplicationInfo app_info {
       .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
       .pApplicationName = DefaultApplicationName,
-      .pEngineName = DefaultEngineName
+      .applicationVersion = VK_MAKE_VERSION(1, 0, 0),
+      .pEngineName = DefaultEngineName,
+      .engineVersion = VK_MAKE_VERSION(1, 0, 0),
+      .apiVersion = VK_API_VERSION_1_3
    };
 
    // stack-only extensions
@@ -172,8 +185,11 @@ void CloseInstance(const VulkanConfig &config)
 
    Vulkan.validationLayersEnabled = false;
    Vulkan.physicalDevice = VK_NULL_HANDLE;
+   Vulkan.device = VK_NULL_HANDLE;
+   Vulkan.universalQueue = VK_NULL_HANDLE;
    Vulkan.universalQueueFamily = 0;
    Vulkan.physicalDeviceReady = false;
+   Vulkan.deviceReady = false;
 }
 
 void InitSurface()
@@ -315,6 +331,7 @@ void SetPhysicalDevice()
 
    Assert(Vulkan.instance != VK_NULL_HANDLE, "Vulkan instance must be created before selecting a physical device");
    Assert(Vulkan.surface != VK_NULL_HANDLE, "Vulkan surface must be created before selecting a physical device");
+   Assert(!Vulkan.deviceReady, "Destroy the logical device before selecting a new physical device");
 
    span<const VkPhysicalDevice> devices = GetPhysicalDevices();
    Assert(!devices.empty(), "No Vulkan physical devices available");
@@ -333,10 +350,132 @@ void SetPhysicalDevice()
       Vulkan.physicalDevice = device;
       Vulkan.universalQueueFamily = queueFamily;
       Vulkan.physicalDeviceReady = true;
+      Vulkan.deviceReady = false;
 
       LogInfo("[vulkan] Selected physical device: %s", properties.deviceName);
       return;
    }
 
    Assert(false, "Failed to find a Vulkan physical device with universal queue support");
+}
+
+void InitDevice(const VulkanConfig &config)
+{
+   if (Vulkan.deviceReady)
+   {
+      return;
+   }
+
+   Assert(Vulkan.physicalDeviceReady, "Select a physical device before creating the logical device");
+
+   VkPhysicalDeviceVulkan13Features supportedFeatures13 = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
+   };
+
+   VkPhysicalDeviceFeatures2 supportedFeatures2 = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+      .pNext = &supportedFeatures13,
+   };
+
+   vkGetPhysicalDeviceFeatures2(Vulkan.physicalDevice, &supportedFeatures2);
+
+   Assert(supportedFeatures13.dynamicRendering == VK_TRUE, "Physical device does not support dynamic rendering");
+   Assert(supportedFeatures13.synchronization2 == VK_TRUE, "Physical device does not support synchronization2");
+
+   VkPhysicalDeviceVulkan13Features features13 = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
+      .dynamicRendering = VK_TRUE,
+      .synchronization2 = VK_TRUE,
+   };
+
+   VkPhysicalDeviceFeatures2 features2 = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+      .pNext = &features13,
+   };
+
+   array<const char *, MaxDeviceExtensions> extensions = {};
+   uint32_t extensionCount = 0;
+   extensions[extensionCount++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+   Assert(extensionCount <= extensions.size(), "Too many requested device extensions");
+
+   if (config.portability)
+   {
+      extensions[extensionCount++] = VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME;
+      Assert(extensionCount <= extensions.size(), "Too many requested device extensions");
+   }
+
+   uint32_t availableExtensionCount = 0;
+   VkResult result = vkEnumerateDeviceExtensionProperties(Vulkan.physicalDevice, nullptr, &availableExtensionCount, nullptr);
+   Assert(result == VK_SUCCESS, "vkEnumerateDeviceExtensionProperties (count) failed");
+   Assert(availableExtensionCount <= MaxEnumeratedDeviceExtensions, "Too many Vulkan device extensions reported");
+
+   array<VkExtensionProperties, MaxEnumeratedDeviceExtensions> availableExtensions = {};
+   result = vkEnumerateDeviceExtensionProperties(Vulkan.physicalDevice, nullptr, &availableExtensionCount, availableExtensions.data());
+   Assert(result == VK_SUCCESS, "vkEnumerateDeviceExtensionProperties (fill) failed");
+
+   auto hasExtension = [&](const char *name) -> bool
+   {
+      for (uint32_t index = 0; index < availableExtensionCount; ++index)
+      {
+         if (strncmp(name, availableExtensions[index].extensionName, VK_MAX_EXTENSION_NAME_SIZE) == 0)
+         {
+            return true;
+         }
+      }
+
+      return false;
+   };
+
+   Assert(hasExtension(VK_KHR_SWAPCHAIN_EXTENSION_NAME), "Required Vulkan device extension VK_KHR_swapchain is missing");
+
+   if (config.portability)
+   {
+      Assert(hasExtension(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME), "Required Vulkan device extension VK_KHR_portability_subset is missing");
+   }
+
+   float queuePriority = 1.0f;
+
+   VkDeviceQueueCreateInfo queueCreateInfo = {
+      .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+      .queueFamilyIndex = Vulkan.universalQueueFamily,
+      .queueCount = 1,
+      .pQueuePriorities = &queuePriority,
+   };
+
+   VkDeviceCreateInfo deviceCreateInfo = {
+      .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+      .pNext = &features2,
+      .queueCreateInfoCount = 1,
+      .pQueueCreateInfos = &queueCreateInfo,
+      .enabledExtensionCount = extensionCount,
+      .ppEnabledExtensionNames = extensions.data(),
+      .enabledLayerCount = 0,
+      .ppEnabledLayerNames = nullptr,
+      .pEnabledFeatures = nullptr,
+   };
+
+   result = vkCreateDevice(Vulkan.physicalDevice, &deviceCreateInfo, nullptr, &Vulkan.device);
+   Assert(result == VK_SUCCESS, "Failed to create Vulkan logical device");
+
+   vkGetDeviceQueue(Vulkan.device, Vulkan.universalQueueFamily, 0, &Vulkan.universalQueue);
+   Assert(Vulkan.universalQueue != VK_NULL_HANDLE, "Failed to retrieve Vulkan universal queue");
+
+   Vulkan.deviceReady = true;
+
+   LogInfo("[vulkan] Created logical device with universal queue family %u", Vulkan.universalQueueFamily);
+}
+
+void CloseDevice()
+{
+   if (Vulkan.device == VK_NULL_HANDLE)
+   {
+      return;
+   }
+
+   vkDeviceWaitIdle(Vulkan.device);
+   vkDestroyDevice(Vulkan.device, nullptr);
+
+   Vulkan.device = VK_NULL_HANDLE;
+   Vulkan.universalQueue = VK_NULL_HANDLE;
+   Vulkan.deviceReady = false;
 }

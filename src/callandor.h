@@ -60,6 +60,8 @@ void CloseInstance(const VulkanConfig &config);
 
 void InitSurface();
 void CloseSurface();
+void InitDevice(const VulkanConfig &config);
+void CloseDevice();
 
 std::span<const VkPhysicalDevice> GetPhysicalDevices();
 std::span<const VkQueueFamilyProperties> GetQueueFamilyProperties(const VkPhysicalDevice& device);
