@@ -70,14 +70,14 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL VulkanDebugCallback(
    return VK_FALSE;
 }
 
-void InitVulkan()
+void InitVulkan(bool debug)
 {
-   InitInstance();
+   InitInstance(debug);
 }
 
-void CloseVulkan()
+void CloseVulkan(bool debug)
 {
-
+   CloseInstance(debug);
 }
 
 void InitInstance(bool debug)
@@ -123,7 +123,7 @@ void InitInstance(bool debug)
 
    if (debug)
    {
-      extensions.push_back("VK_LAYER_KHRONOS_validation");
+      layers.push_back("VK_LAYER_KHRONOS_validation");
    }
 
    for (auto ext: extensions)
@@ -159,9 +159,15 @@ void InitInstance(bool debug)
    Vulkan.validationLayersEnabled = (layers.size() > 0);
 }
 
-void CloseInstance()
+void CloseInstance(bool debug)
 {
+   (void)debug;
 
+   if (Vulkan.instance != VK_NULL_HANDLE)
+   {
+      vkDestroyInstance(Vulkan.instance, nullptr);
+      Vulkan.instance = VK_NULL_HANDLE;
+   }
+
+   Vulkan.validationLayersEnabled = false;
 }
-
-

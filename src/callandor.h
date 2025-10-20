@@ -42,11 +42,11 @@ void PollEvents();
 // Vulkan Functions (Module: vulkan)
 //------------------------------------------------------------------------------------
 
-void InitVulkan();
-void CloseVulkan();
+void InitVulkan(bool debug = false);
+void CloseVulkan(bool debug = false);
 
 void InitInstance(bool debug = false);
-void CloseInstance();
+void CloseInstance(bool debug = false);
 
 void InitSurface();
 void CloseSurface();
