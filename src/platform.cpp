@@ -19,6 +19,7 @@ struct PlatformData
     struct
     {
         string_view title;
+        GLFWwindow *handle;
         bool ready;
 
     } Window;
@@ -80,4 +81,65 @@ span<const char *> GetPlatformVulkanExtensions()
 
     ready = true;
     return {cache.data(), count};
+}
+
+void InitWindow()
+{
+    Assert(Platform.Glfw.ready, "GLFW must be initialized before trying to init window");
+
+    glfwDefaultWindowHints();
+    glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+    glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
+#if defined(__APPLE__)
+    glfwWindowHint(GLFW_COCOA_RETINA_FRAMEBUFFER, GLFW_FALSE);
+#endif
+
+    Platform.Window.title = "Callandor";
+    Platform.Window.handle = glfwCreateWindow(1270, 720, Platform.Window.title.data(), nullptr, nullptr);
+
+    Platform.Window.ready = true;
+}
+
+void CloseWindow()
+{
+    if (!Platform.Window.ready)
+    {
+        return;
+    }
+
+    glfwDestroyWindow(Platform.Window.handle);
+    Platform.Window.handle = nullptr;
+
+    Platform.Window.ready = false;
+}
+
+bool WindowShouldClose()
+{
+    if (!Platform.Window.ready || !Platform.Window.handle)
+    {
+        return true;
+    }
+
+    return glfwWindowShouldClose(Platform.Window.handle);
+}
+
+bool IsWindowReady()
+{
+    return Platform.Window.ready;
+}
+
+int GetFramebufferHeight()
+{
+
+}
+
+int GetFramebufferWidth()
+{
+
+}
+
+
+void PollEvents()
+{
+    glfwPollEvents();
 }

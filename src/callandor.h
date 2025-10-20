@@ -24,7 +24,7 @@ int GetFramebufferWidth();
 bool IsKeyPressed();
 
 // Eventloop-related functions
-void Poll();
+void PollEvents();
 
 //------------------------------------------------------------------------------------
 // Vulkan Functions (Module: vulkan)

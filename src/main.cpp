@@ -8,12 +8,14 @@ int main()
 {
     InitGlfwContext();
 
-    auto exts = GetPlatformVulkanExtensions();
+    InitWindow();
 
-    for (auto ext : exts)
+    while(!WindowShouldClose())
     {
-        cout << ext << endl;
+        PollEvents();
     }
+
+    CloseWindow();
 
     CloseGlfwContext();
 
