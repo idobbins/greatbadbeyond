@@ -18,7 +18,7 @@ bool WindowShouldClose();
 bool IsWindowReady();
 int GetFramebufferHeight();
 int GetFramebufferWidth();
-std::span<const char *const> GetWindowVulkanExtensions();
+std::span<const char *> GetWindowVulkanExtensions();
 
 // Input-related functions
 bool IsKeyPressed();
