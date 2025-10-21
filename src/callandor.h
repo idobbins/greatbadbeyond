@@ -69,18 +69,23 @@ struct VulkanConfig
 
 // Glfw-specific functions
 void GlfwErrorCallback(i32 code, cstr description);
-void InitGlfwContext();
-void CloseGlfwContext();
+
 auto GetPlatformVulkanExtensions() -> std::span<cstr>;
 
+void CreateGlfwContext();
+void DestroyGlfwContext();
+
 // Window-specific functions
-void InitWindow();
-void CloseWindow();
-auto WindowShouldClose() -> bool;
-auto IsWindowReady() -> bool;
-auto GetWindowSize() -> Size;
+auto WindowShouldClose()  -> bool;
+
+auto IsWindowReady()      -> bool;
+
+auto GetWindowSize()      -> Size;
 auto GetFramebufferSize() -> Size;
-auto GetWindowHandle() -> GLFWwindow *;
+auto GetWindowHandle()    -> GLFWwindow *;
+
+void CreateWindow();
+void DestroyWindow();
 
 // Input-related functions
 bool IsKeyPressed();
@@ -92,28 +97,29 @@ void PollEvents();
 // Vulkan Functions (Module: vulkan)
 //------------------------------------------------------------------------------------
 
-// Top-level-related functions
+// Debug-related functions
 auto VulkanDebugCallback(
     VkDebugUtilsMessageSeverityFlagBitsEXT,
     VkDebugUtilsMessageTypeFlagsEXT ,
     const VkDebugUtilsMessengerCallbackDataEXT *,
     void *) -> VKAPI_ATTR VkBool32 VKAPI_CALL;
 
-void InitVulkan(const VulkanConfig &config);
-void CloseVulkan(const VulkanConfig &config);
+void CreateDebugMessenger();
+void DestroyDebugMessenger();
 
 // Instance-related functions
-void InitInstance(const VulkanConfig &config);
-void CloseInstance(const VulkanConfig &config);
+void CreateInstance(const VulkanConfig &config);
+void DestroyInstance(const VulkanConfig &config);
 
 // Surface-related functions
-void InitSurface();
-void CloseSurface();
+void CreateSurface();
+void DestroySurface();
 
 // Physical device-related functions
-auto GetPhysicalDeviceFeatures() -> VkPhysicalDeviceFeatures2;
-auto EnsurePhysicalDeviceSufficient() -> bool;
-auto GetPhysicalDevices() -> std::span<const VkPhysicalDevice>;
+auto EnsurePhysicalDeviceSufficient()                           -> bool;
+auto GetPhysicalDevices()                                       -> std::span<const VkPhysicalDevice>;
+auto GetPhysicalDeviceFeatures2(const VkPhysicalDevice&)        -> const VkPhysicalDeviceFeatures2&;
+auto GetPhysicalDeviceVulkan13Features(const VkPhysicalDevice&) -> const VkPhysicalDeviceVulkan13Features&;
 void SetPhysicalDevice();
 
 // Surface AND Physical device-realted functions
@@ -125,11 +131,11 @@ auto GetPhysicalDeviceSurfacePresentModes() -> std::span<const VkPresentModeKHR>
 auto GetDeviceExtensionProperties() -> std::span<const VkExtensionProperties>;
 bool CheckDeviceExtensionSupport(std::span<cstr> exts);
 
-void InitDevice(const VulkanConfig &config);
-void CloseDevice();
+void CreateDevice(const VulkanConfig &config);
+void DestroyDevice();
 
 // queue-related functions
-auto GetQueueFamilyProperties(const VkPhysicalDevice& device) -> std::span<const VkQueueFamilyProperties>;
+auto GetQueueFamilyProperties(const VkPhysicalDevice& device)                             -> std::span<const VkQueueFamilyProperties>;
 auto GetUniversalQueue(const VkPhysicalDevice& device, VkSurfaceKHR surface, u32 *family) -> bool;
 
 auto GetGraphicsQueue() -> VkQueue;
@@ -138,13 +144,59 @@ auto GetTransferQueue() -> VkQueue;
 auto GetPresentQueue()  -> VkQueue;
 void GetQueueFamilies();
 
-
 // Swapchain-related functions
+auto GetSwapchainImages() -> std::span<const VkImage>;
+auto GetSwapchainImageViews() -> std::span<const VkImageView>;
+auto GetSwapchainExtent() -> VkExtent2D;
+auto GetSwapchainFormat() -> VkFormat;
+
+void GetSwapchainImageView();
+void GetSwapchainImageViewCount();
+
 void CreateSwapchain();
 void DestroySwapchain();
 void RecreateSwapchain();
 
-u32 GetSwapchainImageCount();
+// VMA-related functions
+void CreateVMAAllocator();
+void DestroyVMAAllocator();
+void AllocateBuffer();
+void FreeBuffer();
+void AllocateImage();
+void FreeImage();
+void AllocateDescriptorSet();
+void FreeDescriptorSet();
 
-void GetSwapchainImageView();
-void GetSwapchainImageViewCount();
+// Command pool-related functions
+void CreateCommandPool();
+void DestroyCommandPool();
+void CreateCommandBuffer();
+void DestroyCommandBuffer();
+
+// Command buffer-related functions
+void RecordCommandBuffer();
+
+// Synchronization-related functions
+void CreateSemaphore();
+void DestroySemaphore();
+void CreateFence();
+void DestroyFence();
+
+// Descriptor-related functions
+void CreateDescriptorSet();
+void DestroyDescriptorSet();
+
+// Shader-related functions
+auto CreateShader() -> VkShaderModule;
+void DestroyShader();
+
+// Pipeline-related functions
+void CreatePipeline();
+void DestroyPipeline();
+
+// Drawing-related functions
+void DrawFrame();
+
+// High-level-related functions
+void CreateVulkan(const VulkanConfig &config);
+void DestroyVulkan(const VulkanConfig &config);

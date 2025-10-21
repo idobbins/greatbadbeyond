@@ -32,7 +32,7 @@ void GlfwErrorCallback(int code, const char *description)
     cerr << "[glfw][error " << code << "] " << message << endl;
 }
 
-void InitGlfwContext()
+void CreateGlfwContext()
 {
     if (Platform.Glfw.ready)
     {
@@ -46,7 +46,7 @@ void InitGlfwContext()
     Platform.Glfw.ready = true;
 }
 
-void CloseGlfwContext()
+void DestroyGlfwContext()
 {
     if (!Platform.Glfw.ready)
     {
@@ -84,7 +84,7 @@ span<const char *> GetPlatformVulkanExtensions()
     return {cache.data(), count};
 }
 
-void InitWindow()
+void CreateWindow()
 {
     Assert(Platform.Glfw.ready, "GLFW must be initialized before trying to init window");
 
@@ -101,7 +101,7 @@ void InitWindow()
     Platform.Window.ready = true;
 }
 
-void CloseWindow()
+void DestroyWindow()
 {
     if (!Platform.Window.ready)
     {

@@ -6,8 +6,8 @@ using namespace std;
 
 int main()
 {
-    InitGlfwContext();
-    InitWindow();
+    CreateGlfwContext();
+    CreateWindow();
 
     VulkanConfig config = {};
 
@@ -23,16 +23,16 @@ int main()
     config.portability = false;
 #endif
 
-    InitVulkan(config);
+    CreateVulkan(config);
 
     while (!WindowShouldClose())
     {
         PollEvents();
     }
-    CloseVulkan(config);
+    DestroyVulkan(config);
 
-    CloseWindow();
-    CloseGlfwContext();
+    DestroyWindow();
+    DestroyGlfwContext();
 
     return 0;
 }

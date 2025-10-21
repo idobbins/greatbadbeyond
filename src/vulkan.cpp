@@ -64,22 +64,23 @@ VKAPI_ATTR VkBool32 VKAPI_CALL VulkanDebugCallback(
    return VK_FALSE;
 }
 
-void InitVulkan(const VulkanConfig &config)
+void CreateVulkan(const VulkanConfig &config)
 {
-   InitInstance(config);
-   InitSurface();
+   CreateInstance(config);
+   CreateSurface();
    SetPhysicalDevice();
-   InitDevice(config);
+
+   CreateDevice(config);
 }
 
-void CloseVulkan(const VulkanConfig &config)
+void DestroyVulkan(const VulkanConfig &config)
 {
-   CloseDevice();
-   CloseSurface();
-   CloseInstance(config);
+   DestroyDevice();
+   DestroySurface();
+   DestroyInstance(config);
 }
 
-void InitInstance(const VulkanConfig &config)
+void CreateInstance(const VulkanConfig &config)
 {
    VkApplicationInfo app_info {
       .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
@@ -163,7 +164,7 @@ void InitInstance(const VulkanConfig &config)
    Vulkan.validationLayersEnabled = (layers.size() > 0);
 }
 
-void CloseInstance(const VulkanConfig &config)
+void DestroyInstance(const VulkanConfig &config)
 {
    (void)config;
 
@@ -182,7 +183,7 @@ void CloseInstance(const VulkanConfig &config)
    Vulkan.deviceReady = false;
 }
 
-void InitSurface()
+void CreateSurface()
 {
    Assert(Vulkan.instance != VK_NULL_HANDLE, "Vulkan instance must be created before the surface");
 
@@ -193,7 +194,7 @@ void InitSurface()
    Assert(result == VK_SUCCESS, "Failed to create Vulkan surface");
 }
 
-void CloseSurface()
+void DestroySurface()
 {
    if (Vulkan.surface == VK_NULL_HANDLE)
    {
@@ -204,6 +205,71 @@ void CloseSurface()
 
    vkDestroySurfaceKHR(Vulkan.instance, Vulkan.surface, nullptr);
    Vulkan.surface = VK_NULL_HANDLE;
+}
+
+auto GetPhysicalDeviceFeatures2(const VkPhysicalDevice &device) -> const VkPhysicalDeviceFeatures2&
+{
+   Assert(device != VK_NULL_HANDLE, "Physical device handle is null");
+
+   struct CacheEntry {
+      VkPhysicalDevice          physicalDevice{};
+      VkPhysicalDeviceFeatures2 features2{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
+      bool                      ready{};
+   };
+
+   static array<CacheEntry, MaxPhysicalDevices> cache {};
+   static u32 cacheCount = 0;
+
+   for (u32 index = 0; index < cacheCount; ++index)
+   {
+      const auto &entry = cache[index];
+      if (entry.ready && entry.physicalDevice == device)
+      {
+         return entry.features2;
+      }
+   }
+
+   Assert(cacheCount < cache.size(), "Too many features2 cache entries");
+   auto &entry = cache[cacheCount++];
+   entry = CacheEntry{ .physicalDevice = device };
+   vkGetPhysicalDeviceFeatures2(device, &entry.features2);
+   entry.ready = true;
+
+   return entry.features2;
+}
+
+auto GetPhysicalDeviceVulkan13Features(const VkPhysicalDevice &device) -> const VkPhysicalDeviceVulkan13Features&
+{
+   Assert(device != VK_NULL_HANDLE, "Physical device handle is null");
+
+   struct CacheEntry {
+      VkPhysicalDevice                 physicalDevice{};
+      VkPhysicalDeviceVulkan13Features features13{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES };
+      bool                             ready{};
+   };
+
+   static array<CacheEntry, MaxPhysicalDevices> cache {};
+   static u32 cacheCount = 0;
+
+   for (u32 index = 0; index < cacheCount; ++index)
+   {
+      const auto &entry = cache[index];
+      if (entry.ready && entry.physicalDevice == device)
+      {
+         return entry.features13;
+      }
+   }
+
+   Assert(cacheCount < cache.size(), "Too many v1.3 feature cache entries");
+   auto &entry = cache[cacheCount++];
+   entry = CacheEntry{ .physicalDevice = device };
+
+   VkPhysicalDeviceFeatures2 head { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
+   head.pNext = &entry.features13;
+   vkGetPhysicalDeviceFeatures2(device, &head);
+
+   entry.ready = true;
+   return entry.features13;
 }
 
 span<const VkPhysicalDevice> GetPhysicalDevices()
@@ -349,7 +415,7 @@ void SetPhysicalDevice()
    Assert(false, "Failed to find a Vulkan physical device with universal queue support");
 }
 
-void InitDevice(const VulkanConfig &config)
+void CreateDevice(const VulkanConfig &config)
 {
    if (Vulkan.deviceReady)
    {
@@ -358,16 +424,8 @@ void InitDevice(const VulkanConfig &config)
 
    Assert(Vulkan.physicalDeviceReady, "Select a physical device before creating the logical device");
 
-   VkPhysicalDeviceVulkan13Features supportedFeatures13 = {
-      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
-   };
-
-   VkPhysicalDeviceFeatures2 supportedFeatures2 = {
-      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
-      .pNext = &supportedFeatures13,
-   };
-
-   vkGetPhysicalDeviceFeatures2(Vulkan.physicalDevice, &supportedFeatures2);
+   GetPhysicalDeviceFeatures2(Vulkan.physicalDevice);
+   const auto &supportedFeatures13 = GetPhysicalDeviceVulkan13Features(Vulkan.physicalDevice);
 
    Assert(supportedFeatures13.dynamicRendering == VK_TRUE, "Physical device does not support dynamic rendering");
    Assert(supportedFeatures13.synchronization2 == VK_TRUE, "Physical device does not support synchronization2");
@@ -455,7 +513,7 @@ void InitDevice(const VulkanConfig &config)
    LogInfo("[vulkan] Created logical device with universal queue family %u", Vulkan.universalQueueFamily);
 }
 
-void CloseDevice()
+void DestroyDevice()
 {
    if (Vulkan.device == VK_NULL_HANDLE)
    {
