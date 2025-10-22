@@ -14,12 +14,30 @@
 //------------------------------------------------------------------------------------
 // Primitive Type Aliases (C-style, C++20)
 //------------------------------------------------------------------------------------
-using i8  = std::int8_t;   using i16 = std::int16_t;   using i32 = std::int32_t;   using i64 = std::int64_t;
-using u8  = std::uint8_t;  using u16 = std::uint16_t;  using u32 = std::uint32_t;  using u64 = std::uint64_t;
-using f32 = float;         using f64 = double;
-using b8  = bool;          using c8  = char;
-using cstr = const char*;  using mut_cstr = char*;     using ptr = void*;          using cptr = const void*;
-using usize = std::size_t; using isize = std::ptrdiff_t;
+using i8  = std::int8_t;
+using i16 = std::int16_t;
+using i32 = std::int32_t;
+using i64 = std::int64_t;
+
+using u8  = std::uint8_t;
+using u16 = std::uint16_t;
+using u32 = std::uint32_t;
+using u64 = std::uint64_t;
+
+using f32 = float;
+using f64 = double;
+
+using b8  = bool;
+using c8  = char;
+
+using cstr = const char*;
+using mut_cstr = char*;
+
+using ptr = void*;
+using cptr = const void*;
+
+using usize = std::size_t;
+using isize = std::ptrdiff_t;
 
 //------------------------------------------------------------------------------------
 // Common POD
@@ -94,20 +112,17 @@ void DestroySurface();
 //====================================================================================
 // Physical Device (selection & queries)
 //====================================================================================
-auto GetPhysicalDevices()                           -> std::span<const VkPhysicalDevice>;
-auto GetQueueFamilyProperties(const VkPhysicalDevice&)
-                                                    -> std::span<const VkQueueFamilyProperties>;
-auto GetPhysicalDeviceFeatures2(const VkPhysicalDevice&)
-                                                    -> const VkPhysicalDeviceFeatures2&;
-auto GetPhysicalDeviceVulkan13Features(const VkPhysicalDevice&)
-                                                    -> const VkPhysicalDeviceVulkan13Features&;
-auto GetPhysicalDeviceMemoryProperties(const VkPhysicalDevice&)
-                                                    -> const VkPhysicalDeviceMemoryProperties&;
-auto GetPhysicalDeviceSurfaceCapabilities()         -> VkSurfaceCapabilitiesKHR;
-auto GetPhysicalDeviceSurfaceFormats()              -> std::span<const VkSurfaceFormatKHR>;
-auto GetPhysicalDeviceSurfacePresentModes()         -> std::span<const VkPresentModeKHR>;
+auto GetPhysicalDevices()                                       -> std::span<const VkPhysicalDevice>;
+auto GetQueueFamilyProperties(const VkPhysicalDevice&)          -> std::span<const VkQueueFamilyProperties>;
+auto GetPhysicalDeviceFeatures2(const VkPhysicalDevice&)        -> const VkPhysicalDeviceFeatures2&;
+auto GetPhysicalDeviceVulkan13Features(const VkPhysicalDevice&) -> const VkPhysicalDeviceVulkan13Features&;
+auto GetPhysicalDeviceMemoryProperties(const VkPhysicalDevice&) -> const VkPhysicalDeviceMemoryProperties&;
+auto GetPhysicalDeviceSurfaceCapabilities()                     -> VkSurfaceCapabilitiesKHR;
+auto GetPhysicalDeviceSurfaceFormats()                          -> std::span<const VkSurfaceFormatKHR>;
+auto GetPhysicalDeviceSurfacePresentModes()                     -> std::span<const VkPresentModeKHR>;
 
-auto EnsurePhysicalDeviceSufficient()               -> b8;
+auto EnsurePhysicalDeviceSufficient()                           -> b8;
+
 void SetPhysicalDevice(); // choose & cache
 
 //====================================================================================
@@ -116,8 +131,8 @@ void SetPhysicalDevice(); // choose & cache
 void CreateDevice(const VulkanConfig& cfg);
 void DestroyDevice();
 
-auto GetDeviceExtensionProperties()                 -> std::span<const VkExtensionProperties>;
-auto CheckDeviceExtensionSupport(std::span<cstr>)   -> b8;
+auto GetDeviceExtensionProperties()               -> std::span<const VkExtensionProperties>;
+auto CheckDeviceExtensionSupport(std::span<cstr>) -> b8;
 
 // Queue family indices (cached after SetPhysicalDevice)
 auto GraphicsFamilyIndex() -> u32;
@@ -153,11 +168,9 @@ auto GetSwapchainImageViews() -> std::span<const VkImageView>;
 auto GetSwapchainExtent()     -> VkExtent2D;
 auto GetSwapchainFormat()     -> VkFormat;
 
-auto ChooseSwapSurfaceFormat(std::span<const VkSurfaceFormatKHR>) -> VkSurfaceFormatKHR;
-auto ChooseSwapPresentMode(std::span<const VkPresentModeKHR>, b8 prefer_mailbox)
-                                                            -> VkPresentModeKHR;
-auto ChooseSwapExtent(const VkSurfaceCapabilitiesKHR&, Size fb_size)
-                                                            -> VkExtent2D;
+auto ChooseSwapSurfaceFormat(std::span<const VkSurfaceFormatKHR>)                -> VkSurfaceFormatKHR;
+auto ChooseSwapPresentMode(std::span<const VkPresentModeKHR>, b8 prefer_mailbox) -> VkPresentModeKHR;
+auto ChooseSwapExtent(const VkSurfaceCapabilitiesKHR&, Size fb_size)             -> VkExtent2D;
 
 auto CreateImageView(VkImage image, VkFormat format, VkImageAspectFlags aspect,
                      u32 mip_levels = 1, u32 base_mip = 0,
@@ -238,7 +251,7 @@ auto GetPipelineLayout()      -> VkPipelineLayout;
 //====================================================================================
 // Shaders (SPIR-V)
 //====================================================================================
-auto CreateShaderModuleFromFile(cstr spv_path) -> VkShaderModule;
+auto CreateShaderModuleFromFile(cstr spv_path)                        -> VkShaderModule;
 auto CreateShaderModuleFromMemory(const u32* words, usize word_count) -> VkShaderModule;
 void DestroyShaderModule(VkShaderModule module);
 
