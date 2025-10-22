@@ -96,6 +96,9 @@ void PollEvents();
 //------------------------------------------------------------------------------------
 // Vulkan Functions (Module: vulkan)
 //------------------------------------------------------------------------------------
+// High-level-related functions
+void CreateVulkan(const VulkanConfig &config);
+void DestroyVulkan(const VulkanConfig &config);
 
 // Debug-related functions
 auto VulkanDebugCallback(
@@ -128,11 +131,11 @@ auto GetPhysicalDeviceSurfaceFormats()      -> std::span<const VkSurfaceFormatKH
 auto GetPhysicalDeviceSurfacePresentModes() -> std::span<const VkPresentModeKHR>;
 
 // Logical device-related functions
-auto GetDeviceExtensionProperties() -> std::span<const VkExtensionProperties>;
-bool CheckDeviceExtensionSupport(std::span<cstr> exts);
-
 void CreateDevice(const VulkanConfig &config);
 void DestroyDevice();
+
+auto GetDeviceExtensionProperties() -> std::span<const VkExtensionProperties>;
+bool CheckDeviceExtensionSupport(std::span<cstr> exts);
 
 // queue-related functions
 auto GetQueueFamilyProperties(const VkPhysicalDevice& device)                             -> std::span<const VkQueueFamilyProperties>;
@@ -145,21 +148,23 @@ auto GetPresentQueue()  -> VkQueue;
 void GetQueueFamilies();
 
 // Swapchain-related functions
+void CreateSwapchain();
+void DestroySwapchain();
+void RecreateSwapchain();
+
+auto CreateImageView() -> VkImageView;
+void DestroyImageView();
+
 auto GetSwapchainImages() -> std::span<const VkImage>;
 auto GetSwapchainImageViews() -> std::span<const VkImageView>;
 auto GetSwapchainExtent() -> VkExtent2D;
 auto GetSwapchainFormat() -> VkFormat;
 
-void GetSwapchainImageView();
-void GetSwapchainImageViewCount();
-
-void CreateSwapchain();
-void DestroySwapchain();
-void RecreateSwapchain();
 
 // VMA-related functions
 void CreateVMAAllocator();
 void DestroyVMAAllocator();
+
 void AllocateBuffer();
 void FreeBuffer();
 void AllocateImage();
@@ -170,15 +175,19 @@ void FreeDescriptorSet();
 // Command pool-related functions
 void CreateCommandPool();
 void DestroyCommandPool();
+
+
+
+// Command buffer-related functions
 void CreateCommandBuffer();
 void DestroyCommandBuffer();
 
-// Command buffer-related functions
 void RecordCommandBuffer();
 
 // Synchronization-related functions
 void CreateSemaphore();
 void DestroySemaphore();
+
 void CreateFence();
 void DestroyFence();
 
@@ -197,6 +206,4 @@ void DestroyPipeline();
 // Drawing-related functions
 void DrawFrame();
 
-// High-level-related functions
-void CreateVulkan(const VulkanConfig &config);
-void DestroyVulkan(const VulkanConfig &config);
+

@@ -2,9 +2,6 @@
 #include <config.h>
 #include <runtime.h>
 
-#include <vulkan/vulkan.h>
-#include <GLFW/glfw3.h>
-
 #include <array>
 #include <cstring>
 #include <iostream>
