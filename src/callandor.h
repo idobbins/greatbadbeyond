@@ -76,6 +76,9 @@ void CreateGlfwContext();
 void DestroyGlfwContext();
 
 // Window-specific functions
+void CreateWindow();
+void DestroyWindow();
+
 auto WindowShouldClose()  -> bool;
 
 auto IsWindowReady()      -> bool;
@@ -83,9 +86,6 @@ auto IsWindowReady()      -> bool;
 auto GetWindowSize()      -> Size;
 auto GetFramebufferSize() -> Size;
 auto GetWindowHandle()    -> GLFWwindow *;
-
-void CreateWindow();
-void DestroyWindow();
 
 // Input-related functions
 bool IsKeyPressed();
