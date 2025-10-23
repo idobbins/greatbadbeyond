@@ -36,7 +36,7 @@ using mut_cstr = char*;
 using ptr = void*;
 using cptr = const void*;
 
-using usize = std::size_t;
+using usize = std::size_t
 using isize = std::ptrdiff_t;
 
 //------------------------------------------------------------------------------------
