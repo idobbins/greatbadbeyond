@@ -1,38 +1,17 @@
-#include <callandor.h>
 
 #include <iostream>
+
+import platform;
 
 using namespace std;
 
 int main()
 {
-    CreateGlfwContext();
-    CreateWindow();
+    auto platform = Platform();
 
-    VulkanConfig config = {};
 
-#ifndef NDEBUG
-    config.debug = true;
-#else
-    config.debug = false;
-#endif
+    platform.Tick();
 
-#if defined(__APPLE__)
-    config.portability = true;
-#else
-    config.portability = false;
-#endif
-
-    CreateVulkan(config);
-
-    while (!WindowShouldClose())
-    {
-        PollEvents();
-    }
-    DestroyVulkan(config);
-
-    DestroyWindow();
-    DestroyGlfwContext();
 
     return 0;
 }
