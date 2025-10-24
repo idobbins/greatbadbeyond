@@ -57,12 +57,6 @@ struct Size
     int height;
 };
 
-struct VulkanConfig
-{
-    bool debug;
-    bool portability;
-};
-
 //------------------------------------------------------------------------------------
 // Window and Platform Functions (Module: platform)
 //------------------------------------------------------------------------------------
@@ -92,12 +86,16 @@ bool IsKeyPressed();
 
 // Eventloop-related functions
 void PollEvents();
+void MainLoop();
+bool RequiresDebug();
+bool RequiresPortability();
 
 //------------------------------------------------------------------------------------
 // Vulkan Functions (Module: vulkan)
 //------------------------------------------------------------------------------------
 
 // Debug-related functions
+// Keep standard return declaration so VKAPI_CALL maps to __stdcall on Windows without warnings.
 VKAPI_ATTR VkBool32 VKAPI_CALL VulkanDebugCallback(
     VkDebugUtilsMessageSeverityFlagBitsEXT,
     VkDebugUtilsMessageTypeFlagsEXT,
@@ -108,8 +106,8 @@ void CreateDebugMessenger();
 void DestroyDebugMessenger();
 
 // Instance-related functions
-void CreateInstance(const VulkanConfig &config);
-void DestroyInstance(const VulkanConfig &config);
+void CreateInstance();
+void DestroyInstance();
 
 // Surface-related functions
 void CreateSurface();
@@ -131,7 +129,7 @@ auto GetPhysicalDeviceSurfacePresentModes() -> std::span<const VkPresentModeKHR>
 auto GetDeviceExtensionProperties() -> std::span<const VkExtensionProperties>;
 bool CheckDeviceExtensionSupport(std::span<cstr> exts);
 
-void CreateDevice(const VulkanConfig &config);
+void CreateDevice();
 void DestroyDevice();
 
 // queue-related functions
@@ -198,5 +196,5 @@ void DestroyPipeline();
 void DrawFrame();
 
 // High-level-related functions
-void CreateVulkan(const VulkanConfig &config);
-void DestroyVulkan(const VulkanConfig &config);
+void CreateVulkan();
+void DestroyVulkan();

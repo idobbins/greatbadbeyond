@@ -1,6 +1,6 @@
 #include <callandor.h>
 #include <config.h>
-#include <runtime.h>
+#include <utils.h>
 
 #include <GLFW/glfw3.h>
 
@@ -176,4 +176,30 @@ GLFWwindow *GetWindowHandle()
 void PollEvents()
 {
     glfwPollEvents();
+}
+
+void MainLoop()
+{
+    while (!WindowShouldClose())
+    {
+        PollEvents();
+    }
+}
+
+bool RequiresDebug()
+{
+#if defined(NDEBUG)
+    return false;
+#else
+    return true;
+#endif
+}
+
+bool RequiresPortability()
+{
+#if defined(__APPLE__)
+    return true;
+#else
+    return false;
+#endif
 }

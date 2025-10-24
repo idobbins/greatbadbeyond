@@ -1,6 +1,6 @@
 #include <callandor.h>
 #include <config.h>
-#include <runtime.h>
+#include <utils.h>
 
 #include <vulkan/vulkan.h>
 #include <GLFW/glfw3.h>
@@ -64,24 +64,27 @@ VKAPI_ATTR VkBool32 VKAPI_CALL VulkanDebugCallback(
    return VK_FALSE;
 }
 
-void CreateVulkan(const VulkanConfig &config)
+void CreateVulkan()
 {
-   CreateInstance(config);
+   CreateInstance();
    CreateSurface();
    SetPhysicalDevice();
 
-   CreateDevice(config);
+   CreateDevice();
 }
 
-void DestroyVulkan(const VulkanConfig &config)
+void DestroyVulkan()
 {
    DestroyDevice();
    DestroySurface();
-   DestroyInstance(config);
+   DestroyInstance();
 }
 
-void CreateInstance(const VulkanConfig &config)
+void CreateInstance()
 {
+   bool debugEnabled = RequiresDebug();
+   bool portabilityEnabled = RequiresPortability();
+
    VkApplicationInfo app_info {
       .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
       .pApplicationName = DefaultApplicationName,
@@ -106,12 +109,12 @@ void CreateInstance(const VulkanConfig &config)
       extensions.push_back(ext);
    }
 
-   if (config.debug)
+   if (debugEnabled)
    {
       extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
    }
 
-   if (config.portability)
+   if (portabilityEnabled)
    {
       extensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
    }
@@ -125,7 +128,7 @@ void CreateInstance(const VulkanConfig &config)
    };
    static pmr::vector<const char *> layers {&layerStackOnlyResource };
 
-   if (config.debug)
+   if (debugEnabled)
    {
       layers.push_back(ValidationLayerName);
    }
@@ -136,7 +139,7 @@ void CreateInstance(const VulkanConfig &config)
    }
 
    VkDebugUtilsMessengerCreateInfoEXT debugCreateInfo = { };
-   if (config.debug)
+   if (debugEnabled)
    {
       debugCreateInfo = {
          .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
@@ -149,8 +152,8 @@ void CreateInstance(const VulkanConfig &config)
 
    VkInstanceCreateInfo createInfo = {
       .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
-      .pNext = config.debug ? &debugCreateInfo : nullptr,
-      .flags = config.portability ? VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR : 0u,
+      .pNext = debugEnabled ? &debugCreateInfo : nullptr,
+      .flags = portabilityEnabled ? VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR : 0u,
       .pApplicationInfo = &app_info,
       .enabledLayerCount = static_cast<uint32_t>(layers.size()),
       .ppEnabledLayerNames = layers.data(),
@@ -164,10 +167,8 @@ void CreateInstance(const VulkanConfig &config)
    Vulkan.validationLayersEnabled = (layers.size() > 0);
 }
 
-void DestroyInstance(const VulkanConfig &config)
+void DestroyInstance()
 {
-   (void)config;
-
    if (Vulkan.instance != VK_NULL_HANDLE)
    {
       vkDestroyInstance(Vulkan.instance, nullptr);
@@ -415,7 +416,7 @@ void SetPhysicalDevice()
    Assert(false, "Failed to find a Vulkan physical device with universal queue support");
 }
 
-void CreateDevice(const VulkanConfig &config)
+void CreateDevice()
 {
    if (Vulkan.deviceReady)
    {
@@ -446,7 +447,7 @@ void CreateDevice(const VulkanConfig &config)
    extensions[extensionCount++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
    Assert(extensionCount <= extensions.size(), "Too many requested device extensions");
 
-   if (config.portability)
+   if (RequiresPortability())
    {
       extensions[extensionCount++] = VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME;
       Assert(extensionCount <= extensions.size(), "Too many requested device extensions");
@@ -476,7 +477,7 @@ void CreateDevice(const VulkanConfig &config)
 
    Assert(hasExtension(VK_KHR_SWAPCHAIN_EXTENSION_NAME), "Required Vulkan device extension VK_KHR_swapchain is missing");
 
-   if (config.portability)
+   if (RequiresPortability())
    {
       Assert(hasExtension(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME), "Required Vulkan device extension VK_KHR_portability_subset is missing");
    }
