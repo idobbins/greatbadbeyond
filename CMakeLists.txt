@@ -49,6 +49,9 @@ target_sources(${PROJECT_NAME}
         src/assert.ixx
         src/glfw.ixx
         src/platform.ixx
+        src/stack_only_vector.ixx
+        src/vulkan.ixx
+        src/VulkanInstance.ixx
         src/window.ixx
 )
 
