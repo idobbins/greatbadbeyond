@@ -98,11 +98,11 @@ void PollEvents();
 //------------------------------------------------------------------------------------
 
 // Debug-related functions
-auto VulkanDebugCallback(
+VKAPI_ATTR VkBool32 VKAPI_CALL VulkanDebugCallback(
     VkDebugUtilsMessageSeverityFlagBitsEXT,
-    VkDebugUtilsMessageTypeFlagsEXT ,
+    VkDebugUtilsMessageTypeFlagsEXT,
     const VkDebugUtilsMessengerCallbackDataEXT *,
-    void *) -> VKAPI_ATTR VkBool32 VKAPI_CALL;
+    void *);
 
 void CreateDebugMessenger();
 void DestroyDebugMessenger();
