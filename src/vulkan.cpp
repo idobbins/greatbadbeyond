@@ -21,6 +21,7 @@ using namespace std;
 static struct VulkanData
 {
    VkInstance instance;
+   VkDebugUtilsMessengerEXT debugMessenger;
    VkSurfaceKHR surface;
    VkPhysicalDevice physicalDevice;
    VkDevice device;
@@ -28,6 +29,7 @@ static struct VulkanData
    u32 universalQueueFamily;
 
    bool validationLayersEnabled;
+   bool debugMessengerReady;
    bool physicalDeviceReady;
    bool deviceReady;
 
@@ -64,9 +66,56 @@ VKAPI_ATTR VkBool32 VKAPI_CALL VulkanDebugCallback(
    return VK_FALSE;
 }
 
+void CreateDebugMessenger()
+{
+   if (!Vulkan.validationLayersEnabled || Vulkan.debugMessengerReady)
+   {
+      return;
+   }
+
+   Assert(Vulkan.instance != VK_NULL_HANDLE, "Vulkan instance must exist before creating the debug messenger");
+
+   VkDebugUtilsMessengerCreateInfoEXT createInfo = {
+      .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
+      .messageSeverity = DefaultDebugSeverityMask,
+      .messageType = DefaultDebugTypeMask,
+      .pfnUserCallback = VulkanDebugCallback,
+      .pUserData = nullptr,
+   };
+
+   auto createFn = reinterpret_cast<PFN_vkCreateDebugUtilsMessengerEXT>(
+      vkGetInstanceProcAddr(Vulkan.instance, "vkCreateDebugUtilsMessengerEXT"));
+   Assert(createFn != nullptr, "Failed to load vkCreateDebugUtilsMessengerEXT");
+
+   VkResult result = createFn(Vulkan.instance, &createInfo, nullptr, &Vulkan.debugMessenger);
+   Assert(result == VK_SUCCESS, "Failed to create Vulkan debug messenger");
+
+   Vulkan.debugMessengerReady = true;
+}
+
+void DestroyDebugMessenger()
+{
+   if (Vulkan.debugMessenger == VK_NULL_HANDLE)
+   {
+      Vulkan.debugMessengerReady = false;
+      return;
+   }
+
+   Assert(Vulkan.instance != VK_NULL_HANDLE, "Vulkan instance must be valid when destroying the debug messenger");
+
+   auto destroyFn = reinterpret_cast<PFN_vkDestroyDebugUtilsMessengerEXT>(
+      vkGetInstanceProcAddr(Vulkan.instance, "vkDestroyDebugUtilsMessengerEXT"));
+   Assert(destroyFn != nullptr, "Failed to load vkDestroyDebugUtilsMessengerEXT");
+
+   destroyFn(Vulkan.instance, Vulkan.debugMessenger, nullptr);
+   Vulkan.debugMessenger = VK_NULL_HANDLE;
+   Vulkan.debugMessengerReady = false;
+}
+
 void CreateVulkan()
 {
    CreateInstance();
+   CreateDebugMessenger();
    CreateSurface();
    SetPhysicalDevice();
 
@@ -169,6 +218,8 @@ void CreateInstance()
 
 void DestroyInstance()
 {
+   DestroyDebugMessenger();
+
    if (Vulkan.instance != VK_NULL_HANDLE)
    {
       vkDestroyInstance(Vulkan.instance, nullptr);
@@ -176,6 +227,7 @@ void DestroyInstance()
    }
 
    Vulkan.validationLayersEnabled = false;
+   Vulkan.debugMessengerReady = false;
    Vulkan.physicalDevice = VK_NULL_HANDLE;
    Vulkan.device = VK_NULL_HANDLE;
    Vulkan.universalQueue = VK_NULL_HANDLE;
