@@ -82,13 +82,13 @@ void CreateWindow();
 void DestroyWindow();
 
 // Input-related functions
-bool IsKeyPressed();
+auto IsKeyPressed() -> bool;
 
 // Eventloop-related functions
 void PollEvents();
 void MainLoop();
-bool RequiresDebug();
-bool RequiresPortability();
+auto RequiresDebug() -> bool;
+auto RequiresPortability() -> bool;
 
 //------------------------------------------------------------------------------------
 // Vulkan Functions (Module: vulkan)
@@ -127,7 +127,7 @@ auto GetPhysicalDeviceSurfacePresentModes() -> std::span<const VkPresentModeKHR>
 
 // Logical device-related functions
 auto GetDeviceExtensionProperties() -> std::span<const VkExtensionProperties>;
-bool CheckDeviceExtensionSupport(std::span<cstr> exts);
+auto CheckDeviceExtensionSupport(std::span<cstr> exts) -> bool;
 
 void CreateDevice();
 void DestroyDevice();

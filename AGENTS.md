@@ -48,6 +48,8 @@ Functions | TitleCase | `CreateVulkan()`, `PollEvents()`
 Function params | lowerCase | `width`, `height`
 Ternary operator | (condition)? result1 : result2 | `value = (ready)? active : idle;`
 
+- Prefer trailing return syntax (`auto Foo() -> Type`) for non-void functions, but leave `void Foo()` in the traditional form so side-effect-only routines stand out when scanning declarations.
+
 Additional formatting guidance:
 - Global renderer state follows raylib's pattern: group related data inside translation-unit `static` structs (for example `Platform` and `Vulkan`) but surface the controlling functions via `callandor.h` so the single header still captures the behavior.
 - Use `nullptr`, `VK_NULL_HANDLE`, and explicit zero-initialization braces to make intent obvious.

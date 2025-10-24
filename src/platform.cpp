@@ -60,7 +60,7 @@ void DestroyGlfwContext()
 
 
 
-span<const char *> GetPlatformVulkanExtensions()
+auto GetPlatformVulkanExtensions() -> span<const char *>
 {
     static array<const char*, MaxPlatformInstanceExtensions> cache {};
     static uint32_t count = 0;
@@ -114,7 +114,7 @@ void DestroyWindow()
     Platform.Window.ready = false;
 }
 
-bool WindowShouldClose()
+auto WindowShouldClose() -> bool
 {
     if (!Platform.Window.ready || !Platform.Window.handle)
     {
@@ -124,12 +124,12 @@ bool WindowShouldClose()
     return glfwWindowShouldClose(Platform.Window.handle);
 }
 
-bool IsWindowReady()
+auto IsWindowReady() -> bool
 {
     return Platform.Window.ready;
 }
 
-Size GetWindowSize()
+auto GetWindowSize() -> Size
 {
     Size size = {0, 0};
 
@@ -148,7 +148,7 @@ Size GetWindowSize()
     return size;
 }
 
-Size GetFramebufferSize()
+auto GetFramebufferSize() -> Size
 {
     Size size = {0, 0};
 
@@ -167,7 +167,7 @@ Size GetFramebufferSize()
     return size;
 }
 
-GLFWwindow *GetWindowHandle()
+auto GetWindowHandle() -> GLFWwindow *
 {
     Assert(Platform.Window.ready && Platform.Window.handle != nullptr, "Window is not ready");
     return Platform.Window.handle;
@@ -186,7 +186,7 @@ void MainLoop()
     }
 }
 
-bool RequiresDebug()
+auto RequiresDebug() -> bool
 {
 #if defined(NDEBUG)
     return false;
@@ -195,7 +195,7 @@ bool RequiresDebug()
 #endif
 }
 
-bool RequiresPortability()
+auto RequiresPortability() -> bool
 {
 #if defined(__APPLE__)
     return true;

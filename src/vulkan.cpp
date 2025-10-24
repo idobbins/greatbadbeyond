@@ -150,7 +150,7 @@ void CreateInstance()
       extensionBuffer.size(),
       pmr::null_memory_resource() // Disallow heap fallback (stack-only vector)
    };
-   static pmr::vector<const char *> extensions {&extensionStackOnlyResource};
+   pmr::vector<const char *> extensions {&extensionStackOnlyResource};
 
    // Build Instance Config
    for (auto ext : GetPlatformVulkanExtensions())
@@ -175,7 +175,7 @@ void CreateInstance()
       layerBuffer.size(),
       pmr::null_memory_resource() // Disallow heap fallback (stack-only vector)
    };
-   static pmr::vector<const char *> layers {&layerStackOnlyResource };
+   pmr::vector<const char *> layers {&layerStackOnlyResource };
 
    if (debugEnabled)
    {
@@ -325,7 +325,7 @@ auto GetPhysicalDeviceVulkan13Features(const VkPhysicalDevice &device) -> const 
    return entry.features13;
 }
 
-span<const VkPhysicalDevice> GetPhysicalDevices()
+auto GetPhysicalDevices() -> span<const VkPhysicalDevice>
 {
    static array<VkPhysicalDevice, MaxPhysicalDevices> cache {};
    static uint32_t count = 0;
@@ -353,7 +353,7 @@ span<const VkPhysicalDevice> GetPhysicalDevices()
    return {cache.data(), count};
 }
 
-span<const VkQueueFamilyProperties> GetQueueFamilyProperties(const VkPhysicalDevice &device)
+auto GetQueueFamilyProperties(const VkPhysicalDevice &device) -> span<const VkQueueFamilyProperties>
 {
    Assert(device != VK_NULL_HANDLE, "Physical device handle is null");
 
@@ -401,7 +401,7 @@ span<const VkQueueFamilyProperties> GetQueueFamilyProperties(const VkPhysicalDev
    return {entry.properties.data(), entry.count};
 }
 
-bool GetUniversalQueue(const VkPhysicalDevice &device, VkSurfaceKHR surface, uint32_t *family)
+auto GetUniversalQueue(const VkPhysicalDevice &device, VkSurfaceKHR surface, uint32_t *family) -> bool
 {
    Assert(family != nullptr, "Queue family output pointer is null");
    Assert(surface != VK_NULL_HANDLE, "Vulkan surface handle is null");
