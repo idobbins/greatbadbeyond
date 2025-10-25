@@ -8,6 +8,8 @@ layout(std430, set = 0, binding = 2) readonly buffer Spheres16 { uvec2 q[]; };
 layout(std430, set = 0, binding = 3) readonly buffer MatIds { uint mid[]; };
 layout(std430, set = 0, binding = 4) readonly buffer MatAlbedoRoughness { vec4 albRgh[]; };
 layout(std430, set = 0, binding = 5) readonly buffer MatEmissive { vec4 emit[]; };
+layout(std430, set = 0, binding = 6) readonly buffer GridCells { uvec2 cells[]; };
+layout(std430, set = 0, binding = 7) readonly buffer GridIndices { uint cellIndices[]; };
 
 layout(push_constant) uniform PathParams {
     vec2 resolution;
@@ -29,9 +31,13 @@ layout(push_constant) uniform PathParams {
     float qScaleMax;
 
     uint sphereCount;
+    uint gridCellCount;
+    uint gridResolutionX;
+    uint gridResolutionY;
+    uint gridResolutionZ;
+    uint gridIndexCount;
     uint padA;
     uint padB;
-    uint padC;
 } pc;
 
 const vec3 PlaneNormal = vec3(0.0, 1.0, 0.0);
@@ -145,6 +151,171 @@ vec3 sky(vec3 d)
     return mix(vec3(1.0), vec3(0.5, 0.7, 1.0), t);
 }
 
+bool traceSpheresLinear(Ray ray, float tmax, inout HitInfo info)
+{
+    bool hit = false;
+    float best = tmax;
+
+    for (uint i = 0u; i < pc.sphereCount; ++i)
+    {
+        vec3 c;
+        float r;
+        decodeSphere(i, c, r);
+        float tSphere;
+        if (hitSphere(ray.o, ray.d, c, r, 0.001, best, tSphere))
+        {
+            best = tSphere;
+            info.t = tSphere;
+            info.normal = normalize((ray.o + ray.d * tSphere) - c);
+            info.primitive = int(i);
+            hit = true;
+        }
+    }
+
+    return hit;
+}
+
+bool traceUniformGrid(Ray ray, inout HitInfo info)
+{
+    ivec3 dims = ivec3(int(pc.gridResolutionX), int(pc.gridResolutionY), int(pc.gridResolutionZ));
+    if ((pc.gridCellCount == 0u) || (pc.gridIndexCount == 0u) || any(lessThanEqual(dims, ivec3(0))))
+    {
+        return false;
+    }
+
+    vec3 boundsMin = pc.qOrigin;
+    vec3 boundsMax = pc.qOrigin + pc.qScale;
+    vec3 dir = ray.d;
+    vec3 invDir = vec3(
+        (abs(dir.x) > 1e-5) ? 1.0 / dir.x : ((dir.x >= 0.0) ? 1e30 : -1e30),
+        (abs(dir.y) > 1e-5) ? 1.0 / dir.y : ((dir.y >= 0.0) ? 1e30 : -1e30),
+        (abs(dir.z) > 1e-5) ? 1.0 / dir.z : ((dir.z >= 0.0) ? 1e30 : -1e30));
+
+    vec3 t0 = (boundsMin - ray.o) * invDir;
+    vec3 t1 = (boundsMax - ray.o) * invDir;
+    vec3 tNear = min(t0, t1);
+    vec3 tFar = max(t0, t1);
+    float tEnter = max(max(tNear.x, tNear.y), max(tNear.z, 0.0));
+    float tExit = min(min(tFar.x, tFar.y), tFar.z);
+    if (tExit < tEnter)
+    {
+        return false;
+    }
+
+    vec3 dimF = vec3(dims);
+    vec3 cellSize = pc.qScale / dimF;
+    vec3 safeSize = max(cellSize, vec3(1e-4));
+    float startT = max(tEnter, 0.0);
+    vec3 startPos = ray.o + dir * startT;
+    vec3 rel = (startPos - boundsMin) / safeSize;
+    rel = clamp(rel, vec3(0.0), dimF - vec3(1e-4));
+    ivec3 cell = clamp(ivec3(floor(rel)), ivec3(0), dims - ivec3(1));
+
+    ivec3 step = ivec3(
+        (dir.x > 0.0) ? 1 : ((dir.x < 0.0) ? -1 : 0),
+        (dir.y > 0.0) ? 1 : ((dir.y < 0.0) ? -1 : 0),
+        (dir.z > 0.0) ? 1 : ((dir.z < 0.0) ? -1 : 0));
+
+    vec3 cellMin = boundsMin + vec3(cell) * safeSize;
+    vec3 cellMax = cellMin + safeSize;
+
+    vec3 tMax;
+    tMax.x = (step.x > 0) ? (cellMax.x - ray.o.x) * invDir.x : ((step.x < 0) ? (cellMin.x - ray.o.x) * invDir.x : 1e30);
+    tMax.y = (step.y > 0) ? (cellMax.y - ray.o.y) * invDir.y : ((step.y < 0) ? (cellMin.y - ray.o.y) * invDir.y : 1e30);
+    tMax.z = (step.z > 0) ? (cellMax.z - ray.o.z) * invDir.z : ((step.z < 0) ? (cellMin.z - ray.o.z) * invDir.z : 1e30);
+
+    vec3 tDelta = vec3(
+        (step.x != 0) ? abs(safeSize.x * invDir.x) : 1e30,
+        (step.y != 0) ? abs(safeSize.y * invDir.y) : 1e30,
+        (step.z != 0) ? abs(safeSize.z * invDir.z) : 1e30);
+
+    float maxDistance = min(tExit, info.t);
+    float currentT = startT;
+    bool hit = false;
+    uint strideY = uint(dims.x);
+    uint strideZ = uint(dims.x * dims.y);
+
+    while ((cell.x >= 0) && (cell.x < dims.x) &&
+           (cell.y >= 0) && (cell.y < dims.y) &&
+           (cell.z >= 0) && (cell.z < dims.z))
+    {
+        uint cellIndex = uint(cell.x) + strideY * uint(cell.y) + strideZ * uint(cell.z);
+        if (cellIndex < pc.gridCellCount)
+        {
+            uvec2 cellInfo = cells[cellIndex];
+            uint offset = cellInfo.x;
+            uint count = cellInfo.y;
+            if ((count > 0u) && (offset < pc.gridIndexCount))
+            {
+                uint end = min(offset + count, pc.gridIndexCount);
+                for (uint idx = offset; idx < end; ++idx)
+                {
+                    uint sphereIndex = cellIndices[idx];
+                    if (sphereIndex >= pc.sphereCount)
+                    {
+                        continue;
+                    }
+                    vec3 c;
+                    float r;
+                    decodeSphere(sphereIndex, c, r);
+                    float tSphere;
+                    if (hitSphere(ray.o, ray.d, c, r, 0.001, maxDistance, tSphere))
+                    {
+                        maxDistance = tSphere;
+                        info.t = tSphere;
+                        info.normal = normalize((ray.o + ray.d * tSphere) - c);
+                        info.primitive = int(sphereIndex);
+                        hit = true;
+                    }
+                }
+            }
+        }
+
+        if (maxDistance <= currentT)
+        {
+            break;
+        }
+
+        if ((tMax.x < tMax.y) && (tMax.x < tMax.z))
+        {
+            if (tMax.x > maxDistance)
+            {
+                break;
+            }
+            cell.x += step.x;
+            currentT = tMax.x;
+            tMax.x += tDelta.x;
+        }
+        else if (tMax.y < tMax.z)
+        {
+            if (tMax.y > maxDistance)
+            {
+                break;
+            }
+            cell.y += step.y;
+            currentT = tMax.y;
+            tMax.y += tDelta.y;
+        }
+        else
+        {
+            if (tMax.z > maxDistance)
+            {
+                break;
+            }
+            cell.z += step.z;
+            currentT = tMax.z;
+            tMax.z += tDelta.z;
+        }
+
+        if (currentT > maxDistance || currentT > tExit)
+        {
+            break;
+        }
+    }
+
+    return hit;
+}
+
 bool traceScene(Ray ray, out HitInfo info)
 {
     info.t = 1e30;
@@ -161,22 +332,23 @@ bool traceScene(Ray ray, out HitInfo info)
         anyHit = true;
     }
 
-    for (uint i = 0u; i < pc.sphereCount; ++i)
+    bool gridReady = (pc.gridCellCount > 0u) &&
+        (pc.gridIndexCount > 0u) &&
+        (pc.gridResolutionX > 0u) &&
+        (pc.gridResolutionY > 0u) &&
+        (pc.gridResolutionZ > 0u);
+
+    bool sphereHit = false;
+    if (gridReady)
     {
-        vec3 c;
-        float r;
-        decodeSphere(i, c, r);
-        float tSphere;
-        if (hitSphere(ray.o, ray.d, c, r, 0.001, info.t, tSphere))
-        {
-            info.t = tSphere;
-            info.normal = normalize((ray.o + ray.d * tSphere) - c);
-            info.primitive = int(i);
-            anyHit = true;
-        }
+        sphereHit = traceUniformGrid(ray, info);
+    }
+    else
+    {
+        sphereHit = traceSpheresLinear(ray, info.t, info);
     }
 
-    return anyHit;
+    return anyHit || sphereHit;
 }
 
 void main()

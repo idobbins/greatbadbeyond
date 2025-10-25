@@ -6,6 +6,7 @@
 #include <GLFW/glfw3.h>
 
 #include <array>
+#include <algorithm>
 #include <bit>
 #include <cmath>
 #include <cstdio>
@@ -27,7 +28,7 @@ static constexpr const char *FullscreenVertexShaderName = "fullscreen_triangle.v
 static constexpr const char *FullscreenFragmentShaderName = "fullscreen_triangle.frag.spv";
 static constexpr const char *PathTracerComputeShaderName = "pathtracer.comp.spv";
 static constexpr VkFormat PathTracerImageFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
-static constexpr u32 DefaultSphereCount = 512;
+static constexpr u32 DefaultSphereCount = 4096;
 
 #ifndef VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME
 #define VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME "VK_KHR_portability_subset"
@@ -86,8 +87,17 @@ static struct VulkanData
    VkDeviceMemory materialAlbedoRoughnessMemory;
    VkBuffer materialEmissiveBuffer;
    VkDeviceMemory materialEmissiveMemory;
+   VkBuffer gridCellBuffer;
+   VkDeviceMemory gridCellMemory;
+   VkBuffer gridCellIndexBuffer;
+   VkDeviceMemory gridCellIndexMemory;
    u32 sphereCount;
    u32 materialCount;
+   u32 gridCellCount;
+   u32 gridIndexCount;
+   u32 gridResolutionX;
+   u32 gridResolutionY;
+   u32 gridResolutionZ;
    u32 accumFrame;
 
    bool instanceReady;
@@ -107,6 +117,14 @@ static struct VulkanData
 } Vulkan;
 
 static SphereQuantConfig SceneQuantization = {};
+
+struct GridCell
+{
+   u32 offset;
+   u32 count;
+};
+
+static_assert(sizeof(GridCell) == sizeof(u32) * 2, "GridCell must contain two uint32_t values");
 
 static auto FindMemoryType(u32 typeBits, VkMemoryPropertyFlags properties) -> u32
 {
@@ -1475,13 +1493,29 @@ void CreatePathTracerDescriptors()
          .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
       };
 
-      array<VkDescriptorSetLayoutBinding, 6> bindings = {
+      VkDescriptorSetLayoutBinding gridCellBinding = {
+         .binding = 6,
+         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+         .descriptorCount = 1,
+         .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+      };
+
+      VkDescriptorSetLayoutBinding gridIndexBinding = {
+         .binding = 7,
+         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+         .descriptorCount = 1,
+         .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+      };
+
+      array<VkDescriptorSetLayoutBinding, 8> bindings = {
          storageBinding,
          samplerBinding,
          sphereBinding,
          matIdBinding,
          albedoBinding,
          emissiveBinding,
+         gridCellBinding,
+         gridIndexBinding,
       };
 
       VkDescriptorSetLayoutCreateInfo layoutInfo = {
@@ -1509,7 +1543,7 @@ void CreatePathTracerDescriptors()
       },
       {
          .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-         .descriptorCount = 4,
+         .descriptorCount = 6,
       },
    };
 
@@ -1648,8 +1682,15 @@ static void DestroyPathTracerSceneBuffers()
    DestroyBuffer(Vulkan.sphereMaterialIdsBuffer, Vulkan.sphereMaterialIdsMemory);
    DestroyBuffer(Vulkan.materialAlbedoRoughnessBuffer, Vulkan.materialAlbedoRoughnessMemory);
    DestroyBuffer(Vulkan.materialEmissiveBuffer, Vulkan.materialEmissiveMemory);
+    DestroyBuffer(Vulkan.gridCellBuffer, Vulkan.gridCellMemory);
+    DestroyBuffer(Vulkan.gridCellIndexBuffer, Vulkan.gridCellIndexMemory);
    Vulkan.sphereCount = 0;
    Vulkan.materialCount = 0;
+    Vulkan.gridCellCount = 0;
+    Vulkan.gridIndexCount = 0;
+    Vulkan.gridResolutionX = 0;
+    Vulkan.gridResolutionY = 0;
+    Vulkan.gridResolutionZ = 0;
    Vulkan.pathTracerSceneReady = false;
 }
 
@@ -1668,7 +1709,9 @@ static void UpdateSceneDescriptorBindings()
    if ((Vulkan.spheresHotBuffer == VK_NULL_HANDLE) ||
        (Vulkan.sphereMaterialIdsBuffer == VK_NULL_HANDLE) ||
        (Vulkan.materialAlbedoRoughnessBuffer == VK_NULL_HANDLE) ||
-       (Vulkan.materialEmissiveBuffer == VK_NULL_HANDLE))
+       (Vulkan.materialEmissiveBuffer == VK_NULL_HANDLE) ||
+       (Vulkan.gridCellBuffer == VK_NULL_HANDLE) ||
+       (Vulkan.gridCellIndexBuffer == VK_NULL_HANDLE))
    {
       return;
    }
@@ -1677,6 +1720,8 @@ static void UpdateSceneDescriptorBindings()
    VkDeviceSize materialIdsSize = static_cast<VkDeviceSize>(Vulkan.sphereCount) * sizeof(u32);
    VkDeviceSize albedoSize = static_cast<VkDeviceSize>(Vulkan.materialCount) * sizeof(float) * 4;
    VkDeviceSize emissiveSize = albedoSize;
+   VkDeviceSize gridCellSize = static_cast<VkDeviceSize>(Vulkan.gridCellCount) * sizeof(u32) * 2;
+   VkDeviceSize gridIndexSize = static_cast<VkDeviceSize>(Vulkan.gridIndexCount) * sizeof(u32);
 
    VkDescriptorBufferInfo sphereInfo = {
       .buffer = Vulkan.spheresHotBuffer,
@@ -1700,6 +1745,18 @@ static void UpdateSceneDescriptorBindings()
       .buffer = Vulkan.materialEmissiveBuffer,
       .offset = 0,
       .range = emissiveSize,
+   };
+
+   VkDescriptorBufferInfo gridCellInfo = {
+      .buffer = Vulkan.gridCellBuffer,
+      .offset = 0,
+      .range = gridCellSize,
+   };
+
+   VkDescriptorBufferInfo gridIndexInfo = {
+      .buffer = Vulkan.gridCellIndexBuffer,
+      .offset = 0,
+      .range = gridIndexSize,
    };
 
    VkWriteDescriptorSet writes[] = {
@@ -1734,6 +1791,22 @@ static void UpdateSceneDescriptorBindings()
          .descriptorCount = 1,
          .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
          .pBufferInfo = &emissiveInfo,
+      },
+      {
+         .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+         .dstSet = Vulkan.pathTracerDescriptorSet,
+         .dstBinding = 6,
+         .descriptorCount = 1,
+         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+         .pBufferInfo = &gridCellInfo,
+      },
+      {
+         .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+         .dstSet = Vulkan.pathTracerDescriptorSet,
+         .dstBinding = 7,
+         .descriptorCount = 1,
+         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+         .pBufferInfo = &gridIndexInfo,
       },
    };
 
@@ -1893,15 +1966,164 @@ void BuildSpheres()
       Assert(false, "Sphere placement failed");
    }
 
+   const u32 placedSphereCount = static_cast<u32>(materialIds.size());
+   const Vec3 gridScale = SceneQuantization.scale;
+   const float gridVolume = std::max(gridScale.x * gridScale.y * gridScale.z, 1.0f);
+   constexpr float MinCellSize = 0.5f;
+   constexpr float MaxCellSize = 8.0f;
+   constexpr u32 MaxCellsPerAxis = 128;
+
+   float safeSphereCount = static_cast<float>((placedSphereCount > 0u) ? placedSphereCount : 1u);
+   float targetCellSize = static_cast<float>(std::cbrt(static_cast<double>(gridVolume) / static_cast<double>(safeSphereCount)));
+   targetCellSize = std::clamp(targetCellSize, MinCellSize, MaxCellSize);
+
+   const auto computeAxisResolution = [&](float axisLength) -> u32
+   {
+      if (axisLength <= 0.0f)
+      {
+         return 1u;
+      }
+      float cells = axisLength / targetCellSize;
+      float needed = std::ceil(cells);
+      if (!std::isfinite(needed) || (needed < 1.0f))
+      {
+         needed = 1.0f;
+      }
+      u32 resolution = static_cast<u32>(needed);
+      if (resolution > MaxCellsPerAxis)
+      {
+         resolution = MaxCellsPerAxis;
+      }
+      return resolution;
+   };
+
+   Vulkan.gridResolutionX = computeAxisResolution(SceneQuantization.scale.x);
+   Vulkan.gridResolutionY = computeAxisResolution(SceneQuantization.scale.y);
+   Vulkan.gridResolutionZ = computeAxisResolution(SceneQuantization.scale.z);
+
+   u64 gridCellCount64 =
+      static_cast<u64>(Vulkan.gridResolutionX) *
+      static_cast<u64>(Vulkan.gridResolutionY) *
+      static_cast<u64>(Vulkan.gridResolutionZ);
+   Assert(gridCellCount64 > 0, "Uniform grid must own at least one cell");
+   Assert(gridCellCount64 <= numeric_limits<u32>::max(), "Uniform grid cell count overflow");
+   Vulkan.gridCellCount = static_cast<u32>(gridCellCount64);
+
+   vector<GridCell> gridCells(Vulkan.gridCellCount);
+   vector<u32> gridHistogram(Vulkan.gridCellCount, 0u);
+
+   struct AxisRange
+   {
+      u32 min;
+      u32 max;
+   };
+
+   const auto computeAxisRange = [&](float coord, float radius, float originAxis, float axisLength, u32 resolution) -> AxisRange
+   {
+      AxisRange range = {0u, (resolution > 0u) ? (resolution - 1u) : 0u};
+      if (resolution == 0u)
+      {
+         return range;
+      }
+
+      float denom = (axisLength > 1e-4f) ? axisLength : 1.0f;
+      float minValue = Clamp01(((coord - radius) - originAxis) / denom);
+      float maxValue = Clamp01(((coord + radius) - originAxis) / denom);
+      float minCell = std::floor(minValue * static_cast<float>(resolution));
+      float maxCell = std::floor(maxValue * static_cast<float>(resolution));
+      range.min = static_cast<u32>(std::clamp(minCell, 0.0f, static_cast<float>((resolution > 0u) ? (resolution - 1u) : 0u)));
+      range.max = static_cast<u32>(std::clamp(maxCell, 0.0f, static_cast<float>((resolution > 0u) ? (resolution - 1u) : 0u)));
+      if (range.max < range.min)
+      {
+         range.max = range.min;
+      }
+      return range;
+   };
+
+   const u32 strideY = Vulkan.gridResolutionX;
+   const u32 strideZ = Vulkan.gridResolutionX * Vulkan.gridResolutionY;
+   const auto flattenIndex = [&](u32 x, u32 y, u32 z) -> u32
+   {
+      return x + strideY * y + strideZ * z;
+   };
+
+   for (size_t sphere = 0; sphere < centers.size(); ++sphere)
+   {
+      const Vec3 &center = centers[sphere];
+      float radius = radii[sphere];
+      AxisRange rangeX = computeAxisRange(center.x, radius, SceneQuantization.origin.x, SceneQuantization.scale.x, Vulkan.gridResolutionX);
+      AxisRange rangeY = computeAxisRange(center.y, radius, SceneQuantization.origin.y, SceneQuantization.scale.y, Vulkan.gridResolutionY);
+      AxisRange rangeZ = computeAxisRange(center.z, radius, SceneQuantization.origin.z, SceneQuantization.scale.z, Vulkan.gridResolutionZ);
+
+      for (u32 z = rangeZ.min; z <= rangeZ.max; ++z)
+      {
+         for (u32 y = rangeY.min; y <= rangeY.max; ++y)
+         {
+            for (u32 x = rangeX.min; x <= rangeX.max; ++x)
+            {
+               u32 cellIndex = flattenIndex(x, y, z);
+               Assert(cellIndex < gridHistogram.size(), "Grid cell index out of range (count)");
+               gridHistogram[cellIndex] += 1;
+            }
+         }
+      }
+   }
+
+   u64 totalReferences = 0;
+   for (u32 cell = 0; cell < Vulkan.gridCellCount; ++cell)
+   {
+      gridCells[cell].offset = static_cast<u32>(totalReferences);
+      gridCells[cell].count = gridHistogram[cell];
+      totalReferences += gridHistogram[cell];
+   }
+
+   Assert(totalReferences > 0, "Uniform grid must reference at least one primitive");
+   Assert(totalReferences <= numeric_limits<u32>::max(), "Uniform grid index list overflow");
+   Vulkan.gridIndexCount = static_cast<u32>(totalReferences);
+
+   vector<u32> gridIndices(Vulkan.gridIndexCount);
+   vector<u32> gridCursor(Vulkan.gridCellCount, 0u);
+
+   for (size_t sphere = 0; sphere < centers.size(); ++sphere)
+   {
+      const Vec3 &center = centers[sphere];
+      float radius = radii[sphere];
+      AxisRange rangeX = computeAxisRange(center.x, radius, SceneQuantization.origin.x, SceneQuantization.scale.x, Vulkan.gridResolutionX);
+      AxisRange rangeY = computeAxisRange(center.y, radius, SceneQuantization.origin.y, SceneQuantization.scale.y, Vulkan.gridResolutionY);
+      AxisRange rangeZ = computeAxisRange(center.z, radius, SceneQuantization.origin.z, SceneQuantization.scale.z, Vulkan.gridResolutionZ);
+
+      for (u32 z = rangeZ.min; z <= rangeZ.max; ++z)
+      {
+         for (u32 y = rangeY.min; y <= rangeY.max; ++y)
+         {
+            for (u32 x = rangeX.min; x <= rangeX.max; ++x)
+            {
+               u32 cellIndex = flattenIndex(x, y, z);
+               Assert(cellIndex < gridCells.size(), "Grid cell index out of range (fill)");
+               u32 cursor = gridCursor[cellIndex];
+               Assert(cursor < gridCells[cellIndex].count, "Grid cursor exceeded cell count");
+               u32 writeIndex = gridCells[cellIndex].offset + cursor;
+               Assert(writeIndex < gridIndices.size(), "Grid write index out of range");
+               gridIndices[writeIndex] = static_cast<u32>(sphere);
+               gridCursor[cellIndex] = cursor + 1u;
+            }
+         }
+      }
+   }
+
    VkDeviceSize hotSize = static_cast<VkDeviceSize>(sphereWords.size()) * sizeof(u32);
    VkDeviceSize materialIdsSize = static_cast<VkDeviceSize>(materialIds.size()) * sizeof(u32);
    VkDeviceSize albedoSize = static_cast<VkDeviceSize>(MaterialAlbedoRoughness.size()) * sizeof(std::array<float, 4>);
    VkDeviceSize emissiveSize = static_cast<VkDeviceSize>(MaterialEmissive.size()) * sizeof(std::array<float, 4>);
+   VkDeviceSize gridCellsSize = static_cast<VkDeviceSize>(gridCells.size()) * sizeof(GridCell);
+   VkDeviceSize gridIndicesSize = static_cast<VkDeviceSize>(gridIndices.size()) * sizeof(u32);
 
    CreateStorageBuffer(sphereWords.data(), hotSize, Vulkan.spheresHotBuffer, Vulkan.spheresHotMemory);
    CreateStorageBuffer(materialIds.data(), materialIdsSize, Vulkan.sphereMaterialIdsBuffer, Vulkan.sphereMaterialIdsMemory);
    CreateStorageBuffer(MaterialAlbedoRoughness.data(), albedoSize, Vulkan.materialAlbedoRoughnessBuffer, Vulkan.materialAlbedoRoughnessMemory);
    CreateStorageBuffer(MaterialEmissive.data(), emissiveSize, Vulkan.materialEmissiveBuffer, Vulkan.materialEmissiveMemory);
+   CreateStorageBuffer(gridCells.data(), gridCellsSize, Vulkan.gridCellBuffer, Vulkan.gridCellMemory);
+   CreateStorageBuffer(gridIndices.data(), gridIndicesSize, Vulkan.gridCellIndexBuffer, Vulkan.gridCellIndexMemory);
 
    Vulkan.sphereCount = static_cast<u32>(materialIds.size());
    Vulkan.materialCount = MaterialCount;
@@ -2509,9 +2731,13 @@ auto RecordCommandBuffer(u32 frameIndex, u32 imageIndex, const GradientParams &g
    params.camera = GetCameraParams();
    params.quant = GetSphereQuantConfig();
    params.sphereCount = Vulkan.sphereCount;
+   params.gridCellCount = Vulkan.gridCellCount;
+   params.gridResolutionX = Vulkan.gridResolutionX;
+   params.gridResolutionY = Vulkan.gridResolutionY;
+   params.gridResolutionZ = Vulkan.gridResolutionZ;
+   params.gridIndexCount = Vulkan.gridIndexCount;
    params.padA = 0;
    params.padB = 0;
-   params.padC = 0;
 
    vkCmdPushConstants(
       frame.commandBuffer,

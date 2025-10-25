@@ -22,6 +22,12 @@ Real-time ray tracing on modern consumer GPUs (NVIDIA RTX and AMD RDNA) demands 
 - Descriptor set layout/pool creation binds that image twice: once as a storage image for the upcoming compute dispatch and once as a combined-image sampler with a shared sampler, enabling both producer (compute) and consumer (fullscreen blit) stages to agree on bindings.
 - The fullscreen shaders were updated so the fragment stage samples from the descriptor, and `RecordCommandBuffer()` clears/barriers the storage image each frame before binding the descriptor set and drawing, meaning the presentation path is now decoupled from how pixels are generated.
 
+## Uniform Grid Acceleration
+
+- Scene builds now voxelize every CPU-placed sphere into a fixed-resolution uniform grid that matches the quantized world bounds. Each cell carries an offset/count pair into a compact primitive index list stored in two new SSBOs so the GPU never walks data it does not need.
+- `PathParams` push constants include the grid resolution, cell/index counts, and the compute shader walks the grid with an Amanatides & Woo style 3D DDA, clamping traversal by the closest hit seen so far (including the ground plane) to terminate as soon as a nearer primitive is found.
+- Traversal therefore touches only a handful of cache-coherent `cells[]`/`cellIndices[]` entries per ray instead of looping over all spheres, which dramatically reduces divergence and memory bandwidth on dense scenes while keeping the structure static and cheap to rebuild on the CPU.
+
 Struct-of-Arrays vs Array-of-Structs (SoA vs AoS) memory layouts
 
 GPU-friendly BVH/TLAS acceleration structures (for efficient ray intersections)

@@ -113,9 +113,13 @@ struct PathParams
     CameraParams camera;
     SphereQuantConfig quant;
     u32 sphereCount;
+    u32 gridCellCount;
+    u32 gridResolutionX;
+    u32 gridResolutionY;
+    u32 gridResolutionZ;
+    u32 gridIndexCount;
     u32 padA;
     u32 padB;
-    u32 padC;
 };
 
 //------------------------------------------------------------------------------------
