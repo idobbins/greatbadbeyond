@@ -10,6 +10,12 @@ Real-time ray tracing on modern consumer GPUs (NVIDIA RTX and AMD RDNA) demands 
 - Swapchain recreation paths rebuild the frame cache after destroying the old swapchain/image views, ensuring the per-frame fences/semaphores are always in sync with the current swapchain images.
 - Recreate triggers are centralized: swapchain resize callbacks, `vkAcquireNextImageKHR`, and `vkQueuePresentKHR` all feed back into `RecreateSwapchain()` so the frame loop stays resilient to `VK_ERROR_OUT_OF_DATE_KHR` / `VK_SUBOPTIMAL_KHR`.
 
+## Solid-Color First Light
+
+- Fullscreen triangle vertex/fragment GLSL shaders live under `resources/shaders` and CMake now drives `glslc` so any edit regenerates SPIR-V into `build/<config>/shaders`, keeping runtime assets in lockstep with source control.
+- `CreateFullscreenPipeline()` consumes those binaries to build shader modules, a push-constant-only pipeline layout, and a dynamic-rendering pipeline that tracks the swapchain format; `RecreateSwapchain()` tears it down and rebuilds it alongside the new image views.
+- `RecordCommandBuffer()` binds the pipeline, sets viewport/scissor dynamically, and pushes the frame tint as a fragment push constant before drawing the triangle, giving us dependable solid-color output rather than attachment clear hacks.
+
 Struct-of-Arrays vs Array-of-Structs (SoA vs AoS) memory layouts
 
 GPU-friendly BVH/TLAS acceleration structures (for efficient ray intersections)

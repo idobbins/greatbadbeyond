@@ -12,10 +12,10 @@ Linear sequence of work items that graduates the app from the current code (GLFW
    - Added `RecordCommandBuffer(frame, imageIndex, clearColor)` using dynamic rendering to clear the current swapchain image with the configured color.
    - Main loop now runs acquire → record → submit → present every tick, recreating the swapchain on VK_ERROR_OUT_OF_DATE_KHR / VK_SUBOPTIMAL_KHR or resize callbacks.
 
-2. **Solid-Color Output (First-Light)**
-   - Author fullscreen-triangle shaders that output a constant color; compile to SPIR-V under `resources/shaders/`.
-   - Create the minimal pipeline layout and graphics pipeline (dynamic rendering, no descriptors).
-   - Hook the pipeline into `RecordCommandBuffer` so submitting one frame paints the requested color—this is the “we render a color to the window” milestone.
+2. **Solid-Color Output (Done)**
+   - Added GLSL fullscreen-triangle vertex/fragment shaders plus a CMake-driven `glslc` pipeline that compiles them into `build/*/shaders/*.spv` whenever the sources change.
+   - The Vulkan backend now builds shader modules, a push-constant-only pipeline layout, and a dynamic-rendering graphics pipeline that re-creates itself alongside the swapchain.
+   - `RecordCommandBuffer()` binds the fullscreen pipeline, pushes the frame color, and draws the triangle so every submission now renders a constant tint instead of relying on attachment clears.
 
 3. **UV Gradient Pass**
    - Replace the fragment shader with a UV-based output (e.g., `vec4(uv, 0.0, 1.0)`), proving attribute flow from vertex to fragment.

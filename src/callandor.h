@@ -210,8 +210,8 @@ void CreateDescriptorSet();
 void DestroyDescriptorSet();
 
 // Shader-related functions
-auto CreateShader() -> VkShaderModule;
-void DestroyShader();
+auto CreateShader(const char *path) -> VkShaderModule;
+void DestroyShader(VkShaderModule &shader);
 
 // Pipeline-related functions
 void CreateFullscreenPipeline();

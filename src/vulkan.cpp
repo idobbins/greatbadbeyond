@@ -6,6 +6,7 @@
 #include <GLFW/glfw3.h>
 
 #include <array>
+#include <cstdio>
 #include <cstring>
 #include <iostream>
 #include <limits>
@@ -14,6 +15,14 @@
 #include <vector>
 
 using namespace std;
+
+#ifndef SHADER_CACHE_DIRECTORY
+#define SHADER_CACHE_DIRECTORY ""
+#endif
+
+static constexpr const char *ShaderCacheDirectory = SHADER_CACHE_DIRECTORY;
+static constexpr const char *FullscreenVertexShaderName = "fullscreen_triangle.vert.spv";
+static constexpr const char *FullscreenFragmentShaderName = "fullscreen_triangle.frag.spv";
 
 #ifndef VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME
 #define VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME "VK_KHR_portability_subset"
@@ -49,6 +58,11 @@ static struct VulkanData
    array<FrameResources, FrameOverlap> frames;
    u32 currentFrame;
 
+   VkShaderModule fullscreenVertexShader;
+   VkShaderModule fullscreenFragmentShader;
+   VkPipelineLayout fullscreenPipelineLayout;
+   VkPipeline fullscreenPipeline;
+
    bool instanceReady;
    bool validationLayersEnabled;
    bool debugMessengerReady;
@@ -57,6 +71,7 @@ static struct VulkanData
    bool swapchainReady;
    bool swapchainImageViewsReady;
    bool frameResourcesReady;
+   bool fullscreenPipelineReady;
 
 } Vulkan;
 
@@ -147,6 +162,7 @@ void CreateVulkan()
    CreateDevice();
    CreateSwapchain();
    CreateSwapchainImageViews();
+   CreateFullscreenPipeline();
    CreateFrameResources();
 }
 
@@ -158,6 +174,7 @@ void DestroyVulkan()
    }
 
    DestroyFrameResources();
+   DestroyFullscreenPipeline();
    DestroySwapchain();
    DestroyDevice();
    DestroySurface();
@@ -722,6 +739,50 @@ void DestroyDevice()
    Vulkan.deviceReady = false;
 }
 
+auto CreateShader(const char *path) -> VkShaderModule
+{
+   Assert(Vulkan.deviceReady, "Create the Vulkan device before creating shader modules");
+   Assert(path != nullptr, "Shader path is null");
+
+   FILE *file = std::fopen(path, "rb");
+   Assert(file != nullptr, "Failed to open shader file");
+
+   int seekResult = std::fseek(file, 0, SEEK_END);
+   Assert(seekResult == 0, "Failed to seek to shader end");
+   long fileSize = std::ftell(file);
+   Assert(fileSize > 0, "Shader file is empty");
+   Assert((fileSize % 4) == 0, "Shader file size must be a multiple of four bytes");
+   std::rewind(file);
+
+   vector<char> buffer(static_cast<size_t>(fileSize));
+   size_t readSize = std::fread(buffer.data(), 1, buffer.size(), file);
+   std::fclose(file);
+   Assert(readSize == buffer.size(), "Failed to read shader file");
+
+   VkShaderModuleCreateInfo createInfo = {
+      .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+      .codeSize = buffer.size(),
+      .pCode = reinterpret_cast<const uint32_t *>(buffer.data()),
+   };
+
+   VkShaderModule module = VK_NULL_HANDLE;
+   VkResult result = vkCreateShaderModule(Vulkan.device, &createInfo, nullptr, &module);
+   Assert(result == VK_SUCCESS, "Failed to create shader module");
+   return module;
+}
+
+void DestroyShader(VkShaderModule &shader)
+{
+   if ((shader == VK_NULL_HANDLE) || (Vulkan.device == VK_NULL_HANDLE))
+   {
+      shader = VK_NULL_HANDLE;
+      return;
+   }
+
+   vkDestroyShaderModule(Vulkan.device, shader, nullptr);
+   shader = VK_NULL_HANDLE;
+}
+
 auto GetGraphicsQueue() -> VkQueue
 {
    Assert(Vulkan.deviceReady, "Create the Vulkan device before retrieving the graphics queue");
@@ -1078,6 +1139,193 @@ void DestroySwapchain()
    }
 }
 
+void CreateFullscreenPipeline()
+{
+   if (Vulkan.fullscreenPipelineReady)
+   {
+      return;
+   }
+
+   Assert(Vulkan.deviceReady, "Create the Vulkan device before pipelines");
+   Assert(Vulkan.swapchainReady, "Create the Vulkan swapchain before pipelines");
+   Assert(ShaderCacheDirectory[0] != '\0', "Shader cache directory is not defined");
+
+   array<char, 512> vertexPath {};
+   array<char, 512> fragmentPath {};
+
+   const auto buildPath = [](const char *directory, const char *fileName, array<char, 512> &buffer)
+   {
+      int written = std::snprintf(buffer.data(), buffer.size(), "%s/%s", directory, fileName);
+      Assert((written > 0) && (static_cast<size_t>(written) < buffer.size()), "Shader path truncated");
+   };
+
+   buildPath(ShaderCacheDirectory, FullscreenVertexShaderName, vertexPath);
+   buildPath(ShaderCacheDirectory, FullscreenFragmentShaderName, fragmentPath);
+
+   Vulkan.fullscreenVertexShader = CreateShader(vertexPath.data());
+   Vulkan.fullscreenFragmentShader = CreateShader(fragmentPath.data());
+
+   VkPushConstantRange pushConstant = {
+      .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+      .offset = 0,
+      .size = sizeof(float) * 4,
+   };
+
+   VkPipelineLayoutCreateInfo layoutInfo = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+      .setLayoutCount = 0,
+      .pSetLayouts = nullptr,
+      .pushConstantRangeCount = 1,
+      .pPushConstantRanges = &pushConstant,
+   };
+
+   VkResult layoutResult = vkCreatePipelineLayout(Vulkan.device, &layoutInfo, nullptr, &Vulkan.fullscreenPipelineLayout);
+   Assert(layoutResult == VK_SUCCESS, "Failed to create fullscreen pipeline layout");
+
+   VkPipelineShaderStageCreateInfo shaderStages[2] = {
+      {
+         .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+         .stage = VK_SHADER_STAGE_VERTEX_BIT,
+         .module = Vulkan.fullscreenVertexShader,
+         .pName = "main",
+      },
+      {
+         .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+         .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+         .module = Vulkan.fullscreenFragmentShader,
+         .pName = "main",
+      },
+   };
+
+   VkPipelineVertexInputStateCreateInfo vertexInput = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+      .vertexBindingDescriptionCount = 0,
+      .pVertexBindingDescriptions = nullptr,
+      .vertexAttributeDescriptionCount = 0,
+      .pVertexAttributeDescriptions = nullptr,
+   };
+
+   VkPipelineInputAssemblyStateCreateInfo inputAssembly = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+      .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+      .primitiveRestartEnable = VK_FALSE,
+   };
+
+   VkPipelineViewportStateCreateInfo viewportState = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+      .viewportCount = 1,
+      .pViewports = nullptr,
+      .scissorCount = 1,
+      .pScissors = nullptr,
+   };
+
+   VkPipelineRasterizationStateCreateInfo rasterizer = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+      .depthClampEnable = VK_FALSE,
+      .rasterizerDiscardEnable = VK_FALSE,
+      .polygonMode = VK_POLYGON_MODE_FILL,
+      .cullMode = VK_CULL_MODE_NONE,
+      .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+      .depthBiasEnable = VK_FALSE,
+      .lineWidth = 1.0f,
+   };
+
+   VkPipelineMultisampleStateCreateInfo multisampling = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+      .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+      .sampleShadingEnable = VK_FALSE,
+   };
+
+   VkPipelineColorBlendAttachmentState colorBlendAttachment = {
+      .blendEnable = VK_FALSE,
+      .colorWriteMask = VK_COLOR_COMPONENT_R_BIT |
+                        VK_COLOR_COMPONENT_G_BIT |
+                        VK_COLOR_COMPONENT_B_BIT |
+                        VK_COLOR_COMPONENT_A_BIT,
+   };
+
+   VkPipelineColorBlendStateCreateInfo colorBlending = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+      .logicOpEnable = VK_FALSE,
+      .attachmentCount = 1,
+      .pAttachments = &colorBlendAttachment,
+   };
+
+   VkDynamicState dynamicStates[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+   uint32_t dynamicStateCount = static_cast<uint32_t>(sizeof(dynamicStates) / sizeof(dynamicStates[0]));
+   VkPipelineDynamicStateCreateInfo dynamicState = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+      .dynamicStateCount = dynamicStateCount,
+      .pDynamicStates = dynamicStates,
+   };
+
+   VkPipelineRenderingCreateInfo renderingInfo = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
+      .colorAttachmentCount = 1,
+      .pColorAttachmentFormats = &Vulkan.swapchainFormat,
+   };
+
+   uint32_t shaderStageCount = static_cast<uint32_t>(sizeof(shaderStages) / sizeof(shaderStages[0]));
+
+   VkGraphicsPipelineCreateInfo pipelineInfo = {
+      .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+      .pNext = &renderingInfo,
+      .stageCount = shaderStageCount,
+      .pStages = shaderStages,
+      .pVertexInputState = &vertexInput,
+      .pInputAssemblyState = &inputAssembly,
+      .pViewportState = &viewportState,
+      .pRasterizationState = &rasterizer,
+      .pMultisampleState = &multisampling,
+      .pDepthStencilState = nullptr,
+      .pColorBlendState = &colorBlending,
+      .pDynamicState = &dynamicState,
+      .layout = Vulkan.fullscreenPipelineLayout,
+      .renderPass = VK_NULL_HANDLE,
+      .subpass = 0,
+   };
+
+   VkResult pipelineResult = vkCreateGraphicsPipelines(
+      Vulkan.device,
+      VK_NULL_HANDLE,
+      1,
+      &pipelineInfo,
+      nullptr,
+      &Vulkan.fullscreenPipeline);
+   Assert(pipelineResult == VK_SUCCESS, "Failed to create fullscreen graphics pipeline");
+
+   Vulkan.fullscreenPipelineReady = true;
+}
+
+void DestroyFullscreenPipeline()
+{
+   if ((Vulkan.fullscreenPipeline == VK_NULL_HANDLE) &&
+       (Vulkan.fullscreenPipelineLayout == VK_NULL_HANDLE) &&
+       (Vulkan.fullscreenVertexShader == VK_NULL_HANDLE) &&
+       (Vulkan.fullscreenFragmentShader == VK_NULL_HANDLE))
+   {
+      Vulkan.fullscreenPipelineReady = false;
+      return;
+   }
+
+   if ((Vulkan.device != VK_NULL_HANDLE) && (Vulkan.fullscreenPipeline != VK_NULL_HANDLE))
+   {
+      vkDestroyPipeline(Vulkan.device, Vulkan.fullscreenPipeline, nullptr);
+      Vulkan.fullscreenPipeline = VK_NULL_HANDLE;
+   }
+
+   if ((Vulkan.device != VK_NULL_HANDLE) && (Vulkan.fullscreenPipelineLayout != VK_NULL_HANDLE))
+   {
+      vkDestroyPipelineLayout(Vulkan.device, Vulkan.fullscreenPipelineLayout, nullptr);
+      Vulkan.fullscreenPipelineLayout = VK_NULL_HANDLE;
+   }
+
+   DestroyShader(Vulkan.fullscreenVertexShader);
+   DestroyShader(Vulkan.fullscreenFragmentShader);
+
+   Vulkan.fullscreenPipelineReady = false;
+}
+
 void RecreateSwapchain()
 {
    if (!Vulkan.deviceReady)
@@ -1101,12 +1349,14 @@ void RecreateSwapchain()
    vkDeviceWaitIdle(Vulkan.device);
 
    DestroyFrameResources();
+   DestroyFullscreenPipeline();
    DestroySwapchainImageViews();
    Vulkan.swapchainReady = false;
    Vulkan.swapchainImageViewsReady = false;
 
    CreateSwapchain();
    CreateSwapchainImageViews();
+   CreateFullscreenPipeline();
    CreateFrameResources();
 }
 
@@ -1300,6 +1550,7 @@ auto RecordCommandBuffer(u32 frameIndex, u32 imageIndex, VkClearColorValue clear
    Assert(Vulkan.swapchainReady, "Create the Vulkan swapchain before recording commands");
    Assert(Vulkan.swapchainImageViewsReady, "Create swapchain image views before recording commands");
    Assert(Vulkan.frameResourcesReady, "Frame resources must exist before recording commands");
+    Assert(Vulkan.fullscreenPipelineReady, "Fullscreen pipeline must be ready before recording commands");
    Assert(frameIndex < FrameOverlap, "Frame index out of range");
    Assert(imageIndex < Vulkan.swapchainImageCount, "Swapchain image index out of range");
 
@@ -1365,7 +1616,7 @@ auto RecordCommandBuffer(u32 frameIndex, u32 imageIndex, VkClearColorValue clear
       .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
       .imageView = imageView,
       .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-      .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+      .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
       .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
       .clearValue = {.color = clearColor},
    };
@@ -1383,6 +1634,41 @@ auto RecordCommandBuffer(u32 frameIndex, u32 imageIndex, VkClearColorValue clear
    };
 
    vkCmdBeginRendering(frame.commandBuffer, &renderingInfo);
+
+   VkViewport viewport = {
+      .x = 0.0f,
+      .y = 0.0f,
+      .width = static_cast<float>(extent.width),
+      .height = static_cast<float>(extent.height),
+      .minDepth = 0.0f,
+      .maxDepth = 1.0f,
+   };
+   vkCmdSetViewport(frame.commandBuffer, 0, 1, &viewport);
+
+   VkRect2D scissor = {
+      .offset = {0, 0},
+      .extent = extent,
+   };
+   vkCmdSetScissor(frame.commandBuffer, 0, 1, &scissor);
+
+   vkCmdBindPipeline(frame.commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, Vulkan.fullscreenPipeline);
+
+   float pushColor[4] = {
+      clearColor.float32[0],
+      clearColor.float32[1],
+      clearColor.float32[2],
+      clearColor.float32[3],
+   };
+   vkCmdPushConstants(
+      frame.commandBuffer,
+      Vulkan.fullscreenPipelineLayout,
+      VK_SHADER_STAGE_FRAGMENT_BIT,
+      0,
+      sizeof(pushColor),
+      pushColor);
+
+   vkCmdDraw(frame.commandBuffer, 3, 1, 0, 0);
+
    vkCmdEndRendering(frame.commandBuffer);
 
    VkImageMemoryBarrier barrierToPresent = {

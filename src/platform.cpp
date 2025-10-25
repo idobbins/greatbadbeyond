@@ -227,7 +227,7 @@ void MainLoop()
             break;
         }
 
-        VkClearColorValue clearColor = {{0.05f, 0.15f, 0.45f, 1.0f}};
+        VkClearColorValue clearColor = {{0.05f, 0.75f, 0.45f, 1.0f}};
         VkResult recordResult = RecordCommandBuffer(frameIndex, imageIndex, clearColor);
         if (recordResult != VK_SUCCESS)
         {

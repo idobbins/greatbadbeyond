@@ -29,6 +29,41 @@ FetchContent_MakeAvailable(glfw)
 
 find_package(Vulkan REQUIRED)
 
+if(NOT Vulkan_GLSLC_EXECUTABLE)
+    find_program(Vulkan_GLSLC_EXECUTABLE
+        NAMES glslc
+        HINTS $ENV{VULKAN_SDK}/bin
+    )
+endif()
+
+if(NOT Vulkan_GLSLC_EXECUTABLE)
+    message(FATAL_ERROR "glslc (Vulkan SDK) is required to build shaders")
+endif()
+
+set(SHADER_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/resources/shaders)
+set(SHADER_OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/shaders)
+set(SHADER_SOURCES
+    ${SHADER_SOURCE_DIR}/fullscreen_triangle.vert
+    ${SHADER_SOURCE_DIR}/fullscreen_triangle.frag
+)
+
+set(SHADER_OUTPUTS "")
+foreach(shader ${SHADER_SOURCES})
+    get_filename_component(shader_file ${shader} NAME)
+    set(output_file ${SHADER_OUTPUT_DIR}/${shader_file}.spv)
+    add_custom_command(
+        OUTPUT ${output_file}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADER_OUTPUT_DIR}
+        COMMAND ${Vulkan_GLSLC_EXECUTABLE} -o ${output_file} ${shader}
+        DEPENDS ${shader}
+        COMMENT "Compiling ${shader_file} to SPIR-V"
+        VERBATIM
+    )
+    list(APPEND SHADER_OUTPUTS ${output_file})
+endforeach()
+
+add_custom_target(shaders ALL DEPENDS ${SHADER_OUTPUTS})
+
 add_executable(${PROJECT_NAME}
   src/main.cpp
   src/platform.cpp
@@ -38,6 +73,8 @@ add_executable(${PROJECT_NAME}
 target_include_directories(${PROJECT_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 target_link_libraries(${PROJECT_NAME} PRIVATE glfw Vulkan::Vulkan)
+add_dependencies(${PROJECT_NAME} shaders)
+target_compile_definitions(${PROJECT_NAME} PRIVATE SHADER_CACHE_DIRECTORY="${SHADER_OUTPUT_DIR}")
 
 if(MSVC)
     target_compile_options(${PROJECT_NAME} PRIVATE /W4 /permissive-)
