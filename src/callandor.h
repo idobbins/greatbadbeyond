@@ -134,13 +134,17 @@ void DestroyDevice();
 
 // queue-related functions
 auto GetQueueFamilyProperties(const VkPhysicalDevice& device)                             -> std::span<const VkQueueFamilyProperties>;
-auto GetUniversalQueue(const VkPhysicalDevice& device, VkSurfaceKHR surface, u32 *family) -> bool;
-
 auto GetGraphicsQueue() -> VkQueue;
 auto GetComputeQueue()  -> VkQueue;
 auto GetTransferQueue() -> VkQueue;
 auto GetPresentQueue()  -> VkQueue;
-void GetQueueFamilies();
+auto GetQueueFamilies(
+    const VkPhysicalDevice& device,
+    VkSurfaceKHR surface,
+    u32 &graphicsFamily,
+    u32 &presentFamily,
+    u32 &transferFamily,
+    u32 &computeFamily) -> bool;
 
 // Swapchain-related functions
 auto GetSwapchainImages() -> std::span<const VkImage>;

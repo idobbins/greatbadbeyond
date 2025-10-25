@@ -240,8 +240,15 @@ void DestroyInstance()
    Vulkan.debugMessengerReady = false;
    Vulkan.physicalDevice = VK_NULL_HANDLE;
    Vulkan.device = VK_NULL_HANDLE;
-   // Vulkan.universalQueue = VK_NULL_HANDLE;
-   // Vulkan.universalQueueFamily = 0;
+   Vulkan.graphicsQueue = VK_NULL_HANDLE;
+   Vulkan.presentQueue = VK_NULL_HANDLE;
+   Vulkan.transferQueue = VK_NULL_HANDLE;
+   Vulkan.computeQueue = VK_NULL_HANDLE;
+   Vulkan.queueFamilyCount = 0;
+   Vulkan.graphicsQueueFamilyIndex = 0;
+   Vulkan.presentQueueFamilyIndex = 0;
+   Vulkan.transferQueueFamilyIndex = 0;
+   Vulkan.computeQueueFamilyIndex = 0;
    Vulkan.physicalDeviceReady = false;
    Vulkan.deviceReady = false;
 }
@@ -381,34 +388,65 @@ auto GetQueueFamilyProperties(const VkPhysicalDevice &device) -> span<const VkQu
    return {properties.data(), familyCount};
 }
 
-auto GetUniversalQueue(const VkPhysicalDevice &device, VkSurfaceKHR surface, uint32_t *family) -> bool
+auto GetQueueFamilies(
+   const VkPhysicalDevice &device,
+   VkSurfaceKHR surface,
+   u32 &graphicsFamily,
+   u32 &presentFamily,
+   u32 &transferFamily,
+   u32 &computeFamily) -> bool
 {
-   Assert(family != nullptr, "Queue family output pointer is null");
    Assert(surface != VK_NULL_HANDLE, "Vulkan surface handle is null");
+   Assert(device != VK_NULL_HANDLE, "Physical device handle is null");
 
    span<const VkQueueFamilyProperties> properties = GetQueueFamilyProperties(device);
    Assert(!properties.empty(), "Physical device reports zero queue families");
 
-   const VkQueueFlags universalMask = VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT;
+   bool graphicsReady = false;
+   bool presentReady = false;
+   bool transferReady = false;
+   bool computeReady = false;
 
    for (uint32_t index = 0; index < properties.size(); ++index)
    {
+      const VkQueueFamilyProperties &familyProperties = properties[index];
+
+      if (!graphicsReady &&
+          ((familyProperties.queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0) &&
+          (familyProperties.queueCount > 0))
+      {
+         graphicsFamily = index;
+         graphicsReady = true;
+      }
+
       VkBool32 present = VK_FALSE;
       VkResult result = vkGetPhysicalDeviceSurfaceSupportKHR(device, index, surface, &present);
       Assert(result == VK_SUCCESS, "Failed to query Vulkan surface support");
 
-      const VkQueueFamilyProperties &familyProperties = properties[index];
+      if (!presentReady && (present == VK_TRUE) && (familyProperties.queueCount > 0))
+      {
+         presentFamily = index;
+         presentReady = true;
+      }
 
-      if ((present == VK_TRUE) &&
-          ((familyProperties.queueFlags & universalMask) != 0) &&
+      if (!transferReady &&
+          ((familyProperties.queueFlags & VK_QUEUE_TRANSFER_BIT) != 0) &&
           (familyProperties.queueCount > 0))
       {
-         *family = index;
-         return true;
+         transferFamily = index;
+         transferReady = true;
+      }
+
+      if (!computeReady &&
+          ((familyProperties.queueFlags & VK_QUEUE_COMPUTE_BIT) != 0) &&
+          (familyProperties.queueCount > 0))
+      {
+         computeFamily = index;
+         computeReady = true;
       }
    }
 
-   return false;
+   return graphicsReady && presentReady && transferReady && computeReady;
 }
 
 void SetPhysicalDevice()
@@ -427,8 +465,12 @@ void SetPhysicalDevice()
 
    for (const VkPhysicalDevice &device : devices)
    {
-      uint32_t queueFamily = 0;
-      if (!GetUniversalQueue(device, Vulkan.surface, &queueFamily))
+      u32 graphicsFamily = 0;
+      u32 presentFamily = 0;
+      u32 transferFamily = 0;
+      u32 computeFamily = 0;
+
+      if (!GetQueueFamilies(device, Vulkan.surface, graphicsFamily, presentFamily, transferFamily, computeFamily))
       {
          continue;
       }
@@ -437,15 +479,24 @@ void SetPhysicalDevice()
       vkGetPhysicalDeviceProperties(device, &properties);
 
       Vulkan.physicalDevice = device;
-      // Vulkan.universalQueueFamily = queueFamily;
+      span<const VkQueueFamilyProperties> families = GetQueueFamilyProperties(device);
+      Vulkan.queueFamilyCount = static_cast<u32>(families.size());
+      Vulkan.graphicsQueueFamilyIndex = graphicsFamily;
+      Vulkan.presentQueueFamilyIndex = presentFamily;
+      Vulkan.transferQueueFamilyIndex = transferFamily;
+      Vulkan.computeQueueFamilyIndex = computeFamily;
       Vulkan.physicalDeviceReady = true;
       Vulkan.deviceReady = false;
+      Vulkan.graphicsQueue = VK_NULL_HANDLE;
+      Vulkan.presentQueue = VK_NULL_HANDLE;
+      Vulkan.transferQueue = VK_NULL_HANDLE;
+      Vulkan.computeQueue = VK_NULL_HANDLE;
 
       LogInfo("[vulkan] Selected physical device: %s", properties.deviceName);
       return;
    }
 
-   Assert(false, "Failed to find a Vulkan physical device with universal queue support");
+   Assert(false, "Failed to find a Vulkan physical device with required queue support");
 }
 
 void CreateDevice()
@@ -514,20 +565,51 @@ void CreateDevice()
       Assert(hasExtension(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME), "Required Vulkan device extension VK_KHR_portability_subset is missing");
    }
 
+   Assert(Vulkan.queueFamilyCount > 0, "Queue families not discovered before device creation");
+   Assert(Vulkan.graphicsQueueFamilyIndex < Vulkan.queueFamilyCount, "Invalid graphics queue family index");
+   Assert(Vulkan.presentQueueFamilyIndex < Vulkan.queueFamilyCount, "Invalid present queue family index");
+   Assert(Vulkan.transferQueueFamilyIndex < Vulkan.queueFamilyCount, "Invalid transfer queue family index");
+   Assert(Vulkan.computeQueueFamilyIndex < Vulkan.queueFamilyCount, "Invalid compute queue family index");
+
    float queuePriority = 1.0f;
 
-   VkDeviceQueueCreateInfo queueCreateInfo = {
-      .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-      .queueFamilyIndex = Vulkan.universalQueueFamily,
-      .queueCount = 1,
-      .pQueuePriorities = &queuePriority,
+   array<uint32_t, 4> uniqueFamilies = {};
+   array<VkDeviceQueueCreateInfo, 4> queueCreateInfos = {};
+   uint32_t queueCreateInfoCount = 0;
+
+   auto addQueueFamily = [&](uint32_t family)
+   {
+      for (uint32_t index = 0; index < queueCreateInfoCount; ++index)
+      {
+         if (uniqueFamilies[index] == family)
+         {
+            return;
+         }
+      }
+
+      Assert(queueCreateInfoCount < queueCreateInfos.size(), "Too many queue families requested");
+
+      uniqueFamilies[queueCreateInfoCount] = family;
+      queueCreateInfos[queueCreateInfoCount] = {
+         .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+         .queueFamilyIndex = family,
+         .queueCount = 1,
+         .pQueuePriorities = &queuePriority,
+      };
+
+      queueCreateInfoCount += 1;
    };
+
+   addQueueFamily(Vulkan.graphicsQueueFamilyIndex);
+   addQueueFamily(Vulkan.presentQueueFamilyIndex);
+   addQueueFamily(Vulkan.transferQueueFamilyIndex);
+   addQueueFamily(Vulkan.computeQueueFamilyIndex);
 
    VkDeviceCreateInfo deviceCreateInfo = {
       .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
       .pNext = &features2,
-      .queueCreateInfoCount = 1,
-      .pQueueCreateInfos = &queueCreateInfo,
+      .queueCreateInfoCount = queueCreateInfoCount,
+      .pQueueCreateInfos = queueCreateInfos.data(),
       .enabledExtensionCount = extensionCount,
       .ppEnabledExtensionNames = extensions.data(),
       .enabledLayerCount = 0,
@@ -538,12 +620,25 @@ void CreateDevice()
    result = vkCreateDevice(Vulkan.physicalDevice, &deviceCreateInfo, nullptr, &Vulkan.device);
    Assert(result == VK_SUCCESS, "Failed to create Vulkan logical device");
 
-   vkGetDeviceQueue(Vulkan.device, Vulkan.universalQueueFamily, 0, &Vulkan.universalQueue);
-   Assert(Vulkan.universalQueue != VK_NULL_HANDLE, "Failed to retrieve Vulkan universal queue");
+   vkGetDeviceQueue(Vulkan.device, Vulkan.graphicsQueueFamilyIndex, 0, &Vulkan.graphicsQueue);
+   Assert(Vulkan.graphicsQueue != VK_NULL_HANDLE, "Failed to retrieve Vulkan graphics queue");
+
+   vkGetDeviceQueue(Vulkan.device, Vulkan.presentQueueFamilyIndex, 0, &Vulkan.presentQueue);
+   Assert(Vulkan.presentQueue != VK_NULL_HANDLE, "Failed to retrieve Vulkan present queue");
+
+   vkGetDeviceQueue(Vulkan.device, Vulkan.transferQueueFamilyIndex, 0, &Vulkan.transferQueue);
+   Assert(Vulkan.transferQueue != VK_NULL_HANDLE, "Failed to retrieve Vulkan transfer queue");
+
+   vkGetDeviceQueue(Vulkan.device, Vulkan.computeQueueFamilyIndex, 0, &Vulkan.computeQueue);
+   Assert(Vulkan.computeQueue != VK_NULL_HANDLE, "Failed to retrieve Vulkan compute queue");
 
    Vulkan.deviceReady = true;
 
-   LogInfo("[vulkan] Created logical device with universal queue family %u", Vulkan.universalQueueFamily);
+   LogInfo("[vulkan] Created logical device with queue families (graphics=%u present=%u transfer=%u compute=%u)",
+           Vulkan.graphicsQueueFamilyIndex,
+           Vulkan.presentQueueFamilyIndex,
+           Vulkan.transferQueueFamilyIndex,
+           Vulkan.computeQueueFamilyIndex);
 }
 
 void DestroyDevice()
@@ -557,6 +652,37 @@ void DestroyDevice()
    vkDestroyDevice(Vulkan.device, nullptr);
 
    Vulkan.device = VK_NULL_HANDLE;
-   Vulkan.universalQueue = VK_NULL_HANDLE;
+   Vulkan.graphicsQueue = VK_NULL_HANDLE;
+   Vulkan.presentQueue = VK_NULL_HANDLE;
+   Vulkan.transferQueue = VK_NULL_HANDLE;
+   Vulkan.computeQueue = VK_NULL_HANDLE;
    Vulkan.deviceReady = false;
+}
+
+auto GetGraphicsQueue() -> VkQueue
+{
+   Assert(Vulkan.deviceReady, "Create the Vulkan device before retrieving the graphics queue");
+   Assert(Vulkan.graphicsQueue != VK_NULL_HANDLE, "Vulkan graphics queue is not initialized");
+   return Vulkan.graphicsQueue;
+}
+
+auto GetComputeQueue() -> VkQueue
+{
+   Assert(Vulkan.deviceReady, "Create the Vulkan device before retrieving the compute queue");
+   Assert(Vulkan.computeQueue != VK_NULL_HANDLE, "Vulkan compute queue is not initialized");
+   return Vulkan.computeQueue;
+}
+
+auto GetTransferQueue() -> VkQueue
+{
+   Assert(Vulkan.deviceReady, "Create the Vulkan device before retrieving the transfer queue");
+   Assert(Vulkan.transferQueue != VK_NULL_HANDLE, "Vulkan transfer queue is not initialized");
+   return Vulkan.transferQueue;
+}
+
+auto GetPresentQueue() -> VkQueue
+{
+   Assert(Vulkan.deviceReady, "Create the Vulkan device before retrieving the present queue");
+   Assert(Vulkan.presentQueue != VK_NULL_HANDLE, "Vulkan present queue is not initialized");
+   return Vulkan.presentQueue;
 }
