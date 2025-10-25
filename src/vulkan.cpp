@@ -1753,24 +1753,30 @@ void BuildSpheres()
 
    DestroyPathTracerSceneBuffers();
 
-   constexpr u32 MaterialCount = 5;
+   constexpr u32 MaterialCount = 8;
    constexpr float MinRadius = 0.15f;
    constexpr float PlacementSpacing = 0.01f;
    constexpr u32 MaxPlacementAttempts = 128;
    static constexpr std::array<std::array<float, 4>, MaterialCount> MaterialAlbedoRoughness = {{
-      {0.8f, 0.3f, 0.3f, 1.0f},
-      {0.3f, 0.8f, 0.3f, 0.8f},
-      {0.3f, 0.3f, 0.8f, 0.4f},
-      {0.9f, 0.9f, 0.9f, 0.05f},
-      {0.9f, 0.6f, 0.2f, 0.2f},
+      {0.8f, 0.3f, 0.3f, 0.9f},   // diffuse red
+      {0.3f, 0.8f, 0.3f, 0.85f},  // diffuse green
+      {0.3f, 0.3f, 0.8f, 0.8f},   // diffuse blue
+      {0.9f, 0.8f, 0.6f, 0.9f},   // diffuse sand
+      {1.0f, 0.85f, 0.4f, 0.12f}, // metal gold
+      {0.95f, 0.95f, 0.95f, 0.08f}, // metal chrome
+      {0.95f, 0.55f, 0.3f, 0.15f}, // metal copper
+      {1.0f, 1.0f, 1.0f, 0.2f},   // emissive white
    }};
 
    static constexpr std::array<std::array<float, 4>, MaterialCount> MaterialEmissive = {{
-      {0.0f, 0.0f, 0.0f, 0.0f},
-      {0.0f, 0.0f, 0.0f, 0.0f},
-      {0.0f, 0.0f, 0.0f, 0.0f},
-      {3.0f, 3.0f, 3.0f, 0.0f},
-      {8.0f, 3.0f, 0.5f, 0.0f},
+      {0.0f, 0.0f, 0.0f, 0.0f},  // diffuse
+      {0.0f, 0.0f, 0.0f, 0.0f},  // diffuse
+      {0.0f, 0.0f, 0.0f, 0.0f},  // diffuse
+      {0.0f, 0.0f, 0.0f, 0.0f},  // diffuse
+      {0.0f, 0.0f, 0.0f, 1.0f},  // metal
+      {0.0f, 0.0f, 0.0f, 1.0f},  // metal
+      {0.0f, 0.0f, 0.0f, 1.0f},  // metal
+      {6.5f, 6.0f, 5.5f, 0.0f},  // emissive
    }};
 
    const u32 desiredSphereCount = DefaultSphereCount;
@@ -1795,6 +1801,19 @@ void BuildSpheres()
       float dz = a.z - b.z;
       return dx*dx + dy*dy + dz*dz;
    };
+   const auto randomIndex = [](const auto &indices, u32 &state) -> u32
+   {
+      float selection = RandomUnorm(state);
+      size_t pick = static_cast<size_t>(selection * static_cast<float>(indices.size()));
+      if (pick >= indices.size())
+      {
+         pick = indices.size() - 1;
+      }
+      return indices[pick];
+   };
+   static constexpr std::array<u32, 4> DiffuseIndices = {0, 1, 2, 3};
+   static constexpr std::array<u32, 3> MetallicIndices = {4, 5, 6};
+   static constexpr std::array<u32, 1> EmissiveIndices = {7};
 
    u32 rng = 0x9e3779b9u;
    for (u32 index = 0; index < desiredSphereCount; ++index)
@@ -1809,8 +1828,7 @@ void BuildSpheres()
 
          float px = SceneQuantization.origin.x + RandomUnorm(rng) * SceneQuantization.scale.x;
          float pz = SceneQuantization.origin.z + RandomUnorm(rng) * SceneQuantization.scale.z;
-         float baseY = SceneQuantization.origin.y + radius;
-         float py = baseY + RandomUnorm(rng) * (SceneQuantization.scale.y - radius);
+         float py = SceneQuantization.origin.y + radius;
 
          Vec3 candidate = {px, py, pz};
          bool overlaps = false;
@@ -1850,10 +1868,19 @@ void BuildSpheres()
       sphereWords.push_back(PackUnorm2x16(normalized.x, normalized.y));
       sphereWords.push_back(PackUnorm2x16(normalized.z, encodedRadius));
 
-      u32 materialIndex = static_cast<u32>(RandomUnorm(rng) * static_cast<float>(MaterialCount));
-      if (materialIndex >= MaterialCount)
+      float materialRoll = RandomUnorm(rng);
+      u32 materialIndex = 0;
+      if (materialRoll < 0.7f)
       {
-         materialIndex = MaterialCount - 1;
+         materialIndex = randomIndex(DiffuseIndices, rng);
+      }
+      else if (materialRoll < 0.95f)
+      {
+         materialIndex = randomIndex(MetallicIndices, rng);
+      }
+      else
+      {
+         materialIndex = randomIndex(EmissiveIndices, rng);
       }
       materialIds.push_back(materialIndex);
       centers.push_back(center);
