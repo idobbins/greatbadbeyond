@@ -27,7 +27,7 @@ static constexpr const char *FullscreenVertexShaderName = "fullscreen_triangle.v
 static constexpr const char *FullscreenFragmentShaderName = "fullscreen_triangle.frag.spv";
 static constexpr const char *PathTracerComputeShaderName = "pathtracer.comp.spv";
 static constexpr VkFormat PathTracerImageFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
-static constexpr u32 DefaultSphereCount = 256;
+static constexpr u32 DefaultSphereCount = 512;
 
 #ifndef VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME
 #define VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME "VK_KHR_portability_subset"
