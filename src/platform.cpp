@@ -25,7 +25,19 @@ static struct PlatformData
         bool framebufferResized;
 
     } Window;
+    struct
+    {
+        double lastTime;
+        double lastLogTime;
+        double accumulatedMs;
+        u32 samples;
+        float deltaSeconds;
+        bool ready;
+
+    } FrameTiming;
 } Platform;
+
+static constexpr double FrameTimingLogIntervalSeconds = 1.0;
 
 void GlfwErrorCallback(int code, const char *description)
 {
@@ -103,6 +115,14 @@ void CreateWindow()
 
     Platform.Window.ready = true;
     Platform.Window.framebufferResized = false;
+
+    double now = glfwGetTime();
+    Platform.FrameTiming.lastTime = now;
+    Platform.FrameTiming.lastLogTime = now;
+    Platform.FrameTiming.accumulatedMs = 0.0;
+    Platform.FrameTiming.samples = 0;
+    Platform.FrameTiming.deltaSeconds = 0.0f;
+    Platform.FrameTiming.ready = true;
 }
 
 void DestroyWindow()
@@ -117,6 +137,13 @@ void DestroyWindow()
 
     Platform.Window.ready = false;
     Platform.Window.framebufferResized = false;
+
+    Platform.FrameTiming.ready = false;
+    Platform.FrameTiming.deltaSeconds = 0.0f;
+    Platform.FrameTiming.samples = 0;
+    Platform.FrameTiming.accumulatedMs = 0.0;
+    Platform.FrameTiming.lastTime = 0.0;
+    Platform.FrameTiming.lastLogTime = 0.0;
 }
 
 auto WindowShouldClose() -> bool
@@ -199,10 +226,56 @@ void PollEvents()
     glfwPollEvents();
 }
 
+auto GetFrameDeltaSeconds() -> float
+{
+    return Platform.FrameTiming.deltaSeconds;
+}
+
 void MainLoop()
 {
+    if (!Platform.FrameTiming.ready)
+    {
+        double now = glfwGetTime();
+        Platform.FrameTiming.lastTime = now;
+        Platform.FrameTiming.lastLogTime = now;
+        Platform.FrameTiming.accumulatedMs = 0.0;
+        Platform.FrameTiming.samples = 0;
+        Platform.FrameTiming.deltaSeconds = 0.0f;
+        Platform.FrameTiming.ready = true;
+    }
+
     while (!WindowShouldClose())
     {
+        double now = glfwGetTime();
+        double deltaSeconds = now - Platform.FrameTiming.lastTime;
+        if (deltaSeconds < 0.0)
+        {
+            deltaSeconds = 0.0;
+        }
+
+        Platform.FrameTiming.lastTime = now;
+        Platform.FrameTiming.deltaSeconds = static_cast<float>(deltaSeconds);
+        Platform.FrameTiming.accumulatedMs += deltaSeconds * 1000.0;
+        Platform.FrameTiming.samples += 1;
+
+        if ((now - Platform.FrameTiming.lastLogTime) >= FrameTimingLogIntervalSeconds)
+        {
+            u32 frameSamples = Platform.FrameTiming.samples;
+            if (frameSamples > 0)
+            {
+                double averageMs = Platform.FrameTiming.accumulatedMs / static_cast<double>(frameSamples);
+                double fps = (averageMs > 0.0) ? (1000.0 / averageMs) : 0.0;
+                LogInfo("[frame] avg %.3f ms (%.1f fps) over %u frames",
+                    averageMs,
+                    fps,
+                    static_cast<unsigned>(frameSamples));
+            }
+
+            Platform.FrameTiming.lastLogTime = now;
+            Platform.FrameTiming.accumulatedMs = 0.0;
+            Platform.FrameTiming.samples = 0;
+        }
+
         PollEvents();
 
         if (ConsumeFramebufferResize())

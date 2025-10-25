@@ -110,6 +110,7 @@ auto IsKeyPressed() -> bool;
 // Eventloop-related functions
 void PollEvents();
 void MainLoop();
+auto GetFrameDeltaSeconds() -> float;
 auto RequiresDebug() -> bool;
 auto RequiresPortability() -> bool;
 
