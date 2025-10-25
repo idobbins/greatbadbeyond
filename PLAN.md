@@ -17,10 +17,10 @@ Linear sequence of work items that graduates the app from the current code (GLFW
    - The Vulkan backend now builds shader modules, a push-constant-only pipeline layout, and a dynamic-rendering graphics pipeline that re-creates itself alongside the swapchain.
    - `RecordCommandBuffer()` binds the fullscreen pipeline, pushes the frame color, and draws the triangle so every submission now renders a constant tint instead of relying on attachment clears.
 
-3. **UV Gradient Pass**
-   - Replace the fragment shader with a UV-based output (e.g., `vec4(uv, 0.0, 1.0)`), proving attribute flow from vertex to fragment.
-   - Add a tiny uniform block or push constants for time/parameters if needed to exercise data routing.
-   - Validate that resizing + swapchain recreation keeps the gradient aligned to pixel coordinates.
+3. **UV Gradient Pass (Done)**
+   - Fullscreen vertex shader now emits per-vertex UVs scaled by live framebuffer resolution via the new `GradientParams` push constants, so attribute interpolation matches the visible surface even after swapchain recreation.
+   - Fragment shader consumes those UVs, normalizes them against the current resolution, and outputs `vec4(uv, wave, 1.0)` where `wave` is derived from the push-constant time parameter, giving a clear animated gradient.
+   - The Vulkan backend defines/pushes `GradientParams` every frame: `MainLoop()` fills resolution+time from `GetFramebufferSize()`/`glfwGetTime()`, `RecordCommandBuffer()` forwards them via `vkCmdPushConstants`, and the fullscreen pipeline layout now exposes the range to both shader stages.
 
 4. **Compute Storage Image Plumbing**
    - Allocate a storage image matching the swapchain extent plus the associated image view and memory.

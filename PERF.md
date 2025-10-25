@@ -14,7 +14,7 @@ Real-time ray tracing on modern consumer GPUs (NVIDIA RTX and AMD RDNA) demands 
 
 - Fullscreen triangle vertex/fragment GLSL shaders live under `resources/shaders` and CMake now drives `glslc` so any edit regenerates SPIR-V into `build/<config>/shaders`, keeping runtime assets in lockstep with source control.
 - `CreateFullscreenPipeline()` consumes those binaries to build shader modules, a push-constant-only pipeline layout, and a dynamic-rendering pipeline that tracks the swapchain format; `RecreateSwapchain()` tears it down and rebuilds it alongside the new image views.
-- `RecordCommandBuffer()` binds the pipeline, sets viewport/scissor dynamically, and pushes the frame tint as a fragment push constant before drawing the triangle, giving us dependable solid-color output rather than attachment clear hacks.
+- `RecordCommandBuffer()` binds the pipeline, sets viewport/scissor dynamically, and now pushes a `GradientParams` block (framebuffer resolution + time) so the fullscreen triangle draws a UV-based gradient that stays aligned through resizes while the third channel animates over time.
 
 Struct-of-Arrays vs Array-of-Structs (SoA vs AoS) memory layouts
 

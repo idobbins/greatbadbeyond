@@ -1166,9 +1166,9 @@ void CreateFullscreenPipeline()
    Vulkan.fullscreenFragmentShader = CreateShader(fragmentPath.data());
 
    VkPushConstantRange pushConstant = {
-      .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+      .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
       .offset = 0,
-      .size = sizeof(float) * 4,
+      .size = sizeof(GradientParams),
    };
 
    VkPipelineLayoutCreateInfo layoutInfo = {
@@ -1545,12 +1545,12 @@ auto AcquireNextImage(u32 &imageIndex, u32 &frameIndex) -> VkResult
    return acquireResult;
 }
 
-auto RecordCommandBuffer(u32 frameIndex, u32 imageIndex, VkClearColorValue clearColor) -> VkResult
+auto RecordCommandBuffer(u32 frameIndex, u32 imageIndex, const GradientParams &gradient) -> VkResult
 {
    Assert(Vulkan.swapchainReady, "Create the Vulkan swapchain before recording commands");
    Assert(Vulkan.swapchainImageViewsReady, "Create swapchain image views before recording commands");
    Assert(Vulkan.frameResourcesReady, "Frame resources must exist before recording commands");
-    Assert(Vulkan.fullscreenPipelineReady, "Fullscreen pipeline must be ready before recording commands");
+   Assert(Vulkan.fullscreenPipelineReady, "Fullscreen pipeline must be ready before recording commands");
    Assert(frameIndex < FrameOverlap, "Frame index out of range");
    Assert(imageIndex < Vulkan.swapchainImageCount, "Swapchain image index out of range");
 
@@ -1612,6 +1612,8 @@ auto RecordCommandBuffer(u32 frameIndex, u32 imageIndex, VkClearColorValue clear
       1,
       &barrierToAttachment);
 
+   VkClearColorValue clearColor = {{0.0f, 0.0f, 0.0f, 1.0f}};
+
    VkRenderingAttachmentInfo colorAttachment = {
       .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
       .imageView = imageView,
@@ -1653,19 +1655,13 @@ auto RecordCommandBuffer(u32 frameIndex, u32 imageIndex, VkClearColorValue clear
 
    vkCmdBindPipeline(frame.commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, Vulkan.fullscreenPipeline);
 
-   float pushColor[4] = {
-      clearColor.float32[0],
-      clearColor.float32[1],
-      clearColor.float32[2],
-      clearColor.float32[3],
-   };
    vkCmdPushConstants(
       frame.commandBuffer,
       Vulkan.fullscreenPipelineLayout,
-      VK_SHADER_STAGE_FRAGMENT_BIT,
+      VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
       0,
-      sizeof(pushColor),
-      pushColor);
+      sizeof(GradientParams),
+      &gradient);
 
    vkCmdDraw(frame.commandBuffer, 3, 1, 0, 0);
 

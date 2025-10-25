@@ -71,6 +71,13 @@ struct FrameResources
     VkSemaphore imageAvailableSemaphore;
 };
 
+struct GradientParams
+{
+    Vec2 resolution;
+    float time;
+    float padding;
+};
+
 //------------------------------------------------------------------------------------
 // Window and Platform Functions (Module: platform)
 //------------------------------------------------------------------------------------
@@ -177,7 +184,7 @@ void RecreateSwapchain();
 void CreateFrameResources();
 void DestroyFrameResources();
 auto AcquireNextImage(u32 &imageIndex, u32 &frameIndex) -> VkResult;
-auto RecordCommandBuffer(u32 frameIndex, u32 imageIndex, VkClearColorValue clearColor) -> VkResult;
+auto RecordCommandBuffer(u32 frameIndex, u32 imageIndex, const GradientParams &gradient) -> VkResult;
 auto SubmitFrame(u32 frameIndex, u32 imageIndex) -> VkResult;
 
 // VMA-related functions

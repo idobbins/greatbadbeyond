@@ -227,8 +227,14 @@ void MainLoop()
             break;
         }
 
-        VkClearColorValue clearColor = {{0.05f, 0.75f, 0.45f, 1.0f}};
-        VkResult recordResult = RecordCommandBuffer(frameIndex, imageIndex, clearColor);
+        GradientParams gradient = {};
+        Size framebuffer = GetFramebufferSize();
+        gradient.resolution.x = (framebuffer.width > 0)? static_cast<float>(framebuffer.width) : 1.0f;
+        gradient.resolution.y = (framebuffer.height > 0)? static_cast<float>(framebuffer.height) : 1.0f;
+        gradient.time = static_cast<float>(glfwGetTime());
+        gradient.padding = 0.0f;
+
+        VkResult recordResult = RecordCommandBuffer(frameIndex, imageIndex, gradient);
         if (recordResult != VK_SUCCESS)
         {
             LogError("[vulkan] RecordCommandBuffer failed (result=%d)", recordResult);
