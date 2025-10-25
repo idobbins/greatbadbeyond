@@ -83,6 +83,8 @@ auto IsWindowReady()      -> bool;
 auto GetWindowSize()      -> Size;
 auto GetFramebufferSize() -> Size;
 auto GetWindowHandle()    -> GLFWwindow *;
+void FramebufferSizeCallback(GLFWwindow *window, int width, int height);
+auto ConsumeFramebufferResize() -> bool;
 
 void CreateWindow();
 void DestroyWindow();

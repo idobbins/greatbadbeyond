@@ -8,6 +8,7 @@
 #include <array>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <memory_resource>
 #include <ostream>
 #include <vector>
@@ -36,12 +37,20 @@ static struct VulkanData
    u32 presentQueueFamilyIndex;
    u32 transferQueueFamilyIndex;
    u32 computeQueueFamilyIndex;
+   VkSwapchainKHR swapchain;
+   VkFormat swapchainFormat;
+   VkExtent2D swapchainExtent;
+   array<VkImage, MaxSwapchainImages> swapchainImages;
+   array<VkImageView, MaxSwapchainImages> swapchainImageViews;
+   u32 swapchainImageCount;
 
    bool instanceReady;
    bool validationLayersEnabled;
    bool debugMessengerReady;
    bool physicalDeviceReady;
    bool deviceReady;
+   bool swapchainReady;
+   bool swapchainImageViewsReady;
 
 } Vulkan;
 
@@ -130,10 +139,13 @@ void CreateVulkan()
    SetPhysicalDevice();
 
    CreateDevice();
+   CreateSwapchain();
+   CreateSwapchainImageViews();
 }
 
 void DestroyVulkan()
 {
+   DestroySwapchain();
    DestroyDevice();
    DestroySurface();
    DestroyInstance();
@@ -251,6 +263,22 @@ void DestroyInstance()
    Vulkan.computeQueueFamilyIndex = 0;
    Vulkan.physicalDeviceReady = false;
    Vulkan.deviceReady = false;
+   Vulkan.swapchain = VK_NULL_HANDLE;
+   Vulkan.swapchainReady = false;
+   Vulkan.swapchainImageViewsReady = false;
+   Vulkan.swapchainImageCount = 0;
+   Vulkan.swapchainExtent = {0, 0};
+   Vulkan.swapchainFormat = VK_FORMAT_UNDEFINED;
+
+   for (VkImage &image : Vulkan.swapchainImages)
+   {
+      image = VK_NULL_HANDLE;
+   }
+
+   for (VkImageView &imageView : Vulkan.swapchainImageViews)
+   {
+      imageView = VK_NULL_HANDLE;
+   }
 }
 
 void CreateSurface()
@@ -707,4 +735,388 @@ auto GetPresentQueue() -> VkQueue
    Assert(Vulkan.deviceReady, "Create the Vulkan device before retrieving the present queue");
    Assert(Vulkan.presentQueue != VK_NULL_HANDLE, "Vulkan present queue is not initialized");
    return Vulkan.presentQueue;
+}
+
+auto GetSwapchainImages() -> span<const VkImage>
+{
+   Assert(Vulkan.swapchainReady, "Create the Vulkan swapchain before querying images");
+   Assert(Vulkan.swapchainImageCount > 0, "Vulkan swapchain contains zero images");
+   return {Vulkan.swapchainImages.data(), Vulkan.swapchainImageCount};
+}
+
+auto GetSwapchainImageViews() -> span<const VkImageView>
+{
+   Assert(Vulkan.swapchainImageViewsReady, "Create swapchain image views before querying them");
+   Assert(Vulkan.swapchainImageCount > 0, "Vulkan swapchain contains zero images");
+   return {Vulkan.swapchainImageViews.data(), Vulkan.swapchainImageCount};
+}
+
+auto GetSwapchainExtent() -> VkExtent2D
+{
+   Assert(Vulkan.swapchainReady, "Create the Vulkan swapchain before querying the extent");
+   return Vulkan.swapchainExtent;
+}
+
+auto GetSwapchainFormat() -> VkFormat
+{
+   Assert(Vulkan.swapchainReady, "Create the Vulkan swapchain before querying the format");
+   return Vulkan.swapchainFormat;
+}
+
+void CreateSwapchain()
+{
+   if (Vulkan.swapchainReady)
+   {
+      return;
+   }
+
+   Assert(Vulkan.deviceReady, "Create the Vulkan device before the swapchain");
+   Assert(Vulkan.surface != VK_NULL_HANDLE, "Create the Vulkan surface before the swapchain");
+
+   VkSurfaceCapabilitiesKHR capabilities = GetPhysicalDeviceSurfaceCapabilities();
+   span<const VkSurfaceFormatKHR> formats = GetPhysicalDeviceSurfaceFormats();
+   span<const VkPresentModeKHR> presentModes = GetPhysicalDeviceSurfacePresentModes();
+
+   const auto chooseSurfaceFormat = [&]() -> VkSurfaceFormatKHR
+   {
+      for (const VkSurfaceFormatKHR &format : formats)
+      {
+         if ((format.format == VK_FORMAT_B8G8R8A8_SRGB) &&
+             (format.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR))
+         {
+            return format;
+         }
+      }
+
+      return formats[0];
+   };
+
+   const auto choosePresentMode = [&]() -> VkPresentModeKHR
+   {
+      for (const VkPresentModeKHR &mode : presentModes)
+      {
+         if (mode == VK_PRESENT_MODE_MAILBOX_KHR)
+         {
+            return mode;
+         }
+      }
+
+      return VK_PRESENT_MODE_FIFO_KHR;
+   };
+
+   const auto clampValue = [](uint32_t value, uint32_t minValue, uint32_t maxValue) -> uint32_t
+   {
+      uint32_t result = value;
+
+      if (result < minValue)
+      {
+         result = minValue;
+      }
+
+      if (result > maxValue)
+      {
+         result = maxValue;
+      }
+
+      return result;
+   };
+
+   VkExtent2D extent = {};
+   if (capabilities.currentExtent.width != numeric_limits<uint32_t>::max())
+   {
+      extent = capabilities.currentExtent;
+   }
+   else
+   {
+      Size framebuffer = GetFramebufferSize();
+      Assert((framebuffer.width > 0) && (framebuffer.height > 0), "Window framebuffer size is zero");
+
+      extent.width = clampValue(static_cast<uint32_t>(framebuffer.width),
+                                capabilities.minImageExtent.width,
+                                capabilities.maxImageExtent.width);
+      extent.height = clampValue(static_cast<uint32_t>(framebuffer.height),
+                                 capabilities.minImageExtent.height,
+                                 capabilities.maxImageExtent.height);
+   }
+
+   uint32_t desiredImageCount = swapchainImageCount;
+   if (desiredImageCount < capabilities.minImageCount)
+   {
+      desiredImageCount = capabilities.minImageCount;
+   }
+
+   if ((capabilities.maxImageCount > 0) && (desiredImageCount > capabilities.maxImageCount))
+   {
+      desiredImageCount = capabilities.maxImageCount;
+   }
+
+   Assert(desiredImageCount <= MaxSwapchainImages, "Requested swapchain images exceed cache capacity");
+
+   VkSurfaceFormatKHR surfaceFormat = chooseSurfaceFormat();
+   VkPresentModeKHR presentMode = choosePresentMode();
+
+   array<uint32_t, 2> queueFamilyIndices = {
+      Vulkan.graphicsQueueFamilyIndex,
+      Vulkan.presentQueueFamilyIndex
+   };
+
+   VkSharingMode sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+   uint32_t queueFamilyIndexCount = 0;
+   const uint32_t *queueFamilyIndexPtr = nullptr;
+
+   if (Vulkan.graphicsQueueFamilyIndex != Vulkan.presentQueueFamilyIndex)
+   {
+      sharingMode = VK_SHARING_MODE_CONCURRENT;
+      queueFamilyIndexCount = 2;
+      queueFamilyIndexPtr = queueFamilyIndices.data();
+   }
+
+   VkSwapchainCreateInfoKHR createInfo = {
+      .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
+      .surface = Vulkan.surface,
+      .minImageCount = desiredImageCount,
+      .imageFormat = surfaceFormat.format,
+      .imageColorSpace = surfaceFormat.colorSpace,
+      .imageExtent = extent,
+      .imageArrayLayers = 1,
+      .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+      .imageSharingMode = sharingMode,
+      .queueFamilyIndexCount = queueFamilyIndexCount,
+      .pQueueFamilyIndices = queueFamilyIndexPtr,
+      .preTransform = capabilities.currentTransform,
+      .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+      .presentMode = presentMode,
+      .clipped = VK_TRUE,
+      .oldSwapchain = Vulkan.swapchain,
+   };
+
+   VkResult result = vkCreateSwapchainKHR(Vulkan.device, &createInfo, nullptr, &Vulkan.swapchain);
+   Assert(result == VK_SUCCESS, "Failed to create Vulkan swapchain");
+
+   if (createInfo.oldSwapchain != VK_NULL_HANDLE)
+   {
+      vkDestroySwapchainKHR(Vulkan.device, createInfo.oldSwapchain, nullptr);
+   }
+
+   uint32_t imageCount = 0;
+   result = vkGetSwapchainImagesKHR(Vulkan.device, Vulkan.swapchain, &imageCount, nullptr);
+   Assert(result == VK_SUCCESS, "vkGetSwapchainImagesKHR (count) failed");
+   Assert(imageCount > 0, "Vulkan swapchain returned zero images");
+   Assert(imageCount <= Vulkan.swapchainImages.size(), "Swapchain image count exceeds cache size");
+
+   result = vkGetSwapchainImagesKHR(Vulkan.device, Vulkan.swapchain, &imageCount, Vulkan.swapchainImages.data());
+   Assert(result == VK_SUCCESS, "vkGetSwapchainImagesKHR (fill) failed");
+
+   for (VkImageView &imageView : Vulkan.swapchainImageViews)
+   {
+      imageView = VK_NULL_HANDLE;
+   }
+
+   Vulkan.swapchainImageCount = imageCount;
+   Vulkan.swapchainExtent = extent;
+   Vulkan.swapchainFormat = surfaceFormat.format;
+   Vulkan.swapchainReady = true;
+   Vulkan.swapchainImageViewsReady = false;
+
+   LogInfo("[vulkan] Created swapchain %ux%u (%u images, format=%u, presentMode=%u)",
+           extent.width,
+           extent.height,
+           Vulkan.swapchainImageCount,
+           static_cast<uint32_t>(Vulkan.swapchainFormat),
+           static_cast<uint32_t>(presentMode));
+}
+
+void CreateSwapchainImageViews()
+{
+   if (Vulkan.swapchainImageViewsReady)
+   {
+      return;
+   }
+
+   Assert(Vulkan.deviceReady, "Create the Vulkan device before swapchain image views");
+   Assert(Vulkan.swapchainReady, "Create the Vulkan swapchain before image views");
+   Assert(Vulkan.swapchainImageCount > 0, "Vulkan swapchain contains zero images");
+
+   for (uint32_t index = 0; index < Vulkan.swapchainImageCount; ++index)
+   {
+      VkImageViewCreateInfo createInfo = {
+         .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+         .image = Vulkan.swapchainImages[index],
+         .viewType = VK_IMAGE_VIEW_TYPE_2D,
+         .format = Vulkan.swapchainFormat,
+         .components = {
+            VK_COMPONENT_SWIZZLE_IDENTITY,
+            VK_COMPONENT_SWIZZLE_IDENTITY,
+            VK_COMPONENT_SWIZZLE_IDENTITY,
+            VK_COMPONENT_SWIZZLE_IDENTITY,
+         },
+         .subresourceRange = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+         },
+      };
+
+      VkResult result = vkCreateImageView(Vulkan.device, &createInfo, nullptr, &Vulkan.swapchainImageViews[index]);
+      Assert(result == VK_SUCCESS, "Failed to create Vulkan swapchain image view");
+   }
+
+   Vulkan.swapchainImageViewsReady = true;
+}
+
+void DestroySwapchainImageViews()
+{
+   if (Vulkan.swapchainImageCount == 0 || Vulkan.device == VK_NULL_HANDLE)
+   {
+      Vulkan.swapchainImageViewsReady = false;
+      return;
+   }
+
+   for (uint32_t index = 0; index < Vulkan.swapchainImageCount; ++index)
+   {
+      if (Vulkan.swapchainImageViews[index] != VK_NULL_HANDLE)
+      {
+         vkDestroyImageView(Vulkan.device, Vulkan.swapchainImageViews[index], nullptr);
+         Vulkan.swapchainImageViews[index] = VK_NULL_HANDLE;
+      }
+   }
+
+   Vulkan.swapchainImageViewsReady = false;
+}
+
+void DestroySwapchain()
+{
+   DestroySwapchainImageViews();
+
+   if (Vulkan.swapchain == VK_NULL_HANDLE)
+   {
+      Vulkan.swapchainReady = false;
+      Vulkan.swapchainImageViewsReady = false;
+      Vulkan.swapchainImageCount = 0;
+      Vulkan.swapchainExtent = {0, 0};
+      Vulkan.swapchainFormat = VK_FORMAT_UNDEFINED;
+      return;
+   }
+
+   if (Vulkan.device == VK_NULL_HANDLE)
+   {
+      Vulkan.swapchain = VK_NULL_HANDLE;
+      Vulkan.swapchainReady = false;
+      Vulkan.swapchainImageViewsReady = false;
+      Vulkan.swapchainImageCount = 0;
+      Vulkan.swapchainExtent = {0, 0};
+      Vulkan.swapchainFormat = VK_FORMAT_UNDEFINED;
+      return;
+   }
+
+   vkDestroySwapchainKHR(Vulkan.device, Vulkan.swapchain, nullptr);
+   Vulkan.swapchain = VK_NULL_HANDLE;
+   Vulkan.swapchainReady = false;
+   Vulkan.swapchainImageViewsReady = false;
+   Vulkan.swapchainImageCount = 0;
+   Vulkan.swapchainExtent = {0, 0};
+   Vulkan.swapchainFormat = VK_FORMAT_UNDEFINED;
+
+   for (VkImage &image : Vulkan.swapchainImages)
+   {
+      image = VK_NULL_HANDLE;
+   }
+}
+
+void RecreateSwapchain()
+{
+   if (!Vulkan.deviceReady)
+   {
+      return;
+   }
+
+   Size framebuffer = GetFramebufferSize();
+   while (((framebuffer.width == 0) || (framebuffer.height == 0)) && !WindowShouldClose())
+   {
+      PollEvents();
+      framebuffer = GetFramebufferSize();
+   }
+
+   if ((framebuffer.width == 0) || (framebuffer.height == 0))
+   {
+      LogWarn("[vulkan] Skipping swapchain recreation because framebuffer is zero-sized");
+      return;
+   }
+
+   vkDeviceWaitIdle(Vulkan.device);
+
+   DestroySwapchainImageViews();
+   Vulkan.swapchainReady = false;
+   Vulkan.swapchainImageViewsReady = false;
+
+   CreateSwapchain();
+   CreateSwapchainImageViews();
+}
+
+auto AcquireNextSwapchainImage(VkSemaphore imageAvailableSemaphore, VkFence inFlightFence) -> u32
+{
+   Assert(Vulkan.swapchainReady, "Create the Vulkan swapchain before acquiring images");
+   Assert(Vulkan.deviceReady, "Create the Vulkan device before acquiring images");
+   Assert(imageAvailableSemaphore != VK_NULL_HANDLE, "Image-available semaphore is null");
+
+   uint32_t imageIndex = 0;
+   VkResult result = vkAcquireNextImageKHR(
+      Vulkan.device,
+      Vulkan.swapchain,
+      UINT64_MAX,
+      imageAvailableSemaphore,
+      inFlightFence,
+      &imageIndex);
+
+   if (result == VK_ERROR_OUT_OF_DATE_KHR)
+   {
+      LogWarn("[vulkan] Swapchain is out of date during acquire; recreating");
+      RecreateSwapchain();
+      return UINT32_MAX;
+   }
+
+   if (result == VK_SUBOPTIMAL_KHR)
+   {
+      LogWarn("[vulkan] Swapchain is suboptimal during acquire; recreating");
+      RecreateSwapchain();
+      return UINT32_MAX;
+   }
+
+   Assert(result == VK_SUCCESS, "Failed to acquire swapchain image");
+   Assert(imageIndex < Vulkan.swapchainImageCount, "Vulkan returned an invalid swapchain image index");
+
+   return imageIndex;
+}
+
+void PresentSwapchainImage(u32 imageIndex, VkSemaphore renderFinishedSemaphore)
+{
+   Assert(Vulkan.swapchainReady, "Create the Vulkan swapchain before presenting");
+   Assert(Vulkan.presentQueue != VK_NULL_HANDLE, "Present queue is not initialized");
+   Assert(renderFinishedSemaphore != VK_NULL_HANDLE, "Render-finished semaphore is null");
+   Assert(imageIndex < Vulkan.swapchainImageCount, "Swapchain image index out of range");
+
+   VkSwapchainKHR swapchainHandle = Vulkan.swapchain;
+
+   VkPresentInfoKHR presentInfo = {
+      .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+      .waitSemaphoreCount = 1,
+      .pWaitSemaphores = &renderFinishedSemaphore,
+      .swapchainCount = 1,
+      .pSwapchains = &swapchainHandle,
+      .pImageIndices = &imageIndex,
+      .pResults = nullptr,
+   };
+
+   VkResult result = vkQueuePresentKHR(Vulkan.presentQueue, &presentInfo);
+
+   if ((result == VK_ERROR_OUT_OF_DATE_KHR) || (result == VK_SUBOPTIMAL_KHR))
+   {
+      LogWarn("[vulkan] Swapchain is out of date or suboptimal during present; recreating");
+      RecreateSwapchain();
+      return;
+   }
+
+   Assert(result == VK_SUCCESS, "Failed to present swapchain image");
 }

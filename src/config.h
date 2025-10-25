@@ -12,9 +12,12 @@ static constexpr uint32_t MaxDeviceExtensions = 8;
 static constexpr uint32_t MaxEnumeratedDeviceExtensions = 256;
 static constexpr uint32_t MaxSurfaceFormats = 64;
 static constexpr uint32_t MaxSurfacePresentModes = 32;
+static constexpr uint32_t MaxSwapchainImages = 8;
 
 static constexpr std::size_t InstanceExtensionScratchBytes = 1024;
 static constexpr std::size_t InstanceLayerScratchBytes = 1024;
+
+static constexpr uint32_t swapchainImageCount = 3;
 
 static constexpr int DefaultWindowWidth = 1280;
 static constexpr int DefaultWindowHeight = 720;

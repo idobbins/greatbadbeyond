@@ -22,6 +22,7 @@ static struct PlatformData
         string_view title;
         GLFWwindow *handle;
         bool ready;
+        bool framebufferResized;
 
     } Window;
 } Platform;
@@ -97,8 +98,11 @@ void CreateWindow()
 
     Platform.Window.title = DefaultWindowTitle;
     Platform.Window.handle = glfwCreateWindow(DefaultWindowWidth, DefaultWindowHeight, Platform.Window.title.data(), nullptr, nullptr);
+    Assert(Platform.Window.handle != nullptr, "Failed to create GLFW window");
+    glfwSetFramebufferSizeCallback(Platform.Window.handle, FramebufferSizeCallback);
 
     Platform.Window.ready = true;
+    Platform.Window.framebufferResized = false;
 }
 
 void DestroyWindow()
@@ -112,6 +116,7 @@ void DestroyWindow()
     Platform.Window.handle = nullptr;
 
     Platform.Window.ready = false;
+    Platform.Window.framebufferResized = false;
 }
 
 auto WindowShouldClose() -> bool
@@ -167,6 +172,22 @@ auto GetFramebufferSize() -> Size
     return size;
 }
 
+void FramebufferSizeCallback(GLFWwindow *window, int width, int height)
+{
+    (void)window;
+    (void)width;
+    (void)height;
+
+    Platform.Window.framebufferResized = true;
+}
+
+auto ConsumeFramebufferResize() -> bool
+{
+    bool resized = Platform.Window.framebufferResized;
+    Platform.Window.framebufferResized = false;
+    return resized;
+}
+
 auto GetWindowHandle() -> GLFWwindow *
 {
     Assert(Platform.Window.ready && Platform.Window.handle != nullptr, "Window is not ready");
@@ -183,6 +204,11 @@ void MainLoop()
     while (!WindowShouldClose())
     {
         PollEvents();
+
+        if (ConsumeFramebufferResize())
+        {
+            RecreateSwapchain();
+        }
     }
 }
 
