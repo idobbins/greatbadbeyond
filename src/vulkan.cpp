@@ -277,69 +277,24 @@ void DestroySurface()
    Vulkan.surface = VK_NULL_HANDLE;
 }
 
-auto GetPhysicalDeviceFeatures2(const VkPhysicalDevice &device) -> const VkPhysicalDeviceFeatures2&
+auto GetPhysicalDeviceFeatures(const VkPhysicalDevice &device) -> const PhysicalDeviceFeatures&
 {
    Assert(device != VK_NULL_HANDLE, "Physical device handle is null");
 
-   struct CacheEntry {
-      VkPhysicalDevice          physicalDevice{};
-      VkPhysicalDeviceFeatures2 features2{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
-      bool                      ready{};
+   static PhysicalDeviceFeatures features {};
+
+   features.v13 = VkPhysicalDeviceVulkan13Features{
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
+      .pNext = nullptr,
    };
 
-   static array<CacheEntry, MaxPhysicalDevices> cache {};
-   static u32 cacheCount = 0;
-
-   for (u32 index = 0; index < cacheCount; ++index)
-   {
-      const auto &entry = cache[index];
-      if (entry.ready && entry.physicalDevice == device)
-      {
-         return entry.features2;
-      }
-   }
-
-   Assert(cacheCount < cache.size(), "Too many features2 cache entries");
-   auto &entry = cache[cacheCount++];
-   entry = CacheEntry{ .physicalDevice = device };
-   vkGetPhysicalDeviceFeatures2(device, &entry.features2);
-   entry.ready = true;
-
-   return entry.features2;
-}
-
-auto GetPhysicalDeviceVulkan13Features(const VkPhysicalDevice &device) -> const VkPhysicalDeviceVulkan13Features&
-{
-   Assert(device != VK_NULL_HANDLE, "Physical device handle is null");
-
-   struct CacheEntry {
-      VkPhysicalDevice                 physicalDevice{};
-      VkPhysicalDeviceVulkan13Features features13{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES };
-      bool                             ready{};
+   features.core = VkPhysicalDeviceFeatures2{
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+      .pNext = &features.v13,
    };
 
-   static array<CacheEntry, MaxPhysicalDevices> cache {};
-   static u32 cacheCount = 0;
-
-   for (u32 index = 0; index < cacheCount; ++index)
-   {
-      const auto &entry = cache[index];
-      if (entry.ready && entry.physicalDevice == device)
-      {
-         return entry.features13;
-      }
-   }
-
-   Assert(cacheCount < cache.size(), "Too many v1.3 feature cache entries");
-   auto &entry = cache[cacheCount++];
-   entry = CacheEntry{ .physicalDevice = device };
-
-   VkPhysicalDeviceFeatures2 head { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
-   head.pNext = &entry.features13;
-   vkGetPhysicalDeviceFeatures2(device, &head);
-
-   entry.ready = true;
-   return entry.features13;
+   vkGetPhysicalDeviceFeatures2(device, &features.core);
+   return features;
 }
 
 auto GetPhysicalDevices() -> span<const VkPhysicalDevice>
@@ -478,6 +433,19 @@ void SetPhysicalDevice()
       VkPhysicalDeviceProperties properties = {};
       vkGetPhysicalDeviceProperties(device, &properties);
 
+      if (properties.apiVersion < VK_API_VERSION_1_3)
+      {
+         continue;
+      }
+
+      const auto &features = GetPhysicalDeviceFeatures(device);
+      const auto &features13 = features.v13;
+
+      if ((features13.dynamicRendering != VK_TRUE) || (features13.synchronization2 != VK_TRUE))
+      {
+         continue;
+      }
+
       Vulkan.physicalDevice = device;
       span<const VkQueueFamilyProperties> families = GetQueueFamilyProperties(device);
       Vulkan.queueFamilyCount = static_cast<u32>(families.size());
@@ -496,7 +464,7 @@ void SetPhysicalDevice()
       return;
    }
 
-   Assert(false, "Failed to find a Vulkan physical device with required queue support");
+   Assert(false, "Failed to find a Vulkan physical device with required API support, features, and queue families");
 }
 
 void CreateDevice()
@@ -508,8 +476,8 @@ void CreateDevice()
 
    Assert(Vulkan.physicalDeviceReady, "Select a physical device before creating the logical device");
 
-   GetPhysicalDeviceFeatures2(Vulkan.physicalDevice);
-   const auto &supportedFeatures13 = GetPhysicalDeviceVulkan13Features(Vulkan.physicalDevice);
+   const auto &supportedFeatures = GetPhysicalDeviceFeatures(Vulkan.physicalDevice);
+   const auto &supportedFeatures13 = supportedFeatures.v13;
 
    Assert(supportedFeatures13.dynamicRendering == VK_TRUE, "Physical device does not support dynamic rendering");
    Assert(supportedFeatures13.synchronization2 == VK_TRUE, "Physical device does not support synchronization2");

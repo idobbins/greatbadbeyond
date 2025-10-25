@@ -57,6 +57,12 @@ struct Size
     int height;
 };
 
+struct PhysicalDeviceFeatures
+{
+    VkPhysicalDeviceFeatures2 core;
+    VkPhysicalDeviceVulkan13Features v13;
+};
+
 //------------------------------------------------------------------------------------
 // Window and Platform Functions (Module: platform)
 //------------------------------------------------------------------------------------
@@ -116,8 +122,7 @@ void DestroySurface();
 // Physical device-related functions
 auto EnsurePhysicalDeviceSufficient()                           -> bool;
 auto GetPhysicalDevices()                                       -> std::span<const VkPhysicalDevice>;
-auto GetPhysicalDeviceFeatures2(const VkPhysicalDevice&)        -> const VkPhysicalDeviceFeatures2&;
-auto GetPhysicalDeviceVulkan13Features(const VkPhysicalDevice&) -> const VkPhysicalDeviceVulkan13Features&;
+auto GetPhysicalDeviceFeatures(const VkPhysicalDevice&)         -> const PhysicalDeviceFeatures&;
 void SetPhysicalDevice();
 
 // Surface AND Physical device-realted functions
