@@ -22,10 +22,10 @@ Linear sequence of work items that graduates the app from the current code (GLFW
    - Fragment shader consumes those UVs, normalizes them against the current resolution, and outputs `vec4(uv, wave, 1.0)` where `wave` is derived from the push-constant time parameter, giving a clear animated gradient.
    - The Vulkan backend defines/pushes `GradientParams` every frame: `MainLoop()` fills resolution+time from `GetFramebufferSize()`/`glfwGetTime()`, `RecordCommandBuffer()` forwards them via `vkCmdPushConstants`, and the fullscreen pipeline layout now exposes the range to both shader stages.
 
-4. **Compute Storage Image Plumbing**
-   - Allocate a storage image matching the swapchain extent plus the associated image view and memory.
-   - Define descriptor set layouts/pools binding the storage image so a compute pass can write into it.
-   - Update the fullscreen pipeline to sample from this image instead of generating colors procedurally, setting the stage for the compute output blit.
+4. **Compute Storage Image Plumbing (Done)**
+   - Path tracer storage image (R16G16B16A16) is allocated alongside the swapchain, complete with device-local memory and a view that recreates on resize.
+   - Descriptor set layout/pool bind the storage image twice (storage + sampled with a shared sampler) so compute can write to it later while the fullscreen pass reads from the same descriptor.
+   - `RecordCommandBuffer()` now clears the storage image, inserts the proper barrier, binds the descriptor set, and the fullscreen shaders sample the texture instead of procedurally emitting colors—establishing the presentation blit path for the upcoming compute dispatch.
 
 5. **Minimal Compute Path Tracer**
    - Implement a basic compute shader that writes a flat color or gradient into the storage image via descriptors.

@@ -16,6 +16,12 @@ Real-time ray tracing on modern consumer GPUs (NVIDIA RTX and AMD RDNA) demands 
 - `CreateFullscreenPipeline()` consumes those binaries to build shader modules, a push-constant-only pipeline layout, and a dynamic-rendering pipeline that tracks the swapchain format; `RecreateSwapchain()` tears it down and rebuilds it alongside the new image views.
 - `RecordCommandBuffer()` binds the pipeline, sets viewport/scissor dynamically, and now pushes a `GradientParams` block (framebuffer resolution + time) so the fullscreen triangle draws a UV-based gradient that stays aligned through resizes while the third channel animates over time.
 
+## Compute Storage Image Plumbing
+
+- A dedicated `VK_FORMAT_R16G16B16A16_SFLOAT` storage image now mirrors the swapchain extent, sits in device-local memory, and recreates whenever the swapchain does so compute shaders always have a write target distinct from the presentable surface.
+- Descriptor set layout/pool creation binds that image twice: once as a storage image for the upcoming compute dispatch and once as a combined-image sampler with a shared sampler, enabling both producer (compute) and consumer (fullscreen blit) stages to agree on bindings.
+- The fullscreen shaders were updated so the fragment stage samples from the descriptor, and `RecordCommandBuffer()` clears/barriers the storage image each frame before binding the descriptor set and drawing, meaning the presentation path is now decoupled from how pixels are generated.
+
 Struct-of-Arrays vs Array-of-Structs (SoA vs AoS) memory layouts
 
 GPU-friendly BVH/TLAS acceleration structures (for efficient ray intersections)

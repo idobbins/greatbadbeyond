@@ -6,6 +6,7 @@
 #include <GLFW/glfw3.h>
 
 #include <array>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <iostream>
@@ -23,6 +24,7 @@ using namespace std;
 static constexpr const char *ShaderCacheDirectory = SHADER_CACHE_DIRECTORY;
 static constexpr const char *FullscreenVertexShaderName = "fullscreen_triangle.vert.spv";
 static constexpr const char *FullscreenFragmentShaderName = "fullscreen_triangle.frag.spv";
+static constexpr VkFormat PathTracerImageFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
 
 #ifndef VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME
 #define VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME "VK_KHR_portability_subset"
@@ -62,6 +64,14 @@ static struct VulkanData
    VkShaderModule fullscreenFragmentShader;
    VkPipelineLayout fullscreenPipelineLayout;
    VkPipeline fullscreenPipeline;
+   VkImage pathTracerImage;
+   VkDeviceMemory pathTracerImageMemory;
+   VkImageView pathTracerImageView;
+   VkSampler pathTracerSampler;
+   VkDescriptorSetLayout pathTracerDescriptorSetLayout;
+   VkDescriptorPool pathTracerDescriptorPool;
+   VkDescriptorSet pathTracerDescriptorSet;
+   VkImageLayout pathTracerImageLayout;
 
    bool instanceReady;
    bool validationLayersEnabled;
@@ -71,9 +81,33 @@ static struct VulkanData
    bool swapchainReady;
    bool swapchainImageViewsReady;
    bool frameResourcesReady;
+   bool pathTracerImageReady;
+   bool pathTracerDescriptorsReady;
    bool fullscreenPipelineReady;
 
 } Vulkan;
+
+static auto FindMemoryType(u32 typeBits, VkMemoryPropertyFlags properties) -> u32
+{
+   Assert(Vulkan.physicalDevice != VK_NULL_HANDLE, "Physical device must be selected before querying memory types");
+
+   VkPhysicalDeviceMemoryProperties memoryProperties = {};
+   vkGetPhysicalDeviceMemoryProperties(Vulkan.physicalDevice, &memoryProperties);
+
+   for (u32 index = 0; index < memoryProperties.memoryTypeCount; ++index)
+   {
+      bool typeSupported = (typeBits & (1u << index)) != 0;
+      bool flagsMatch = (memoryProperties.memoryTypes[index].propertyFlags & properties) == properties;
+
+      if (typeSupported && flagsMatch)
+      {
+         return index;
+      }
+   }
+
+   Assert(false, "Failed to find compatible Vulkan memory type");
+   return 0;
+}
 
 VKAPI_ATTR VkBool32 VKAPI_CALL VulkanDebugCallback(
     VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
@@ -162,6 +196,8 @@ void CreateVulkan()
    CreateDevice();
    CreateSwapchain();
    CreateSwapchainImageViews();
+   CreatePathTracerImage();
+   CreatePathTracerDescriptors();
    CreateFullscreenPipeline();
    CreateFrameResources();
 }
@@ -175,6 +211,8 @@ void DestroyVulkan()
 
    DestroyFrameResources();
    DestroyFullscreenPipeline();
+   DestroyPathTracerDescriptors();
+   DestroyPathTracerImage();
    DestroySwapchain();
    DestroyDevice();
    DestroySurface();
@@ -1139,6 +1177,296 @@ void DestroySwapchain()
    }
 }
 
+void CreatePathTracerImage()
+{
+   if (Vulkan.pathTracerImageReady)
+   {
+      return;
+   }
+
+   Assert(Vulkan.deviceReady, "Create the Vulkan device before the path tracer image");
+   Assert(Vulkan.swapchainReady, "Create the swapchain before the path tracer image");
+   Assert(Vulkan.physicalDeviceReady, "Select a physical device before creating the path tracer image");
+
+   VkExtent2D extent = Vulkan.swapchainExtent;
+   Assert((extent.width > 0) && (extent.height > 0), "Swapchain extent is invalid for the path tracer image");
+
+   VkFormatProperties formatProperties = {};
+   vkGetPhysicalDeviceFormatProperties(Vulkan.physicalDevice, PathTracerImageFormat, &formatProperties);
+   VkFormatFeatureFlags requiredFeatures = VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+   Assert((formatProperties.optimalTilingFeatures & requiredFeatures) == requiredFeatures,
+          "Path tracer image format does not support required sampled/storage usage");
+
+   VkImageCreateInfo imageInfo = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+      .imageType = VK_IMAGE_TYPE_2D,
+      .format = PathTracerImageFormat,
+      .extent = {extent.width, extent.height, 1},
+      .mipLevels = 1,
+      .arrayLayers = 1,
+      .samples = VK_SAMPLE_COUNT_1_BIT,
+      .tiling = VK_IMAGE_TILING_OPTIMAL,
+      .usage = VK_IMAGE_USAGE_STORAGE_BIT |
+               VK_IMAGE_USAGE_SAMPLED_BIT |
+               VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+               VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+      .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+      .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+   };
+
+   VkResult imageResult = vkCreateImage(Vulkan.device, &imageInfo, nullptr, &Vulkan.pathTracerImage);
+   Assert(imageResult == VK_SUCCESS, "Failed to create path tracer image");
+
+   VkMemoryRequirements requirements = {};
+   vkGetImageMemoryRequirements(Vulkan.device, Vulkan.pathTracerImage, &requirements);
+
+   VkMemoryAllocateInfo allocInfo = {
+      .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+      .allocationSize = requirements.size,
+      .memoryTypeIndex = FindMemoryType(requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT),
+   };
+
+   VkResult allocResult = vkAllocateMemory(Vulkan.device, &allocInfo, nullptr, &Vulkan.pathTracerImageMemory);
+   Assert(allocResult == VK_SUCCESS, "Failed to allocate memory for the path tracer image");
+
+   VkResult bindResult = vkBindImageMemory(Vulkan.device, Vulkan.pathTracerImage, Vulkan.pathTracerImageMemory, 0);
+   Assert(bindResult == VK_SUCCESS, "Failed to bind memory to the path tracer image");
+
+   VkImageViewCreateInfo viewInfo = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+      .image = Vulkan.pathTracerImage,
+      .viewType = VK_IMAGE_VIEW_TYPE_2D,
+      .format = PathTracerImageFormat,
+      .components = {
+         VK_COMPONENT_SWIZZLE_IDENTITY,
+         VK_COMPONENT_SWIZZLE_IDENTITY,
+         VK_COMPONENT_SWIZZLE_IDENTITY,
+         VK_COMPONENT_SWIZZLE_IDENTITY,
+      },
+      .subresourceRange = {
+         .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+         .baseMipLevel = 0,
+         .levelCount = 1,
+         .baseArrayLayer = 0,
+         .layerCount = 1,
+      },
+   };
+
+   VkResult viewResult = vkCreateImageView(Vulkan.device, &viewInfo, nullptr, &Vulkan.pathTracerImageView);
+   Assert(viewResult == VK_SUCCESS, "Failed to create path tracer image view");
+
+   Vulkan.pathTracerImageReady = true;
+   Vulkan.pathTracerImageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+}
+
+void DestroyPathTracerImage()
+{
+   if (Vulkan.device == VK_NULL_HANDLE)
+   {
+      Vulkan.pathTracerImageReady = false;
+      Vulkan.pathTracerImageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+      Vulkan.pathTracerImage = VK_NULL_HANDLE;
+      Vulkan.pathTracerImageMemory = VK_NULL_HANDLE;
+      Vulkan.pathTracerImageView = VK_NULL_HANDLE;
+      return;
+   }
+
+   if (Vulkan.pathTracerImageView != VK_NULL_HANDLE)
+   {
+      vkDestroyImageView(Vulkan.device, Vulkan.pathTracerImageView, nullptr);
+      Vulkan.pathTracerImageView = VK_NULL_HANDLE;
+   }
+
+   if (Vulkan.pathTracerImage != VK_NULL_HANDLE)
+   {
+      vkDestroyImage(Vulkan.device, Vulkan.pathTracerImage, nullptr);
+      Vulkan.pathTracerImage = VK_NULL_HANDLE;
+   }
+
+   if (Vulkan.pathTracerImageMemory != VK_NULL_HANDLE)
+   {
+      vkFreeMemory(Vulkan.device, Vulkan.pathTracerImageMemory, nullptr);
+      Vulkan.pathTracerImageMemory = VK_NULL_HANDLE;
+   }
+
+   Vulkan.pathTracerImageReady = false;
+   Vulkan.pathTracerImageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+}
+
+void CreatePathTracerDescriptors()
+{
+   if (Vulkan.pathTracerDescriptorsReady)
+   {
+      return;
+   }
+
+   Assert(Vulkan.deviceReady, "Create the Vulkan device before descriptor sets");
+   Assert(Vulkan.pathTracerImageReady, "Create the path tracer image before descriptors");
+
+   if (Vulkan.pathTracerDescriptorSetLayout == VK_NULL_HANDLE)
+   {
+      VkDescriptorSetLayoutBinding storageBinding = {
+         .binding = 0,
+         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+         .descriptorCount = 1,
+         .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+      };
+
+      VkDescriptorSetLayoutBinding samplerBinding = {
+         .binding = 1,
+         .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+         .descriptorCount = 1,
+         .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+      };
+
+      array<VkDescriptorSetLayoutBinding, 2> bindings = {storageBinding, samplerBinding};
+
+      VkDescriptorSetLayoutCreateInfo layoutInfo = {
+         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+         .bindingCount = static_cast<uint32_t>(bindings.size()),
+         .pBindings = bindings.data(),
+      };
+
+      VkResult layoutResult = vkCreateDescriptorSetLayout(
+         Vulkan.device,
+         &layoutInfo,
+         nullptr,
+         &Vulkan.pathTracerDescriptorSetLayout);
+      Assert(layoutResult == VK_SUCCESS, "Failed to create path tracer descriptor set layout");
+   }
+
+   VkDescriptorPoolSize poolSizes[] = {
+      {
+         .type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+         .descriptorCount = 1,
+      },
+      {
+         .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+         .descriptorCount = 1,
+      },
+   };
+
+   VkDescriptorPoolCreateInfo poolInfo = {
+      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+      .maxSets = 1,
+      .poolSizeCount = static_cast<uint32_t>(sizeof(poolSizes) / sizeof(poolSizes[0])),
+      .pPoolSizes = poolSizes,
+   };
+
+   VkResult poolResult = vkCreateDescriptorPool(Vulkan.device, &poolInfo, nullptr, &Vulkan.pathTracerDescriptorPool);
+   Assert(poolResult == VK_SUCCESS, "Failed to create path tracer descriptor pool");
+
+   VkSamplerCreateInfo samplerInfo = {
+      .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+      .magFilter = VK_FILTER_LINEAR,
+      .minFilter = VK_FILTER_LINEAR,
+      .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+      .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+      .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+      .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+      .mipLodBias = 0.0f,
+      .anisotropyEnable = VK_FALSE,
+      .maxAnisotropy = 1.0f,
+      .compareEnable = VK_FALSE,
+      .minLod = 0.0f,
+      .maxLod = 0.0f,
+      .borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK,
+      .unnormalizedCoordinates = VK_FALSE,
+   };
+
+   VkResult samplerResult = vkCreateSampler(Vulkan.device, &samplerInfo, nullptr, &Vulkan.pathTracerSampler);
+   Assert(samplerResult == VK_SUCCESS, "Failed to create path tracer sampler");
+
+   VkDescriptorSetAllocateInfo allocInfo = {
+      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+      .descriptorPool = Vulkan.pathTracerDescriptorPool,
+      .descriptorSetCount = 1,
+      .pSetLayouts = &Vulkan.pathTracerDescriptorSetLayout,
+   };
+
+   VkResult allocResult = vkAllocateDescriptorSets(
+      Vulkan.device,
+      &allocInfo,
+      &Vulkan.pathTracerDescriptorSet);
+   Assert(allocResult == VK_SUCCESS, "Failed to allocate path tracer descriptor set");
+
+   VkDescriptorImageInfo storageInfo = {
+      .sampler = VK_NULL_HANDLE,
+      .imageView = Vulkan.pathTracerImageView,
+      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+   };
+
+   VkDescriptorImageInfo sampledInfo = {
+      .sampler = Vulkan.pathTracerSampler,
+      .imageView = Vulkan.pathTracerImageView,
+      .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+   };
+
+   VkWriteDescriptorSet writes[] = {
+      {
+         .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+         .dstSet = Vulkan.pathTracerDescriptorSet,
+         .dstBinding = 0,
+         .dstArrayElement = 0,
+         .descriptorCount = 1,
+         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+         .pImageInfo = &storageInfo,
+      },
+      {
+         .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+         .dstSet = Vulkan.pathTracerDescriptorSet,
+         .dstBinding = 1,
+         .dstArrayElement = 0,
+         .descriptorCount = 1,
+         .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+         .pImageInfo = &sampledInfo,
+      },
+   };
+
+   vkUpdateDescriptorSets(
+      Vulkan.device,
+      static_cast<uint32_t>(sizeof(writes) / sizeof(writes[0])),
+      writes,
+      0,
+      nullptr);
+
+   Vulkan.pathTracerDescriptorsReady = true;
+}
+
+void DestroyPathTracerDescriptors()
+{
+   if (Vulkan.device == VK_NULL_HANDLE)
+   {
+      Vulkan.pathTracerDescriptorSet = VK_NULL_HANDLE;
+      Vulkan.pathTracerDescriptorSetLayout = VK_NULL_HANDLE;
+      Vulkan.pathTracerDescriptorPool = VK_NULL_HANDLE;
+      Vulkan.pathTracerSampler = VK_NULL_HANDLE;
+      Vulkan.pathTracerDescriptorsReady = false;
+      return;
+   }
+
+   if (Vulkan.pathTracerDescriptorPool != VK_NULL_HANDLE)
+   {
+      vkDestroyDescriptorPool(Vulkan.device, Vulkan.pathTracerDescriptorPool, nullptr);
+      Vulkan.pathTracerDescriptorPool = VK_NULL_HANDLE;
+   }
+
+   if (Vulkan.pathTracerSampler != VK_NULL_HANDLE)
+   {
+      vkDestroySampler(Vulkan.device, Vulkan.pathTracerSampler, nullptr);
+      Vulkan.pathTracerSampler = VK_NULL_HANDLE;
+   }
+
+   if (Vulkan.pathTracerDescriptorSetLayout != VK_NULL_HANDLE)
+   {
+      vkDestroyDescriptorSetLayout(Vulkan.device, Vulkan.pathTracerDescriptorSetLayout, nullptr);
+      Vulkan.pathTracerDescriptorSetLayout = VK_NULL_HANDLE;
+   }
+
+   Vulkan.pathTracerDescriptorSet = VK_NULL_HANDLE;
+   Vulkan.pathTracerDescriptorsReady = false;
+}
+
 void CreateFullscreenPipeline()
 {
    if (Vulkan.fullscreenPipelineReady)
@@ -1148,6 +1476,7 @@ void CreateFullscreenPipeline()
 
    Assert(Vulkan.deviceReady, "Create the Vulkan device before pipelines");
    Assert(Vulkan.swapchainReady, "Create the Vulkan swapchain before pipelines");
+   Assert(Vulkan.pathTracerDescriptorSetLayout != VK_NULL_HANDLE, "Create path tracer descriptors before pipelines");
    Assert(ShaderCacheDirectory[0] != '\0', "Shader cache directory is not defined");
 
    array<char, 512> vertexPath {};
@@ -1171,10 +1500,12 @@ void CreateFullscreenPipeline()
       .size = sizeof(GradientParams),
    };
 
+   VkDescriptorSetLayout descriptorLayouts[] = {Vulkan.pathTracerDescriptorSetLayout};
+
    VkPipelineLayoutCreateInfo layoutInfo = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-      .setLayoutCount = 0,
-      .pSetLayouts = nullptr,
+      .setLayoutCount = static_cast<uint32_t>(sizeof(descriptorLayouts) / sizeof(descriptorLayouts[0])),
+      .pSetLayouts = descriptorLayouts,
       .pushConstantRangeCount = 1,
       .pPushConstantRanges = &pushConstant,
    };
@@ -1350,12 +1681,16 @@ void RecreateSwapchain()
 
    DestroyFrameResources();
    DestroyFullscreenPipeline();
+   DestroyPathTracerDescriptors();
+   DestroyPathTracerImage();
    DestroySwapchainImageViews();
    Vulkan.swapchainReady = false;
    Vulkan.swapchainImageViewsReady = false;
 
    CreateSwapchain();
    CreateSwapchainImageViews();
+   CreatePathTracerImage();
+   CreatePathTracerDescriptors();
    CreateFullscreenPipeline();
    CreateFrameResources();
 }
@@ -1551,6 +1886,8 @@ auto RecordCommandBuffer(u32 frameIndex, u32 imageIndex, const GradientParams &g
    Assert(Vulkan.swapchainImageViewsReady, "Create swapchain image views before recording commands");
    Assert(Vulkan.frameResourcesReady, "Frame resources must exist before recording commands");
    Assert(Vulkan.fullscreenPipelineReady, "Fullscreen pipeline must be ready before recording commands");
+   Assert(Vulkan.pathTracerImageReady, "Path tracer image must exist before recording commands");
+   Assert(Vulkan.pathTracerDescriptorsReady, "Path tracer descriptors must exist before recording commands");
    Assert(frameIndex < FrameOverlap, "Frame index out of range");
    Assert(imageIndex < Vulkan.swapchainImageCount, "Swapchain image index out of range");
 
@@ -1571,6 +1908,81 @@ auto RecordCommandBuffer(u32 frameIndex, u32 imageIndex, const GradientParams &g
    {
       return beginResult;
    }
+
+   VkImageSubresourceRange pathTracerSubresource = {
+      .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+      .baseMipLevel = 0,
+      .levelCount = 1,
+      .baseArrayLayer = 0,
+      .layerCount = 1,
+   };
+
+   VkImageLayout desiredPathTracerLayout = VK_IMAGE_LAYOUT_GENERAL;
+   if (Vulkan.pathTracerImageLayout != desiredPathTracerLayout)
+   {
+      VkImageMemoryBarrier initializePathTracer = {
+         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+         .srcAccessMask = 0,
+         .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+         .oldLayout = Vulkan.pathTracerImageLayout,
+         .newLayout = desiredPathTracerLayout,
+         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+         .image = Vulkan.pathTracerImage,
+         .subresourceRange = pathTracerSubresource,
+      };
+
+      vkCmdPipelineBarrier(
+         frame.commandBuffer,
+         VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+         VK_PIPELINE_STAGE_TRANSFER_BIT,
+         0,
+         0,
+         nullptr,
+         0,
+         nullptr,
+         1,
+         &initializePathTracer);
+   }
+
+   VkClearColorValue storageClear = {};
+   float wave = 0.5f + 0.5f*std::sin(gradient.time*0.5f);
+   storageClear.float32[0] = wave;
+   storageClear.float32[1] = 1.0f - wave;
+   storageClear.float32[2] = 0.25f + (0.75f*wave);
+   storageClear.float32[3] = 1.0f;
+
+   vkCmdClearColorImage(
+      frame.commandBuffer,
+      Vulkan.pathTracerImage,
+      desiredPathTracerLayout,
+      &storageClear,
+      1,
+      &pathTracerSubresource);
+
+   VkImageMemoryBarrier storageToSample = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+      .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+      .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+      .oldLayout = desiredPathTracerLayout,
+      .newLayout = desiredPathTracerLayout,
+      .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+      .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+      .image = Vulkan.pathTracerImage,
+      .subresourceRange = pathTracerSubresource,
+   };
+
+   vkCmdPipelineBarrier(
+      frame.commandBuffer,
+      VK_PIPELINE_STAGE_TRANSFER_BIT,
+      VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+      0,
+      0,
+      nullptr,
+      0,
+      nullptr,
+      1,
+      &storageToSample);
 
    VkImage image = Vulkan.swapchainImages[imageIndex];
    VkImageView imageView = Vulkan.swapchainImageViews[imageIndex];
@@ -1654,6 +2066,15 @@ auto RecordCommandBuffer(u32 frameIndex, u32 imageIndex, const GradientParams &g
    vkCmdSetScissor(frame.commandBuffer, 0, 1, &scissor);
 
    vkCmdBindPipeline(frame.commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, Vulkan.fullscreenPipeline);
+   vkCmdBindDescriptorSets(
+      frame.commandBuffer,
+      VK_PIPELINE_BIND_POINT_GRAPHICS,
+      Vulkan.fullscreenPipelineLayout,
+      0,
+      1,
+      &Vulkan.pathTracerDescriptorSet,
+      0,
+      nullptr);
 
    vkCmdPushConstants(
       frame.commandBuffer,
@@ -1695,6 +2116,7 @@ auto RecordCommandBuffer(u32 frameIndex, u32 imageIndex, const GradientParams &g
    if (endResult == VK_SUCCESS)
    {
       Vulkan.swapchainImageLayouts[imageIndex] = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+      Vulkan.pathTracerImageLayout = desiredPathTracerLayout;
    }
 
    return endResult;
