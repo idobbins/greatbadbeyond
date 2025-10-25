@@ -157,12 +157,19 @@ auto GetSwapchainImageViews() -> std::span<const VkImageView>;
 auto GetSwapchainExtent() -> VkExtent2D;
 auto GetSwapchainFormat() -> VkFormat;
 
-void GetSwapchainImageView();
-void GetSwapchainImageViewCount();
-
 void CreateSwapchain();
+void CreateSwapchainImageViews();
+void DestroySwapchainImageViews();
 void DestroySwapchain();
 void RecreateSwapchain();
+
+// Frame lifecycle functions
+void CreateFrameResources();
+void DestroyFrameResources();
+
+// Presentation-related functions
+auto AcquireNextSwapchainImage(VkSemaphore imageAvailableSemaphore, VkFence inFlightFence) -> u32;
+void PresentSwapchainImage(u32 imageIndex, VkSemaphore renderFinishedSemaphore);
 
 // VMA-related functions
 void CreateVMAAllocator();
@@ -188,6 +195,8 @@ void CreateSemaphore();
 void DestroySemaphore();
 void CreateFence();
 void DestroyFence();
+void CreateRenderSyncObjects();
+void DestroyRenderSyncObjects();
 
 // Descriptor-related functions
 void CreateDescriptorSet();
@@ -198,8 +207,17 @@ auto CreateShader() -> VkShaderModule;
 void DestroyShader();
 
 // Pipeline-related functions
-void CreatePipeline();
-void DestroyPipeline();
+void CreateFullscreenPipeline();
+void DestroyFullscreenPipeline();
+void CreatePathTracerPipeline();
+void DestroyPathTracerPipeline();
+
+// Path tracer-related functions
+void CreatePathTracerImage();
+void DestroyPathTracerImage();
+void CreatePathTracerDescriptors();
+void DestroyPathTracerDescriptors();
+void DispatchPathTracer();
 
 // Drawing-related functions
 void DrawFrame();
