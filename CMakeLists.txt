@@ -45,6 +45,7 @@ set(SHADER_OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/shaders)
 set(SHADER_SOURCES
     ${SHADER_SOURCE_DIR}/fullscreen_triangle.vert
     ${SHADER_SOURCE_DIR}/fullscreen_triangle.frag
+    ${SHADER_SOURCE_DIR}/pathtracer.comp
 )
 
 set(SHADER_OUTPUTS "")
@@ -66,6 +67,7 @@ add_custom_target(shaders ALL DEPENDS ${SHADER_OUTPUTS})
 
 add_executable(${PROJECT_NAME}
   src/main.cpp
+  src/camera.cpp
   src/platform.cpp
   src/vulkan.cpp
 )

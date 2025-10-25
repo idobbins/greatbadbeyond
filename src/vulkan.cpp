@@ -6,6 +6,7 @@
 #include <GLFW/glfw3.h>
 
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -24,7 +25,9 @@ using namespace std;
 static constexpr const char *ShaderCacheDirectory = SHADER_CACHE_DIRECTORY;
 static constexpr const char *FullscreenVertexShaderName = "fullscreen_triangle.vert.spv";
 static constexpr const char *FullscreenFragmentShaderName = "fullscreen_triangle.frag.spv";
+static constexpr const char *PathTracerComputeShaderName = "pathtracer.comp.spv";
 static constexpr VkFormat PathTracerImageFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
+static constexpr u32 DefaultSphereCount = 256;
 
 #ifndef VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME
 #define VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME "VK_KHR_portability_subset"
@@ -64,6 +67,9 @@ static struct VulkanData
    VkShaderModule fullscreenFragmentShader;
    VkPipelineLayout fullscreenPipelineLayout;
    VkPipeline fullscreenPipeline;
+   VkShaderModule pathTracerComputeShader;
+   VkPipelineLayout pathTracerPipelineLayout;
+   VkPipeline pathTracerPipeline;
    VkImage pathTracerImage;
    VkDeviceMemory pathTracerImageMemory;
    VkImageView pathTracerImageView;
@@ -72,6 +78,17 @@ static struct VulkanData
    VkDescriptorPool pathTracerDescriptorPool;
    VkDescriptorSet pathTracerDescriptorSet;
    VkImageLayout pathTracerImageLayout;
+   VkBuffer spheresHotBuffer;
+   VkDeviceMemory spheresHotMemory;
+   VkBuffer sphereMaterialIdsBuffer;
+   VkDeviceMemory sphereMaterialIdsMemory;
+   VkBuffer materialAlbedoRoughnessBuffer;
+   VkDeviceMemory materialAlbedoRoughnessMemory;
+   VkBuffer materialEmissiveBuffer;
+   VkDeviceMemory materialEmissiveMemory;
+   u32 sphereCount;
+   u32 materialCount;
+   u32 accumFrame;
 
    bool instanceReady;
    bool validationLayersEnabled;
@@ -84,8 +101,12 @@ static struct VulkanData
    bool pathTracerImageReady;
    bool pathTracerDescriptorsReady;
    bool fullscreenPipelineReady;
+   bool pathTracerPipelineReady;
+   bool pathTracerSceneReady;
 
 } Vulkan;
+
+static SphereQuantConfig SceneQuantization = {};
 
 static auto FindMemoryType(u32 typeBits, VkMemoryPropertyFlags properties) -> u32
 {
@@ -108,6 +129,102 @@ static auto FindMemoryType(u32 typeBits, VkMemoryPropertyFlags properties) -> u3
    Assert(false, "Failed to find compatible Vulkan memory type");
    return 0;
 }
+
+static void DestroyBuffer(VkBuffer &buffer, VkDeviceMemory &memory)
+{
+   if (Vulkan.device == VK_NULL_HANDLE)
+   {
+      buffer = VK_NULL_HANDLE;
+      memory = VK_NULL_HANDLE;
+      return;
+   }
+
+   if (buffer != VK_NULL_HANDLE)
+   {
+      vkDestroyBuffer(Vulkan.device, buffer, nullptr);
+      buffer = VK_NULL_HANDLE;
+   }
+
+   if (memory != VK_NULL_HANDLE)
+   {
+      vkFreeMemory(Vulkan.device, memory, nullptr);
+      memory = VK_NULL_HANDLE;
+   }
+}
+
+static void CreateStorageBuffer(const void *data, VkDeviceSize size, VkBuffer &buffer, VkDeviceMemory &memory)
+{
+   Assert(size > 0, "Storage buffer size must be greater than zero");
+   Assert(Vulkan.device != VK_NULL_HANDLE, "Vulkan device must exist before allocating buffers");
+
+   VkBufferCreateInfo bufferInfo = {
+      .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+      .size = size,
+      .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+      .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+   };
+
+   VkResult createResult = vkCreateBuffer(Vulkan.device, &bufferInfo, nullptr, &buffer);
+   Assert(createResult == VK_SUCCESS, "Failed to create storage buffer");
+
+   VkMemoryRequirements requirements = {};
+   vkGetBufferMemoryRequirements(Vulkan.device, buffer, &requirements);
+
+   VkMemoryAllocateInfo allocInfo = {
+      .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+      .allocationSize = requirements.size,
+      .memoryTypeIndex = FindMemoryType(
+         requirements.memoryTypeBits,
+         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT),
+   };
+
+   VkResult allocResult = vkAllocateMemory(Vulkan.device, &allocInfo, nullptr, &memory);
+   Assert(allocResult == VK_SUCCESS, "Failed to allocate storage buffer memory");
+
+   VkResult bindResult = vkBindBufferMemory(Vulkan.device, buffer, memory, 0);
+   Assert(bindResult == VK_SUCCESS, "Failed to bind storage buffer memory");
+
+   void *mapped = nullptr;
+   VkResult mapResult = vkMapMemory(Vulkan.device, memory, 0, size, 0, &mapped);
+   Assert(mapResult == VK_SUCCESS, "Failed to map storage buffer memory");
+
+   std::memcpy(mapped, data, static_cast<size_t>(size));
+   vkUnmapMemory(Vulkan.device, memory);
+}
+
+static auto Clamp01(float value) -> float
+{
+   if (value < 0.0f)
+   {
+      return 0.0f;
+   }
+   if (value > 1.0f)
+   {
+      return 1.0f;
+   }
+   return value;
+}
+
+static auto PackUnorm2x16(float a, float b) -> u32
+{
+   float clampedA = Clamp01(a);
+   float clampedB = Clamp01(b);
+   u32 A = static_cast<u32>(std::round(clampedA * 65535.0f));
+   u32 B = static_cast<u32>(std::round(clampedB * 65535.0f));
+   return (B << 16) | A;
+}
+
+static auto RandomUnorm(u32 &state) -> float
+{
+   state = state * 1664525u + 1013904223u;
+   u32 mantissa = (state >> 9u) | 0x3f800000u;
+   float result = std::bit_cast<float>(mantissa) - 1.0f;
+   return Clamp01(result);
+}
+
+static void UpdateSceneDescriptorBindings();
+static void DestroyPathTracerSceneBuffers();
+static void DestroyPathTracerDescriptorLayout();
 
 VKAPI_ATTR VkBool32 VKAPI_CALL VulkanDebugCallback(
     VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
@@ -186,8 +303,14 @@ void DestroyDebugMessenger()
    Vulkan.debugMessengerReady = false;
 }
 
+void ResetCameraAccum()
+{
+   Vulkan.accumFrame = 0;
+}
+
 void CreateVulkan()
 {
+   ResetCameraAccum();
    CreateInstance();
    CreateDebugMessenger();
    CreateSurface();
@@ -198,6 +321,8 @@ void CreateVulkan()
    CreateSwapchainImageViews();
    CreatePathTracerImage();
    CreatePathTracerDescriptors();
+   CreatePathTracerPipeline();
+   BuildSpheres();
    CreateFullscreenPipeline();
    CreateFrameResources();
 }
@@ -211,7 +336,10 @@ void DestroyVulkan()
 
    DestroyFrameResources();
    DestroyFullscreenPipeline();
+   DestroyPathTracerPipeline();
+   DestroyPathTracerSceneBuffers();
    DestroyPathTracerDescriptors();
+   DestroyPathTracerDescriptorLayout();
    DestroyPathTracerImage();
    DestroySwapchain();
    DestroyDevice();
@@ -1319,7 +1447,42 @@ void CreatePathTracerDescriptors()
          .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
       };
 
-      array<VkDescriptorSetLayoutBinding, 2> bindings = {storageBinding, samplerBinding};
+      VkDescriptorSetLayoutBinding sphereBinding = {
+         .binding = 2,
+         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+         .descriptorCount = 1,
+         .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+      };
+
+      VkDescriptorSetLayoutBinding matIdBinding = {
+         .binding = 3,
+         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+         .descriptorCount = 1,
+         .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+      };
+
+      VkDescriptorSetLayoutBinding albedoBinding = {
+         .binding = 4,
+         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+         .descriptorCount = 1,
+         .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+      };
+
+      VkDescriptorSetLayoutBinding emissiveBinding = {
+         .binding = 5,
+         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+         .descriptorCount = 1,
+         .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+      };
+
+      array<VkDescriptorSetLayoutBinding, 6> bindings = {
+         storageBinding,
+         samplerBinding,
+         sphereBinding,
+         matIdBinding,
+         albedoBinding,
+         emissiveBinding,
+      };
 
       VkDescriptorSetLayoutCreateInfo layoutInfo = {
          .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
@@ -1343,6 +1506,10 @@ void CreatePathTracerDescriptors()
       {
          .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
          .descriptorCount = 1,
+      },
+      {
+         .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+         .descriptorCount = 4,
       },
    };
 
@@ -1431,6 +1598,7 @@ void CreatePathTracerDescriptors()
       nullptr);
 
    Vulkan.pathTracerDescriptorsReady = true;
+   UpdateSceneDescriptorBindings();
 }
 
 void DestroyPathTracerDescriptors()
@@ -1457,14 +1625,268 @@ void DestroyPathTracerDescriptors()
       Vulkan.pathTracerSampler = VK_NULL_HANDLE;
    }
 
-   if (Vulkan.pathTracerDescriptorSetLayout != VK_NULL_HANDLE)
-   {
-      vkDestroyDescriptorSetLayout(Vulkan.device, Vulkan.pathTracerDescriptorSetLayout, nullptr);
-      Vulkan.pathTracerDescriptorSetLayout = VK_NULL_HANDLE;
-   }
-
    Vulkan.pathTracerDescriptorSet = VK_NULL_HANDLE;
    Vulkan.pathTracerDescriptorsReady = false;
+   Vulkan.pathTracerSceneReady = false;
+}
+
+static void DestroyPathTracerDescriptorLayout()
+{
+   if ((Vulkan.device == VK_NULL_HANDLE) || (Vulkan.pathTracerDescriptorSetLayout == VK_NULL_HANDLE))
+   {
+      Vulkan.pathTracerDescriptorSetLayout = VK_NULL_HANDLE;
+      return;
+   }
+
+   vkDestroyDescriptorSetLayout(Vulkan.device, Vulkan.pathTracerDescriptorSetLayout, nullptr);
+   Vulkan.pathTracerDescriptorSetLayout = VK_NULL_HANDLE;
+}
+
+static void DestroyPathTracerSceneBuffers()
+{
+   DestroyBuffer(Vulkan.spheresHotBuffer, Vulkan.spheresHotMemory);
+   DestroyBuffer(Vulkan.sphereMaterialIdsBuffer, Vulkan.sphereMaterialIdsMemory);
+   DestroyBuffer(Vulkan.materialAlbedoRoughnessBuffer, Vulkan.materialAlbedoRoughnessMemory);
+   DestroyBuffer(Vulkan.materialEmissiveBuffer, Vulkan.materialEmissiveMemory);
+   Vulkan.sphereCount = 0;
+   Vulkan.materialCount = 0;
+   Vulkan.pathTracerSceneReady = false;
+}
+
+static void UpdateSceneDescriptorBindings()
+{
+   if (!Vulkan.pathTracerDescriptorsReady)
+   {
+      return;
+   }
+
+    if (Vulkan.pathTracerDescriptorSet == VK_NULL_HANDLE)
+    {
+       return;
+    }
+
+   if ((Vulkan.spheresHotBuffer == VK_NULL_HANDLE) ||
+       (Vulkan.sphereMaterialIdsBuffer == VK_NULL_HANDLE) ||
+       (Vulkan.materialAlbedoRoughnessBuffer == VK_NULL_HANDLE) ||
+       (Vulkan.materialEmissiveBuffer == VK_NULL_HANDLE))
+   {
+      return;
+   }
+
+   VkDeviceSize spheresSize = static_cast<VkDeviceSize>(Vulkan.sphereCount) * sizeof(u32) * 2;
+   VkDeviceSize materialIdsSize = static_cast<VkDeviceSize>(Vulkan.sphereCount) * sizeof(u32);
+   VkDeviceSize albedoSize = static_cast<VkDeviceSize>(Vulkan.materialCount) * sizeof(float) * 4;
+   VkDeviceSize emissiveSize = albedoSize;
+
+   VkDescriptorBufferInfo sphereInfo = {
+      .buffer = Vulkan.spheresHotBuffer,
+      .offset = 0,
+      .range = spheresSize,
+   };
+
+   VkDescriptorBufferInfo matIdInfo = {
+      .buffer = Vulkan.sphereMaterialIdsBuffer,
+      .offset = 0,
+      .range = materialIdsSize,
+   };
+
+   VkDescriptorBufferInfo albedoInfo = {
+      .buffer = Vulkan.materialAlbedoRoughnessBuffer,
+      .offset = 0,
+      .range = albedoSize,
+   };
+
+   VkDescriptorBufferInfo emissiveInfo = {
+      .buffer = Vulkan.materialEmissiveBuffer,
+      .offset = 0,
+      .range = emissiveSize,
+   };
+
+   VkWriteDescriptorSet writes[] = {
+      {
+         .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+         .dstSet = Vulkan.pathTracerDescriptorSet,
+         .dstBinding = 2,
+         .descriptorCount = 1,
+         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+         .pBufferInfo = &sphereInfo,
+      },
+      {
+         .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+         .dstSet = Vulkan.pathTracerDescriptorSet,
+         .dstBinding = 3,
+         .descriptorCount = 1,
+         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+         .pBufferInfo = &matIdInfo,
+      },
+      {
+         .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+         .dstSet = Vulkan.pathTracerDescriptorSet,
+         .dstBinding = 4,
+         .descriptorCount = 1,
+         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+         .pBufferInfo = &albedoInfo,
+      },
+      {
+         .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+         .dstSet = Vulkan.pathTracerDescriptorSet,
+         .dstBinding = 5,
+         .descriptorCount = 1,
+         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+         .pBufferInfo = &emissiveInfo,
+      },
+   };
+
+   vkUpdateDescriptorSets(
+      Vulkan.device,
+      static_cast<uint32_t>(sizeof(writes) / sizeof(writes[0])),
+      writes,
+      0,
+      nullptr);
+
+   Vulkan.pathTracerSceneReady = true;
+}
+
+void BuildSpheres()
+{
+   Assert(Vulkan.deviceReady, "Create the Vulkan device before building spheres");
+
+   DestroyPathTracerSceneBuffers();
+
+   constexpr u32 MaterialCount = 5;
+   constexpr float MinRadius = 0.15f;
+   constexpr float PlacementSpacing = 0.01f;
+   constexpr u32 MaxPlacementAttempts = 128;
+   static constexpr std::array<std::array<float, 4>, MaterialCount> MaterialAlbedoRoughness = {{
+      {0.8f, 0.3f, 0.3f, 1.0f},
+      {0.3f, 0.8f, 0.3f, 0.8f},
+      {0.3f, 0.3f, 0.8f, 0.4f},
+      {0.9f, 0.9f, 0.9f, 0.05f},
+      {0.9f, 0.6f, 0.2f, 0.2f},
+   }};
+
+   static constexpr std::array<std::array<float, 4>, MaterialCount> MaterialEmissive = {{
+      {0.0f, 0.0f, 0.0f, 0.0f},
+      {0.0f, 0.0f, 0.0f, 0.0f},
+      {0.0f, 0.0f, 0.0f, 0.0f},
+      {3.0f, 3.0f, 3.0f, 0.0f},
+      {8.0f, 3.0f, 0.5f, 0.0f},
+   }};
+
+   const u32 desiredSphereCount = DefaultSphereCount;
+   std::vector<u32> sphereWords;
+   sphereWords.reserve(static_cast<size_t>(desiredSphereCount) * 2);
+   std::vector<u32> materialIds;
+   materialIds.reserve(desiredSphereCount);
+   std::vector<Vec3> centers;
+   centers.reserve(desiredSphereCount);
+   std::vector<float> radii;
+   radii.reserve(desiredSphereCount);
+
+   SceneQuantization.origin = {-32.0f, 0.0f, -32.0f};
+   SceneQuantization.pad0 = 0.0f;
+   SceneQuantization.scale = {64.0f, 24.0f, 64.0f};
+   SceneQuantization.scaleMax = 2.5f;
+
+   const auto distanceSquared = [](const Vec3 &a, const Vec3 &b) -> float
+   {
+      float dx = a.x - b.x;
+      float dy = a.y - b.y;
+      float dz = a.z - b.z;
+      return dx*dx + dy*dy + dz*dz;
+   };
+
+   u32 rng = 0x9e3779b9u;
+   for (u32 index = 0; index < desiredSphereCount; ++index)
+   {
+      bool placed = false;
+      Vec3 center = {};
+      float radius = MinRadius;
+
+      for (u32 attempt = 0; attempt < MaxPlacementAttempts; ++attempt)
+      {
+         radius = MinRadius + RandomUnorm(rng) * (SceneQuantization.scaleMax - MinRadius);
+
+         float px = SceneQuantization.origin.x + RandomUnorm(rng) * SceneQuantization.scale.x;
+         float pz = SceneQuantization.origin.z + RandomUnorm(rng) * SceneQuantization.scale.z;
+         float baseY = SceneQuantization.origin.y + radius;
+         float py = baseY + RandomUnorm(rng) * (SceneQuantization.scale.y - radius);
+
+         Vec3 candidate = {px, py, pz};
+         bool overlaps = false;
+
+         for (size_t existing = 0; existing < centers.size(); ++existing)
+         {
+            float needed = radius + radii[existing] + PlacementSpacing;
+            if (distanceSquared(candidate, centers[existing]) < (needed * needed))
+            {
+               overlaps = true;
+               break;
+            }
+         }
+
+         if (!overlaps)
+         {
+            center = candidate;
+            placed = true;
+            break;
+         }
+      }
+
+      if (!placed)
+      {
+         LogWarn("[scene] Failed to place sphere %u without overlaps (skipping)", index);
+         continue;
+      }
+
+      Vec3 normalized = {
+         Clamp01((center.x - SceneQuantization.origin.x) / SceneQuantization.scale.x),
+         Clamp01((center.y - SceneQuantization.origin.y) / SceneQuantization.scale.y),
+         Clamp01((center.z - SceneQuantization.origin.z) / SceneQuantization.scale.z),
+      };
+
+      float encodedRadius = std::sqrt(Clamp01(radius / SceneQuantization.scaleMax));
+
+      sphereWords.push_back(PackUnorm2x16(normalized.x, normalized.y));
+      sphereWords.push_back(PackUnorm2x16(normalized.z, encodedRadius));
+
+      u32 materialIndex = static_cast<u32>(RandomUnorm(rng) * static_cast<float>(MaterialCount));
+      if (materialIndex >= MaterialCount)
+      {
+         materialIndex = MaterialCount - 1;
+      }
+      materialIds.push_back(materialIndex);
+      centers.push_back(center);
+      radii.push_back(radius);
+   }
+
+   if (sphereWords.empty())
+   {
+      LogError("[scene] Unable to place any non-overlapping spheres");
+      Assert(false, "Sphere placement failed");
+   }
+
+   VkDeviceSize hotSize = static_cast<VkDeviceSize>(sphereWords.size()) * sizeof(u32);
+   VkDeviceSize materialIdsSize = static_cast<VkDeviceSize>(materialIds.size()) * sizeof(u32);
+   VkDeviceSize albedoSize = static_cast<VkDeviceSize>(MaterialAlbedoRoughness.size()) * sizeof(std::array<float, 4>);
+   VkDeviceSize emissiveSize = static_cast<VkDeviceSize>(MaterialEmissive.size()) * sizeof(std::array<float, 4>);
+
+   CreateStorageBuffer(sphereWords.data(), hotSize, Vulkan.spheresHotBuffer, Vulkan.spheresHotMemory);
+   CreateStorageBuffer(materialIds.data(), materialIdsSize, Vulkan.sphereMaterialIdsBuffer, Vulkan.sphereMaterialIdsMemory);
+   CreateStorageBuffer(MaterialAlbedoRoughness.data(), albedoSize, Vulkan.materialAlbedoRoughnessBuffer, Vulkan.materialAlbedoRoughnessMemory);
+   CreateStorageBuffer(MaterialEmissive.data(), emissiveSize, Vulkan.materialEmissiveBuffer, Vulkan.materialEmissiveMemory);
+
+   Vulkan.sphereCount = static_cast<u32>(materialIds.size());
+   Vulkan.materialCount = MaterialCount;
+   Vulkan.pathTracerSceneReady = true;
+
+   UpdateSceneDescriptorBindings();
+   ResetCameraAccum();
+}
+
+auto GetSphereQuantConfig() -> SphereQuantConfig
+{
+   return SceneQuantization;
 }
 
 void CreateFullscreenPipeline()
@@ -1657,6 +2079,95 @@ void DestroyFullscreenPipeline()
    Vulkan.fullscreenPipelineReady = false;
 }
 
+void CreatePathTracerPipeline()
+{
+   if (Vulkan.pathTracerPipelineReady)
+   {
+      return;
+   }
+
+   Assert(Vulkan.deviceReady, "Create the Vulkan device before compute pipelines");
+   Assert(Vulkan.pathTracerDescriptorSetLayout != VK_NULL_HANDLE, "Descriptor set layout must exist before compute pipeline");
+   Assert(ShaderCacheDirectory[0] != '\0', "Shader cache directory is not defined");
+
+   VkPhysicalDeviceProperties properties = {};
+   vkGetPhysicalDeviceProperties(Vulkan.physicalDevice, &properties);
+   Assert(sizeof(PathParams) <= properties.limits.maxPushConstantsSize, "Path tracer push constants exceed device limit");
+
+   array<char, 512> computePath {};
+   int written = std::snprintf(computePath.data(), computePath.size(), "%s/%s", ShaderCacheDirectory, PathTracerComputeShaderName);
+   Assert((written > 0) && (static_cast<size_t>(written) < computePath.size()), "Compute shader path truncated");
+
+   Vulkan.pathTracerComputeShader = CreateShader(computePath.data());
+
+   VkPushConstantRange pushConstant = {
+      .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+      .offset = 0,
+      .size = static_cast<uint32_t>(sizeof(PathParams)),
+   };
+
+   VkPipelineLayoutCreateInfo layoutInfo = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+      .setLayoutCount = 1,
+      .pSetLayouts = &Vulkan.pathTracerDescriptorSetLayout,
+      .pushConstantRangeCount = 1,
+      .pPushConstantRanges = &pushConstant,
+   };
+
+   VkResult layoutResult = vkCreatePipelineLayout(Vulkan.device, &layoutInfo, nullptr, &Vulkan.pathTracerPipelineLayout);
+   Assert(layoutResult == VK_SUCCESS, "Failed to create path tracer pipeline layout");
+
+   VkPipelineShaderStageCreateInfo stageInfo = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+      .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+      .module = Vulkan.pathTracerComputeShader,
+      .pName = "main",
+   };
+
+   VkComputePipelineCreateInfo pipelineInfo = {
+      .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+      .stage = stageInfo,
+      .layout = Vulkan.pathTracerPipelineLayout,
+   };
+
+   VkResult pipelineResult = vkCreateComputePipelines(
+      Vulkan.device,
+      VK_NULL_HANDLE,
+      1,
+      &pipelineInfo,
+      nullptr,
+      &Vulkan.pathTracerPipeline);
+   Assert(pipelineResult == VK_SUCCESS, "Failed to create path tracer compute pipeline");
+
+   Vulkan.pathTracerPipelineReady = true;
+}
+
+void DestroyPathTracerPipeline()
+{
+   if ((Vulkan.pathTracerPipeline == VK_NULL_HANDLE) &&
+       (Vulkan.pathTracerPipelineLayout == VK_NULL_HANDLE) &&
+       (Vulkan.pathTracerComputeShader == VK_NULL_HANDLE))
+   {
+      Vulkan.pathTracerPipelineReady = false;
+      return;
+   }
+
+   if ((Vulkan.device != VK_NULL_HANDLE) && (Vulkan.pathTracerPipeline != VK_NULL_HANDLE))
+   {
+      vkDestroyPipeline(Vulkan.device, Vulkan.pathTracerPipeline, nullptr);
+      Vulkan.pathTracerPipeline = VK_NULL_HANDLE;
+   }
+
+   if ((Vulkan.device != VK_NULL_HANDLE) && (Vulkan.pathTracerPipelineLayout != VK_NULL_HANDLE))
+   {
+      vkDestroyPipelineLayout(Vulkan.device, Vulkan.pathTracerPipelineLayout, nullptr);
+      Vulkan.pathTracerPipelineLayout = VK_NULL_HANDLE;
+   }
+
+   DestroyShader(Vulkan.pathTracerComputeShader);
+   Vulkan.pathTracerPipelineReady = false;
+}
+
 void RecreateSwapchain()
 {
    if (!Vulkan.deviceReady)
@@ -1691,8 +2202,10 @@ void RecreateSwapchain()
    CreateSwapchainImageViews();
    CreatePathTracerImage();
    CreatePathTracerDescriptors();
+   UpdateSceneDescriptorBindings();
    CreateFullscreenPipeline();
    CreateFrameResources();
+   ResetCameraAccum();
 }
 
 void CreateFrameResources()
@@ -1888,6 +2401,8 @@ auto RecordCommandBuffer(u32 frameIndex, u32 imageIndex, const GradientParams &g
    Assert(Vulkan.fullscreenPipelineReady, "Fullscreen pipeline must be ready before recording commands");
    Assert(Vulkan.pathTracerImageReady, "Path tracer image must exist before recording commands");
    Assert(Vulkan.pathTracerDescriptorsReady, "Path tracer descriptors must exist before recording commands");
+   Assert(Vulkan.pathTracerPipelineReady, "Path tracer compute pipeline must exist before recording commands");
+   Assert(Vulkan.pathTracerSceneReady, "Path tracer scene buffers must exist before recording commands");
    Assert(frameIndex < FrameOverlap, "Frame index out of range");
    Assert(imageIndex < Vulkan.swapchainImageCount, "Swapchain image index out of range");
 
@@ -1945,24 +2460,49 @@ auto RecordCommandBuffer(u32 frameIndex, u32 imageIndex, const GradientParams &g
          &initializePathTracer);
    }
 
-   VkClearColorValue storageClear = {};
-   float wave = 0.5f + 0.5f*std::sin(gradient.time*0.5f);
-   storageClear.float32[0] = wave;
-   storageClear.float32[1] = 1.0f - wave;
-   storageClear.float32[2] = 0.25f + (0.75f*wave);
-   storageClear.float32[3] = 1.0f;
+   VkExtent2D extent = Vulkan.swapchainExtent;
+   float safeWidth = (extent.width > 0) ? static_cast<float>(extent.width) : 1.0f;
+   float safeHeight = (extent.height > 0) ? static_cast<float>(extent.height) : 1.0f;
 
-   vkCmdClearColorImage(
+   vkCmdBindPipeline(frame.commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, Vulkan.pathTracerPipeline);
+   vkCmdBindDescriptorSets(
       frame.commandBuffer,
-      Vulkan.pathTracerImage,
-      desiredPathTracerLayout,
-      &storageClear,
+      VK_PIPELINE_BIND_POINT_COMPUTE,
+      Vulkan.pathTracerPipelineLayout,
+      0,
       1,
-      &pathTracerSubresource);
+      &Vulkan.pathTracerDescriptorSet,
+      0,
+      nullptr);
+
+   PathParams params = {};
+   params.resolution = {safeWidth, safeHeight};
+   params.time = gradient.time;
+   params.frameIndex = Vulkan.accumFrame;
+   params.camera = GetCameraParams();
+   params.quant = GetSphereQuantConfig();
+   params.sphereCount = Vulkan.sphereCount;
+   params.padA = 0;
+   params.padB = 0;
+   params.padC = 0;
+
+   vkCmdPushConstants(
+      frame.commandBuffer,
+      Vulkan.pathTracerPipelineLayout,
+      VK_SHADER_STAGE_COMPUTE_BIT,
+      0,
+      sizeof(PathParams),
+      &params);
+
+   uint32_t groupX = (extent.width + 7u) / 8u;
+   uint32_t groupY = (extent.height + 7u) / 8u;
+   groupX = (groupX > 0) ? groupX : 1u;
+   groupY = (groupY > 0) ? groupY : 1u;
+   vkCmdDispatch(frame.commandBuffer, groupX, groupY, 1);
 
    VkImageMemoryBarrier storageToSample = {
       .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-      .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+      .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
       .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
       .oldLayout = desiredPathTracerLayout,
       .newLayout = desiredPathTracerLayout,
@@ -1974,7 +2514,7 @@ auto RecordCommandBuffer(u32 frameIndex, u32 imageIndex, const GradientParams &g
 
    vkCmdPipelineBarrier(
       frame.commandBuffer,
-      VK_PIPELINE_STAGE_TRANSFER_BIT,
+      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
       VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
       0,
       0,
@@ -2035,7 +2575,6 @@ auto RecordCommandBuffer(u32 frameIndex, u32 imageIndex, const GradientParams &g
       .clearValue = {.color = clearColor},
    };
 
-   VkExtent2D extent = Vulkan.swapchainExtent;
    VkRenderingInfo renderingInfo = {
       .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
       .renderArea = {
@@ -2174,6 +2713,11 @@ auto SubmitFrame(u32 frameIndex, u32 imageIndex) -> VkResult
    }
 
    Assert(presentResult == VK_SUCCESS, "Failed to present swapchain image");
+
+   if (Vulkan.accumFrame < (std::numeric_limits<u32>::max() - 1u))
+   {
+      Vulkan.accumFrame += 1u;
+   }
 
    Vulkan.currentFrame = (Vulkan.currentFrame + 1) % FrameOverlap;
    return VK_SUCCESS;

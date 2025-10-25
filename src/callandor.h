@@ -51,6 +51,13 @@ struct Vec2
     float y;
 };
 
+struct Vec3
+{
+    float x;
+    float y;
+    float z;
+};
+
 struct Size
 {
     int width;
@@ -76,6 +83,39 @@ struct GradientParams
     Vec2 resolution;
     float time;
     float padding;
+};
+
+struct CameraParams
+{
+    Vec3 position;
+    float verticalFovRadians;
+    Vec3 forward;
+    float aperture;
+    Vec3 right;
+    float focusDistance;
+    Vec3 up;
+    float pad3;
+};
+
+struct SphereQuantConfig
+{
+    Vec3 origin;
+    float pad0;
+    Vec3 scale;
+    float scaleMax;
+};
+
+struct PathParams
+{
+    Vec2 resolution;
+    float time;
+    u32 frameIndex;
+    CameraParams camera;
+    SphereQuantConfig quant;
+    u32 sphereCount;
+    u32 padA;
+    u32 padB;
+    u32 padC;
 };
 
 //------------------------------------------------------------------------------------
@@ -113,6 +153,23 @@ void MainLoop();
 auto GetFrameDeltaSeconds() -> float;
 auto RequiresDebug() -> bool;
 auto RequiresPortability() -> bool;
+
+//------------------------------------------------------------------------------------
+// Camera Functions
+//------------------------------------------------------------------------------------
+
+void CreateCamera();
+void DestroyCamera();
+void ResetCameraAccum();
+void UpdateCameraFromInput(float deltaSeconds);
+auto GetCameraParams() -> CameraParams;
+
+//------------------------------------------------------------------------------------
+// Scene Functions
+//------------------------------------------------------------------------------------
+
+void BuildSpheres();
+auto GetSphereQuantConfig() -> SphereQuantConfig;
 
 //------------------------------------------------------------------------------------
 // Vulkan Functions (Module: vulkan)

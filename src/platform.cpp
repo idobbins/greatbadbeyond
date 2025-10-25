@@ -277,9 +277,17 @@ void MainLoop()
         }
 
         PollEvents();
+        GLFWwindow *window = GetWindowHandle();
+        if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
+        {
+            glfwSetWindowShouldClose(window, GLFW_TRUE);
+            break;
+        }
+        UpdateCameraFromInput(static_cast<float>(Platform.FrameTiming.deltaSeconds));
 
         if (ConsumeFramebufferResize())
         {
+            ResetCameraAccum();
             RecreateSwapchain();
             continue;
         }

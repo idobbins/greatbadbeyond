@@ -4,11 +4,13 @@ auto main() -> int
 {
     CreateGlfwContext();
     CreateWindow();
+    CreateCamera();
     CreateVulkan();
 
     MainLoop();
 
     DestroyVulkan();
+    DestroyCamera();
     DestroyWindow();
     DestroyGlfwContext();
 
