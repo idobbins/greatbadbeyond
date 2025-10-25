@@ -42,7 +42,12 @@ static struct VulkanData
    VkExtent2D swapchainExtent;
    array<VkImage, MaxSwapchainImages> swapchainImages;
    array<VkImageView, MaxSwapchainImages> swapchainImageViews;
+   array<VkImageLayout, MaxSwapchainImages> swapchainImageLayouts;
+   array<VkSemaphore, MaxSwapchainImages> swapchainRenderFinishedSemaphores;
+   array<VkFence, MaxSwapchainImages> swapchainImageFences;
    u32 swapchainImageCount;
+   array<FrameResources, FrameOverlap> frames;
+   u32 currentFrame;
 
    bool instanceReady;
    bool validationLayersEnabled;
@@ -51,6 +56,7 @@ static struct VulkanData
    bool deviceReady;
    bool swapchainReady;
    bool swapchainImageViewsReady;
+   bool frameResourcesReady;
 
 } Vulkan;
 
@@ -141,10 +147,17 @@ void CreateVulkan()
    CreateDevice();
    CreateSwapchain();
    CreateSwapchainImageViews();
+   CreateFrameResources();
 }
 
 void DestroyVulkan()
 {
+   if (Vulkan.device != VK_NULL_HANDLE)
+   {
+      vkDeviceWaitIdle(Vulkan.device);
+   }
+
+   DestroyFrameResources();
    DestroySwapchain();
    DestroyDevice();
    DestroySurface();
@@ -911,6 +924,10 @@ void CreateSwapchain()
    {
       imageView = VK_NULL_HANDLE;
    }
+   for (VkImageLayout &layout : Vulkan.swapchainImageLayouts)
+   {
+      layout = VK_IMAGE_LAYOUT_UNDEFINED;
+   }
 
    Vulkan.swapchainImageCount = imageCount;
    Vulkan.swapchainExtent = extent;
@@ -997,6 +1014,18 @@ void DestroySwapchain()
       Vulkan.swapchainImageCount = 0;
       Vulkan.swapchainExtent = {0, 0};
       Vulkan.swapchainFormat = VK_FORMAT_UNDEFINED;
+      for (VkImageLayout &layout : Vulkan.swapchainImageLayouts)
+      {
+         layout = VK_IMAGE_LAYOUT_UNDEFINED;
+      }
+      for (VkSemaphore &semaphore : Vulkan.swapchainRenderFinishedSemaphores)
+      {
+         semaphore = VK_NULL_HANDLE;
+      }
+      for (VkFence &fence : Vulkan.swapchainImageFences)
+      {
+         fence = VK_NULL_HANDLE;
+      }
       return;
    }
 
@@ -1008,6 +1037,18 @@ void DestroySwapchain()
       Vulkan.swapchainImageCount = 0;
       Vulkan.swapchainExtent = {0, 0};
       Vulkan.swapchainFormat = VK_FORMAT_UNDEFINED;
+      for (VkImageLayout &layout : Vulkan.swapchainImageLayouts)
+      {
+         layout = VK_IMAGE_LAYOUT_UNDEFINED;
+      }
+      for (VkSemaphore &semaphore : Vulkan.swapchainRenderFinishedSemaphores)
+      {
+         semaphore = VK_NULL_HANDLE;
+      }
+      for (VkFence &fence : Vulkan.swapchainImageFences)
+      {
+         fence = VK_NULL_HANDLE;
+      }
       return;
    }
 
@@ -1018,6 +1059,18 @@ void DestroySwapchain()
    Vulkan.swapchainImageCount = 0;
    Vulkan.swapchainExtent = {0, 0};
    Vulkan.swapchainFormat = VK_FORMAT_UNDEFINED;
+   for (VkImageLayout &layout : Vulkan.swapchainImageLayouts)
+   {
+      layout = VK_IMAGE_LAYOUT_UNDEFINED;
+   }
+   for (VkSemaphore &semaphore : Vulkan.swapchainRenderFinishedSemaphores)
+   {
+      semaphore = VK_NULL_HANDLE;
+   }
+   for (VkFence &fence : Vulkan.swapchainImageFences)
+   {
+      fence = VK_NULL_HANDLE;
+   }
 
    for (VkImage &image : Vulkan.swapchainImages)
    {
@@ -1047,76 +1100,377 @@ void RecreateSwapchain()
 
    vkDeviceWaitIdle(Vulkan.device);
 
+   DestroyFrameResources();
    DestroySwapchainImageViews();
    Vulkan.swapchainReady = false;
    Vulkan.swapchainImageViewsReady = false;
 
    CreateSwapchain();
    CreateSwapchainImageViews();
+   CreateFrameResources();
 }
 
-auto AcquireNextSwapchainImage(VkSemaphore imageAvailableSemaphore, VkFence inFlightFence) -> u32
+void CreateFrameResources()
+{
+   if (Vulkan.frameResourcesReady)
+   {
+      return;
+   }
+
+   Assert(Vulkan.deviceReady, "Create the Vulkan device before frame resources");
+   Assert(Vulkan.graphicsQueueFamilyIndex < Vulkan.queueFamilyCount, "Graphics queue family index is invalid");
+   Assert(Vulkan.swapchainImageCount > 0, "Swapchain images must exist before creating frame resources");
+
+   for (u32 index = 0; index < FrameOverlap; ++index)
+   {
+      FrameResources &frame = Vulkan.frames[index];
+
+      VkCommandPoolCreateInfo poolInfo = {
+         .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+         .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+         .queueFamilyIndex = Vulkan.graphicsQueueFamilyIndex,
+      };
+
+      VkResult result = vkCreateCommandPool(Vulkan.device, &poolInfo, nullptr, &frame.commandPool);
+      Assert(result == VK_SUCCESS, "Failed to create command pool");
+
+      VkCommandBufferAllocateInfo allocInfo = {
+         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+         .commandPool = frame.commandPool,
+         .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+         .commandBufferCount = 1,
+      };
+
+      result = vkAllocateCommandBuffers(Vulkan.device, &allocInfo, &frame.commandBuffer);
+      Assert(result == VK_SUCCESS, "Failed to allocate command buffer");
+
+      VkFenceCreateInfo fenceInfo = {
+         .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+         .flags = VK_FENCE_CREATE_SIGNALED_BIT,
+      };
+
+      result = vkCreateFence(Vulkan.device, &fenceInfo, nullptr, &frame.inFlightFence);
+      Assert(result == VK_SUCCESS, "Failed to create fence");
+
+      VkSemaphoreCreateInfo semaphoreInfo = {
+         .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+      };
+
+      result = vkCreateSemaphore(Vulkan.device, &semaphoreInfo, nullptr, &frame.imageAvailableSemaphore);
+      Assert(result == VK_SUCCESS, "Failed to create image-available semaphore");
+   }
+
+   for (u32 index = 0; index < Vulkan.swapchainImageCount; ++index)
+   {
+      VkSemaphoreCreateInfo semaphoreInfo = {
+         .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+      };
+
+      VkResult result = vkCreateSemaphore(Vulkan.device, &semaphoreInfo, nullptr, &Vulkan.swapchainRenderFinishedSemaphores[index]);
+      Assert(result == VK_SUCCESS, "Failed to create render-finished semaphore");
+
+      Vulkan.swapchainImageFences[index] = VK_NULL_HANDLE;
+   }
+
+   for (u32 index = Vulkan.swapchainImageCount; index < MaxSwapchainImages; ++index)
+   {
+      Vulkan.swapchainRenderFinishedSemaphores[index] = VK_NULL_HANDLE;
+      Vulkan.swapchainImageFences[index] = VK_NULL_HANDLE;
+   }
+
+   Vulkan.frameResourcesReady = true;
+   Vulkan.currentFrame = 0;
+}
+
+void DestroyFrameResources()
+{
+   if (!Vulkan.frameResourcesReady)
+   {
+      return;
+   }
+
+   if (Vulkan.device == VK_NULL_HANDLE)
+   {
+      Vulkan.frameResourcesReady = false;
+      return;
+   }
+
+   for (u32 index = 0; index < FrameOverlap; ++index)
+   {
+      FrameResources &frame = Vulkan.frames[index];
+
+      if (frame.imageAvailableSemaphore != VK_NULL_HANDLE)
+      {
+         vkDestroySemaphore(Vulkan.device, frame.imageAvailableSemaphore, nullptr);
+         frame.imageAvailableSemaphore = VK_NULL_HANDLE;
+      }
+
+      if (frame.inFlightFence != VK_NULL_HANDLE)
+      {
+         vkDestroyFence(Vulkan.device, frame.inFlightFence, nullptr);
+         frame.inFlightFence = VK_NULL_HANDLE;
+      }
+
+      if ((frame.commandBuffer != VK_NULL_HANDLE) && (frame.commandPool != VK_NULL_HANDLE))
+      {
+         vkFreeCommandBuffers(Vulkan.device, frame.commandPool, 1, &frame.commandBuffer);
+         frame.commandBuffer = VK_NULL_HANDLE;
+      }
+
+      if (frame.commandPool != VK_NULL_HANDLE)
+      {
+         vkDestroyCommandPool(Vulkan.device, frame.commandPool, nullptr);
+         frame.commandPool = VK_NULL_HANDLE;
+      }
+   }
+
+   for (u32 index = 0; index < Vulkan.swapchainImageCount; ++index)
+   {
+      if (Vulkan.swapchainRenderFinishedSemaphores[index] != VK_NULL_HANDLE)
+      {
+         vkDestroySemaphore(Vulkan.device, Vulkan.swapchainRenderFinishedSemaphores[index], nullptr);
+         Vulkan.swapchainRenderFinishedSemaphores[index] = VK_NULL_HANDLE;
+      }
+
+      Vulkan.swapchainImageFences[index] = VK_NULL_HANDLE;
+   }
+
+   for (u32 index = Vulkan.swapchainImageCount; index < MaxSwapchainImages; ++index)
+   {
+      Vulkan.swapchainRenderFinishedSemaphores[index] = VK_NULL_HANDLE;
+      Vulkan.swapchainImageFences[index] = VK_NULL_HANDLE;
+   }
+
+   Vulkan.frameResourcesReady = false;
+   Vulkan.currentFrame = 0;
+}
+
+auto AcquireNextImage(u32 &imageIndex, u32 &frameIndex) -> VkResult
 {
    Assert(Vulkan.swapchainReady, "Create the Vulkan swapchain before acquiring images");
    Assert(Vulkan.deviceReady, "Create the Vulkan device before acquiring images");
-   Assert(imageAvailableSemaphore != VK_NULL_HANDLE, "Image-available semaphore is null");
+   Assert(Vulkan.frameResourcesReady, "Create frame resources before acquiring images");
 
-   uint32_t imageIndex = 0;
-   VkResult result = vkAcquireNextImageKHR(
+   frameIndex = Vulkan.currentFrame;
+   Assert(frameIndex < FrameOverlap, "Frame index out of range");
+
+   FrameResources &frame = Vulkan.frames[frameIndex];
+   Assert(frame.inFlightFence != VK_NULL_HANDLE, "Frame fence is not initialized");
+   Assert(frame.imageAvailableSemaphore != VK_NULL_HANDLE, "Frame image-available semaphore is not initialized");
+
+   VkResult waitResult = vkWaitForFences(Vulkan.device, 1, &frame.inFlightFence, VK_TRUE, UINT64_MAX);
+   Assert(waitResult == VK_SUCCESS, "Failed to wait for in-flight fence");
+
+   VkResult resetResult = vkResetFences(Vulkan.device, 1, &frame.inFlightFence);
+   Assert(resetResult == VK_SUCCESS, "Failed to reset in-flight fence");
+
+   imageIndex = UINT32_MAX;
+   VkResult acquireResult = vkAcquireNextImageKHR(
       Vulkan.device,
       Vulkan.swapchain,
       UINT64_MAX,
-      imageAvailableSemaphore,
-      inFlightFence,
+      frame.imageAvailableSemaphore,
+      VK_NULL_HANDLE,
       &imageIndex);
 
-   if (result == VK_ERROR_OUT_OF_DATE_KHR)
+   if ((acquireResult != VK_SUCCESS) &&
+       (acquireResult != VK_SUBOPTIMAL_KHR) &&
+       (acquireResult != VK_ERROR_OUT_OF_DATE_KHR))
    {
-      LogWarn("[vulkan] Swapchain is out of date during acquire; recreating");
-      RecreateSwapchain();
-      return UINT32_MAX;
+      Assert(false, "Failed to acquire swapchain image");
    }
 
-   if (result == VK_SUBOPTIMAL_KHR)
+   if ((acquireResult == VK_SUCCESS) || (acquireResult == VK_SUBOPTIMAL_KHR))
    {
-      LogWarn("[vulkan] Swapchain is suboptimal during acquire; recreating");
-      RecreateSwapchain();
-      return UINT32_MAX;
+      Assert(imageIndex < Vulkan.swapchainImageCount, "Vulkan returned an invalid swapchain image index");
+      VkFence &imageFence = Vulkan.swapchainImageFences[imageIndex];
+      if (imageFence != VK_NULL_HANDLE)
+      {
+         VkResult waitResult = vkWaitForFences(Vulkan.device, 1, &imageFence, VK_TRUE, UINT64_MAX);
+         Assert(waitResult == VK_SUCCESS, "Failed to wait for image fence");
+      }
+      Vulkan.swapchainImageFences[imageIndex] = frame.inFlightFence;
    }
 
-   Assert(result == VK_SUCCESS, "Failed to acquire swapchain image");
-   Assert(imageIndex < Vulkan.swapchainImageCount, "Vulkan returned an invalid swapchain image index");
-
-   return imageIndex;
+   return acquireResult;
 }
 
-void PresentSwapchainImage(u32 imageIndex, VkSemaphore renderFinishedSemaphore)
+auto RecordCommandBuffer(u32 frameIndex, u32 imageIndex, VkClearColorValue clearColor) -> VkResult
 {
-   Assert(Vulkan.swapchainReady, "Create the Vulkan swapchain before presenting");
-   Assert(Vulkan.presentQueue != VK_NULL_HANDLE, "Present queue is not initialized");
-   Assert(renderFinishedSemaphore != VK_NULL_HANDLE, "Render-finished semaphore is null");
+   Assert(Vulkan.swapchainReady, "Create the Vulkan swapchain before recording commands");
+   Assert(Vulkan.swapchainImageViewsReady, "Create swapchain image views before recording commands");
+   Assert(Vulkan.frameResourcesReady, "Frame resources must exist before recording commands");
+   Assert(frameIndex < FrameOverlap, "Frame index out of range");
    Assert(imageIndex < Vulkan.swapchainImageCount, "Swapchain image index out of range");
 
-   VkSwapchainKHR swapchainHandle = Vulkan.swapchain;
+   FrameResources &frame = Vulkan.frames[frameIndex];
+   Assert(frame.commandPool != VK_NULL_HANDLE, "Frame command pool is not initialized");
+   Assert(frame.commandBuffer != VK_NULL_HANDLE, "Frame command buffer is not initialized");
 
+   VkResult resetResult = vkResetCommandPool(Vulkan.device, frame.commandPool, 0);
+   Assert(resetResult == VK_SUCCESS, "Failed to reset command pool");
+
+   VkCommandBufferBeginInfo beginInfo = {
+      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+      .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+   };
+
+   VkResult beginResult = vkBeginCommandBuffer(frame.commandBuffer, &beginInfo);
+   if (beginResult != VK_SUCCESS)
+   {
+      return beginResult;
+   }
+
+   VkImage image = Vulkan.swapchainImages[imageIndex];
+   VkImageView imageView = Vulkan.swapchainImageViews[imageIndex];
+   VkImageLayout currentLayout = Vulkan.swapchainImageLayouts[imageIndex];
+   if ((currentLayout != VK_IMAGE_LAYOUT_PRESENT_SRC_KHR) && (currentLayout != VK_IMAGE_LAYOUT_UNDEFINED))
+   {
+      currentLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+   }
+
+   VkImageSubresourceRange subresource = {
+      .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+      .baseMipLevel = 0,
+      .levelCount = 1,
+      .baseArrayLayer = 0,
+      .layerCount = 1,
+   };
+
+   VkImageMemoryBarrier barrierToAttachment = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+      .srcAccessMask = 0,
+      .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+      .oldLayout = currentLayout,
+      .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+      .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+      .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+      .image = image,
+      .subresourceRange = subresource,
+   };
+
+   vkCmdPipelineBarrier(
+      frame.commandBuffer,
+      VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+      VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+      0,
+      0,
+      nullptr,
+      0,
+      nullptr,
+      1,
+      &barrierToAttachment);
+
+   VkRenderingAttachmentInfo colorAttachment = {
+      .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+      .imageView = imageView,
+      .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+      .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+      .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+      .clearValue = {.color = clearColor},
+   };
+
+   VkExtent2D extent = Vulkan.swapchainExtent;
+   VkRenderingInfo renderingInfo = {
+      .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+      .renderArea = {
+         .offset = {0, 0},
+         .extent = extent,
+      },
+      .layerCount = 1,
+      .colorAttachmentCount = 1,
+      .pColorAttachments = &colorAttachment,
+   };
+
+   vkCmdBeginRendering(frame.commandBuffer, &renderingInfo);
+   vkCmdEndRendering(frame.commandBuffer);
+
+   VkImageMemoryBarrier barrierToPresent = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+      .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+      .dstAccessMask = 0,
+      .oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+      .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+      .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+      .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+      .image = image,
+      .subresourceRange = subresource,
+   };
+
+   vkCmdPipelineBarrier(
+      frame.commandBuffer,
+      VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+      VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+      0,
+      0,
+      nullptr,
+      0,
+      nullptr,
+      1,
+      &barrierToPresent);
+
+   VkResult endResult = vkEndCommandBuffer(frame.commandBuffer);
+   if (endResult == VK_SUCCESS)
+   {
+      Vulkan.swapchainImageLayouts[imageIndex] = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+   }
+
+   return endResult;
+}
+
+auto SubmitFrame(u32 frameIndex, u32 imageIndex) -> VkResult
+{
+   Assert(Vulkan.frameResourcesReady, "Frame resources must exist before submitting work");
+   Assert(Vulkan.graphicsQueue != VK_NULL_HANDLE, "Graphics queue is not initialized");
+   Assert(Vulkan.presentQueue != VK_NULL_HANDLE, "Present queue is not initialized");
+   Assert(frameIndex < FrameOverlap, "Frame index out of range");
+   Assert(imageIndex < Vulkan.swapchainImageCount, "Swapchain image index out of range");
+
+   FrameResources &frame = Vulkan.frames[frameIndex];
+   Assert(frame.commandBuffer != VK_NULL_HANDLE, "Frame command buffer is not initialized");
+   Assert(frame.imageAvailableSemaphore != VK_NULL_HANDLE, "Frame image-available semaphore is not initialized");
+   Assert(frame.inFlightFence != VK_NULL_HANDLE, "Frame fence is not initialized");
+   VkSemaphore renderFinishedSemaphore = Vulkan.swapchainRenderFinishedSemaphores[imageIndex];
+   Assert(renderFinishedSemaphore != VK_NULL_HANDLE, "Render-finished semaphore for swapchain image is not initialized");
+
+   VkPipelineStageFlags waitStages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
+   VkSemaphore waitSemaphores[] = {frame.imageAvailableSemaphore};
+   VkSemaphore signalSemaphores[] = {renderFinishedSemaphore};
+
+   VkSubmitInfo submitInfo = {
+      .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+      .waitSemaphoreCount = 1,
+      .pWaitSemaphores = waitSemaphores,
+      .pWaitDstStageMask = waitStages,
+      .commandBufferCount = 1,
+      .pCommandBuffers = &frame.commandBuffer,
+      .signalSemaphoreCount = 1,
+      .pSignalSemaphores = signalSemaphores,
+   };
+
+   VkResult submitResult = vkQueueSubmit(Vulkan.graphicsQueue, 1, &submitInfo, frame.inFlightFence);
+   Assert(submitResult == VK_SUCCESS, "Failed to submit command buffer");
+
+   VkSwapchainKHR swapchainHandle = Vulkan.swapchain;
    VkPresentInfoKHR presentInfo = {
       .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
       .waitSemaphoreCount = 1,
-      .pWaitSemaphores = &renderFinishedSemaphore,
+      .pWaitSemaphores = signalSemaphores,
       .swapchainCount = 1,
       .pSwapchains = &swapchainHandle,
       .pImageIndices = &imageIndex,
       .pResults = nullptr,
    };
 
-   VkResult result = vkQueuePresentKHR(Vulkan.presentQueue, &presentInfo);
+   VkResult presentResult = vkQueuePresentKHR(Vulkan.presentQueue, &presentInfo);
 
-   if ((result == VK_ERROR_OUT_OF_DATE_KHR) || (result == VK_SUBOPTIMAL_KHR))
+   if ((presentResult == VK_ERROR_OUT_OF_DATE_KHR) || (presentResult == VK_SUBOPTIMAL_KHR))
    {
-      LogWarn("[vulkan] Swapchain is out of date or suboptimal during present; recreating");
-      RecreateSwapchain();
-      return;
+      return presentResult;
    }
 
-   Assert(result == VK_SUCCESS, "Failed to present swapchain image");
+   Assert(presentResult == VK_SUCCESS, "Failed to present swapchain image");
+
+   Vulkan.currentFrame = (Vulkan.currentFrame + 1) % FrameOverlap;
+   return VK_SUCCESS;
 }

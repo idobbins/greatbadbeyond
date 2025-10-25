@@ -18,6 +18,7 @@ static constexpr std::size_t InstanceExtensionScratchBytes = 1024;
 static constexpr std::size_t InstanceLayerScratchBytes = 1024;
 
 static constexpr uint32_t swapchainImageCount = 3;
+static constexpr uint32_t FrameOverlap = 2;
 
 static constexpr int DefaultWindowWidth = 1280;
 static constexpr int DefaultWindowHeight = 720;

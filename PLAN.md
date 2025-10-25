@@ -7,10 +7,10 @@ Linear sequence of work items that graduates the app from the current code (GLFW
    - Vulkan instance, debug messenger, surface, physical device, logical device, queues, and swapchain/image-view management exist with `RecreateSwapchain()` handling VK out-of-date/suboptimal cases.
    - Main loop currently only polls events; no command buffers, sync objects, or rendering work submit yet.
 
-1. **Frame Infrastructure**
-   - Implement frame cache with per-frame command buffers, fences, and acquire/present semaphores.
-   - Flesh out command pool/buffer helpers and `RecordCommandBuffer(frame, imageIndex, clearColor)` that simply clears the attachment through dynamic rendering.
-   - Wire the acquire → record → submit → present loop inside `MainLoop()`, handling all VK_ERROR_OUT_OF_DATE_KHR / VK_SUBOPTIMAL_KHR cases by calling `RecreateSwapchain()`.
+1. **Frame Infrastructure (Done)**
+   - Implemented frame cache with two-frame overlap: per-frame command pool, buffer, fence, and image-available semaphore plus per-swapchain-image render-finished semaphores and ownership fences.
+   - Added `RecordCommandBuffer(frame, imageIndex, clearColor)` using dynamic rendering to clear the current swapchain image with the configured color.
+   - Main loop now runs acquire → record → submit → present every tick, recreating the swapchain on VK_ERROR_OUT_OF_DATE_KHR / VK_SUBOPTIMAL_KHR or resize callbacks.
 
 2. **Solid-Color Output (First-Light)**
    - Author fullscreen-triangle shaders that output a constant color; compile to SPIR-V under `resources/shaders/`.

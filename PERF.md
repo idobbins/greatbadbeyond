@@ -3,6 +3,13 @@ Introduction
 
 Real-time ray tracing on modern consumer GPUs (NVIDIA RTX and AMD RDNA) demands data-oriented design to fully exploit parallel compute capability. A data-oriented approach means organizing memory layout and algorithms to maximize GPU throughput and minimize divergence. This report explores key strategies for implementing a Vulkan/GLSL compute-shader ray tracer with high GPU utilization. We focus on:
 
+## Frame Infrastructure Baseline
+
+- The renderer now maintains `FrameOverlap = 2` sets of cached resources (command pool + buffer, acquire/present semaphores, and fences) so the main loop can pipeline acquire/submit/present without re-creating objects each frame.
+- `MainLoop()` drives a strict acquire → record → submit → present sequence using dynamic rendering to clear the current swapchain image, and all per-frame command buffers are re-recorded every tick with layout transitions baked in.
+- Swapchain recreation paths rebuild the frame cache after destroying the old swapchain/image views, ensuring the per-frame fences/semaphores are always in sync with the current swapchain images.
+- Recreate triggers are centralized: swapchain resize callbacks, `vkAcquireNextImageKHR`, and `vkQueuePresentKHR` all feed back into `RecreateSwapchain()` so the frame loop stays resilient to `VK_ERROR_OUT_OF_DATE_KHR` / `VK_SUBOPTIMAL_KHR`.
+
 Struct-of-Arrays vs Array-of-Structs (SoA vs AoS) memory layouts
 
 GPU-friendly BVH/TLAS acceleration structures (for efficient ray intersections)

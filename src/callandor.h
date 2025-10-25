@@ -63,6 +63,14 @@ struct PhysicalDeviceFeatures
     VkPhysicalDeviceVulkan13Features v13;
 };
 
+struct FrameResources
+{
+    VkCommandPool commandPool;
+    VkCommandBuffer commandBuffer;
+    VkFence inFlightFence;
+    VkSemaphore imageAvailableSemaphore;
+};
+
 //------------------------------------------------------------------------------------
 // Window and Platform Functions (Module: platform)
 //------------------------------------------------------------------------------------
@@ -168,10 +176,9 @@ void RecreateSwapchain();
 // Frame lifecycle functions
 void CreateFrameResources();
 void DestroyFrameResources();
-
-// Presentation-related functions
-auto AcquireNextSwapchainImage(VkSemaphore imageAvailableSemaphore, VkFence inFlightFence) -> u32;
-void PresentSwapchainImage(u32 imageIndex, VkSemaphore renderFinishedSemaphore);
+auto AcquireNextImage(u32 &imageIndex, u32 &frameIndex) -> VkResult;
+auto RecordCommandBuffer(u32 frameIndex, u32 imageIndex, VkClearColorValue clearColor) -> VkResult;
+auto SubmitFrame(u32 frameIndex, u32 imageIndex) -> VkResult;
 
 // VMA-related functions
 void CreateVMAAllocator();
@@ -190,8 +197,6 @@ void CreateCommandBuffer();
 void DestroyCommandBuffer();
 
 // Command buffer-related functions
-void RecordCommandBuffer();
-
 // Synchronization-related functions
 void CreateSemaphore();
 void DestroySemaphore();

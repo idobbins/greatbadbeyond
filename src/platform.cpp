@@ -208,6 +208,44 @@ void MainLoop()
         if (ConsumeFramebufferResize())
         {
             RecreateSwapchain();
+            continue;
+        }
+
+        u32 imageIndex = 0;
+        u32 frameIndex = 0;
+        VkResult acquireResult = AcquireNextImage(imageIndex, frameIndex);
+
+        if ((acquireResult == VK_ERROR_OUT_OF_DATE_KHR) || (acquireResult == VK_SUBOPTIMAL_KHR))
+        {
+            RecreateSwapchain();
+            continue;
+        }
+
+        if (acquireResult != VK_SUCCESS)
+        {
+            LogError("[vulkan] AcquireNextImage failed (result=%d)", acquireResult);
+            break;
+        }
+
+        VkClearColorValue clearColor = {{0.05f, 0.15f, 0.45f, 1.0f}};
+        VkResult recordResult = RecordCommandBuffer(frameIndex, imageIndex, clearColor);
+        if (recordResult != VK_SUCCESS)
+        {
+            LogError("[vulkan] RecordCommandBuffer failed (result=%d)", recordResult);
+            break;
+        }
+
+        VkResult submitResult = SubmitFrame(frameIndex, imageIndex);
+        if ((submitResult == VK_ERROR_OUT_OF_DATE_KHR) || (submitResult == VK_SUBOPTIMAL_KHR))
+        {
+            RecreateSwapchain();
+            continue;
+        }
+
+        if (submitResult != VK_SUCCESS)
+        {
+            LogError("[vulkan] SubmitFrame failed (result=%d)", submitResult);
+            break;
         }
     }
 }
