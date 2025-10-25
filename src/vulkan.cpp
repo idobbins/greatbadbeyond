@@ -25,9 +25,19 @@ static struct VulkanData
    VkSurfaceKHR surface;
    VkPhysicalDevice physicalDevice;
    VkDevice device;
-   VkQueue universalQueue;
-   u32 universalQueueFamily;
 
+   VkQueue graphicsQueue;
+   VkQueue presentQueue;
+   VkQueue transferQueue;
+   VkQueue computeQueue;
+
+   u32 queueFamilyCount;
+   u32 graphicsQueueFamilyIndex;
+   u32 presentQueueFamilyIndex;
+   u32 transferQueueFamilyIndex;
+   u32 computeQueueFamilyIndex;
+
+   bool instanceReady;
    bool validationLayersEnabled;
    bool debugMessengerReady;
    bool physicalDeviceReady;
@@ -230,8 +240,8 @@ void DestroyInstance()
    Vulkan.debugMessengerReady = false;
    Vulkan.physicalDevice = VK_NULL_HANDLE;
    Vulkan.device = VK_NULL_HANDLE;
-   Vulkan.universalQueue = VK_NULL_HANDLE;
-   Vulkan.universalQueueFamily = 0;
+   // Vulkan.universalQueue = VK_NULL_HANDLE;
+   // Vulkan.universalQueueFamily = 0;
    Vulkan.physicalDeviceReady = false;
    Vulkan.deviceReady = false;
 }
@@ -357,48 +367,18 @@ auto GetQueueFamilyProperties(const VkPhysicalDevice &device) -> span<const VkQu
 {
    Assert(device != VK_NULL_HANDLE, "Physical device handle is null");
 
-   struct QueueFamilyCacheEntry
-   {
-      VkPhysicalDevice physicalDevice;
-      array<VkQueueFamilyProperties, MaxQueueFamilies> properties;
-      uint32_t count;
-      bool ready;
-   };
+   static array<VkQueueFamilyProperties, MaxQueueFamilies> properties {};
+   static uint32_t familyCount = 0;
 
-   static array<QueueFamilyCacheEntry, MaxPhysicalDevices> cache {};
-   static uint32_t cacheCount = 0;
+   uint32_t queriedCount = 0;
+   vkGetPhysicalDeviceQueueFamilyProperties(device, &queriedCount, nullptr);
+   Assert(queriedCount > 0, "Physical device has no queue families");
+   Assert(queriedCount <= properties.size(), "Too many queue families for cache entry");
 
-   for (uint32_t index = 0; index < cacheCount; ++index)
-   {
-      QueueFamilyCacheEntry &entry = cache[index];
-      if (entry.ready && (entry.physicalDevice == device))
-      {
-         return {entry.properties.data(), entry.count};
-      }
-   }
+   vkGetPhysicalDeviceQueueFamilyProperties(device, &queriedCount, properties.data());
 
-   Assert(cacheCount < cache.size(), "Too many queue family cache entries");
-
-   QueueFamilyCacheEntry &entry = cache[cacheCount];
-   entry = QueueFamilyCacheEntry {
-      .physicalDevice = device,
-      .properties = {},
-      .count = 0,
-      .ready = false
-   };
-
-   uint32_t familyCount = 0;
-   vkGetPhysicalDeviceQueueFamilyProperties(device, &familyCount, nullptr);
-   Assert(familyCount > 0, "Physical device has no queue families");
-   Assert(familyCount <= entry.properties.size(), "Too many queue families for cache entry");
-
-   vkGetPhysicalDeviceQueueFamilyProperties(device, &familyCount, entry.properties.data());
-
-   entry.count = familyCount;
-   entry.ready = true;
-   cacheCount += 1;
-
-   return {entry.properties.data(), entry.count};
+   familyCount = queriedCount;
+   return {properties.data(), familyCount};
 }
 
 auto GetUniversalQueue(const VkPhysicalDevice &device, VkSurfaceKHR surface, uint32_t *family) -> bool
@@ -457,7 +437,7 @@ void SetPhysicalDevice()
       vkGetPhysicalDeviceProperties(device, &properties);
 
       Vulkan.physicalDevice = device;
-      Vulkan.universalQueueFamily = queueFamily;
+      // Vulkan.universalQueueFamily = queueFamily;
       Vulkan.physicalDeviceReady = true;
       Vulkan.deviceReady = false;
 
