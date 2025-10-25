@@ -10,6 +10,8 @@ static constexpr uint32_t MaxQueueFamilies = 16;
 static constexpr uint32_t MaxPlatformInstanceExtensions = 8;
 static constexpr uint32_t MaxDeviceExtensions = 8;
 static constexpr uint32_t MaxEnumeratedDeviceExtensions = 256;
+static constexpr uint32_t MaxSurfaceFormats = 64;
+static constexpr uint32_t MaxSurfacePresentModes = 32;
 
 static constexpr std::size_t InstanceExtensionScratchBytes = 1024;
 static constexpr std::size_t InstanceLayerScratchBytes = 1024;

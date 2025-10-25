@@ -277,6 +277,60 @@ void DestroySurface()
    Vulkan.surface = VK_NULL_HANDLE;
 }
 
+auto GetPhysicalDeviceSurfaceCapabilities() -> VkSurfaceCapabilitiesKHR
+{
+   Assert(Vulkan.physicalDeviceReady, "Select a physical device before querying surface capabilities");
+   Assert(Vulkan.surface != VK_NULL_HANDLE, "Create the Vulkan surface before querying surface capabilities");
+
+   VkSurfaceCapabilitiesKHR capabilities = {};
+   VkResult result = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(Vulkan.physicalDevice, Vulkan.surface, &capabilities);
+   Assert(result == VK_SUCCESS, "Failed to query Vulkan surface capabilities");
+
+   return capabilities;
+}
+
+auto GetPhysicalDeviceSurfaceFormats() -> span<const VkSurfaceFormatKHR>
+{
+   Assert(Vulkan.physicalDeviceReady, "Select a physical device before querying surface formats");
+   Assert(Vulkan.surface != VK_NULL_HANDLE, "Create the Vulkan surface before querying surface formats");
+
+   static array<VkSurfaceFormatKHR, MaxSurfaceFormats> formats {};
+   static uint32_t cachedCount = 0;
+
+   uint32_t count = 0;
+   VkResult result = vkGetPhysicalDeviceSurfaceFormatsKHR(Vulkan.physicalDevice, Vulkan.surface, &count, nullptr);
+   Assert(result == VK_SUCCESS, "vkGetPhysicalDeviceSurfaceFormatsKHR (count) failed");
+   Assert(count > 0, "Physical device reports zero surface formats");
+   Assert(count <= formats.size(), "Too many Vulkan surface formats for cache");
+
+   result = vkGetPhysicalDeviceSurfaceFormatsKHR(Vulkan.physicalDevice, Vulkan.surface, &count, formats.data());
+   Assert(result == VK_SUCCESS, "vkGetPhysicalDeviceSurfaceFormatsKHR (fill) failed");
+
+   cachedCount = count;
+   return {formats.data(), cachedCount};
+}
+
+auto GetPhysicalDeviceSurfacePresentModes() -> span<const VkPresentModeKHR>
+{
+   Assert(Vulkan.physicalDeviceReady, "Select a physical device before querying present modes");
+   Assert(Vulkan.surface != VK_NULL_HANDLE, "Create the Vulkan surface before querying present modes");
+
+   static array<VkPresentModeKHR, MaxSurfacePresentModes> modes {};
+   static uint32_t cachedCount = 0;
+
+   uint32_t count = 0;
+   VkResult result = vkGetPhysicalDeviceSurfacePresentModesKHR(Vulkan.physicalDevice, Vulkan.surface, &count, nullptr);
+   Assert(result == VK_SUCCESS, "vkGetPhysicalDeviceSurfacePresentModesKHR (count) failed");
+   Assert(count > 0, "Physical device reports zero present modes");
+   Assert(count <= modes.size(), "Too many Vulkan present modes for cache");
+
+   result = vkGetPhysicalDeviceSurfacePresentModesKHR(Vulkan.physicalDevice, Vulkan.surface, &count, modes.data());
+   Assert(result == VK_SUCCESS, "vkGetPhysicalDeviceSurfacePresentModesKHR (fill) failed");
+
+   cachedCount = count;
+   return {modes.data(), cachedCount};
+}
+
 auto GetPhysicalDeviceFeatures(const VkPhysicalDevice &device) -> const PhysicalDeviceFeatures&
 {
    Assert(device != VK_NULL_HANDLE, "Physical device handle is null");
