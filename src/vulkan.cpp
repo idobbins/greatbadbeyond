@@ -28,7 +28,7 @@ static constexpr const char *FullscreenVertexShaderName = "fullscreen_triangle.v
 static constexpr const char *FullscreenFragmentShaderName = "fullscreen_triangle.frag.spv";
 static constexpr const char *PathTracerComputeShaderName = "pathtracer.comp.spv";
 static constexpr VkFormat PathTracerImageFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
-static constexpr u32 DefaultSphereCount = 4096;
+static constexpr u32 DefaultSphereCount = 1'000'000;
 
 #ifndef VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME
 #define VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME "VK_KHR_portability_subset"
@@ -1862,10 +1862,32 @@ void BuildSpheres()
    std::vector<float> radii;
    radii.reserve(desiredSphereCount);
 
-   SceneQuantization.origin = {-32.0f, 0.0f, -32.0f};
+   // Expand the spawnable footprint based on the requested sphere count so density stays stable.
+   constexpr float BaseSpawnWidth = 256.0f;
+   constexpr float BaseSpawnDepth = 256.0f;
+   constexpr float BaseSpawnHeight = 24.0f;
+   constexpr float BaseRadiusMax = 2.5f;
+   constexpr float BaselineSphereDensityCount = 4096.0f; // Keep reference density stable as sphere counts scale up.
+
+   float requestedSphereCount = static_cast<float>((desiredSphereCount > 0u) ? desiredSphereCount : 1u);
+   float densityRatio = requestedSphereCount / BaselineSphereDensityCount;
+   if (!std::isfinite(densityRatio) || (densityRatio <= 0.0f))
+   {
+      densityRatio = 1.0f;
+   }
+   float areaScale = std::sqrt(densityRatio);
+   if (!std::isfinite(areaScale) || (areaScale <= 0.0f))
+   {
+      areaScale = 1.0f;
+   }
+
+   float spawnWidth = BaseSpawnWidth * areaScale;
+   float spawnDepth = BaseSpawnDepth * areaScale;
+
+   SceneQuantization.origin = {-0.5f * spawnWidth, 0.0f, -0.5f * spawnDepth};
    SceneQuantization.pad0 = 0.0f;
-   SceneQuantization.scale = {64.0f, 24.0f, 64.0f};
-   SceneQuantization.scaleMax = 2.5f;
+   SceneQuantization.scale = {spawnWidth, BaseSpawnHeight, spawnDepth};
+   SceneQuantization.scaleMax = BaseRadiusMax;
 
    const auto distanceSquared = [](const Vec3 &a, const Vec3 &b) -> float
    {
@@ -1888,6 +1910,58 @@ void BuildSpheres()
    static constexpr std::array<u32, 3> MetallicIndices = {4, 5, 6};
    static constexpr std::array<u32, 1> EmissiveIndices = {7};
 
+   float targetCellLength = (SceneQuantization.scaleMax * 2.0f) + PlacementSpacing;
+   if (!std::isfinite(targetCellLength) || (targetCellLength <= 0.0f))
+   {
+      targetCellLength = 1.0f;
+   }
+
+   u32 occupancyColumns = static_cast<u32>(std::ceil(SceneQuantization.scale.x / targetCellLength));
+   u32 occupancyRows = static_cast<u32>(std::ceil(SceneQuantization.scale.z / targetCellLength));
+   if (occupancyColumns == 0u)
+   {
+      occupancyColumns = 1u;
+   }
+   if (occupancyRows == 0u)
+   {
+      occupancyRows = 1u;
+   }
+
+   float occupancyCellSizeX = SceneQuantization.scale.x / static_cast<float>(occupancyColumns);
+   float occupancyCellSizeZ = SceneQuantization.scale.z / static_cast<float>(occupancyRows);
+   if (occupancyCellSizeX <= 0.0f)
+   {
+      occupancyCellSizeX = 1.0f;
+   }
+   if (occupancyCellSizeZ <= 0.0f)
+   {
+      occupancyCellSizeZ = 1.0f;
+   }
+
+   constexpr u32 InvalidCellEntry = std::numeric_limits<u32>::max();
+   std::vector<u32> cellHeads(static_cast<size_t>(occupancyColumns) * static_cast<size_t>(occupancyRows), InvalidCellEntry);
+   std::vector<u32> cellNext(desiredSphereCount, InvalidCellEntry);
+
+   const auto clampCellCoord = [](float value, float cellSize, u32 maxCoord) -> u32
+   {
+      float scaled = value / cellSize;
+      int cell = static_cast<int>(std::floor(scaled));
+      if (cell < 0)
+      {
+         cell = 0;
+      }
+      int maxIndex = static_cast<int>(maxCoord) - 1;
+      if (cell > maxIndex)
+      {
+         cell = maxIndex;
+      }
+      return static_cast<u32>(cell);
+   };
+   const auto flattenCell = [occupancyColumns](u32 x, u32 z) -> u32
+   {
+      return z * occupancyColumns + x;
+   };
+
    u32 rng = 0x9e3779b9u;
    for (u32 index = 0; index < desiredSphereCount; ++index)
    {
@@ -1904,21 +1978,79 @@ void BuildSpheres()
          float py = SceneQuantization.origin.y + radius;
 
          Vec3 candidate = {px, py, pz};
-         bool overlaps = false;
+         float localX = candidate.x - SceneQuantization.origin.x;
+         float localZ = candidate.z - SceneQuantization.origin.z;
+         u32 cellX = clampCellCoord(localX, occupancyCellSizeX, occupancyColumns);
+         u32 cellZ = clampCellCoord(localZ, occupancyCellSizeZ, occupancyRows);
 
-         for (size_t existing = 0; existing < centers.size(); ++existing)
+         float searchRadiusX = radius + SceneQuantization.scaleMax + PlacementSpacing;
+         float searchRadiusZ = searchRadiusX;
+         u32 neighborRangeX = static_cast<u32>(std::ceil(searchRadiusX / occupancyCellSizeX));
+         u32 neighborRangeZ = static_cast<u32>(std::ceil(searchRadiusZ / occupancyCellSizeZ));
+
+         u32 minCellX = (cellX > neighborRangeX) ? (cellX - neighborRangeX) : 0u;
+         u32 minCellZ = (cellZ > neighborRangeZ) ? (cellZ - neighborRangeZ) : 0u;
+         u32 maxCellX = std::min(cellX + neighborRangeX, occupancyColumns - 1u);
+         u32 maxCellZ = std::min(cellZ + neighborRangeZ, occupancyRows - 1u);
+
+         bool overlaps = false;
+         for (u32 nz = minCellZ; (nz <= maxCellZ) && !overlaps; ++nz)
          {
-            float needed = radius + radii[existing] + PlacementSpacing;
-            if (distanceSquared(candidate, centers[existing]) < (needed * needed))
+            for (u32 nx = minCellX; (nx <= maxCellX) && !overlaps; ++nx)
             {
-               overlaps = true;
-               break;
+               u32 cellIndex = flattenCell(nx, nz);
+               u32 head = cellHeads[cellIndex];
+               while (head != InvalidCellEntry)
+               {
+                  float needed = radius + radii[head] + PlacementSpacing;
+                  if (distanceSquared(candidate, centers[head]) < (needed * needed))
+                  {
+                     overlaps = true;
+                     break;
+                  }
+                  head = cellNext[head];
+               }
             }
          }
 
          if (!overlaps)
          {
             center = candidate;
+            u32 newIndex = static_cast<u32>(centers.size());
+            centers.push_back(center);
+            radii.push_back(radius);
+
+            Vec3 normalized = {
+               Clamp01((center.x - SceneQuantization.origin.x) / SceneQuantization.scale.x),
+               Clamp01((center.y - SceneQuantization.origin.y) / SceneQuantization.scale.y),
+               Clamp01((center.z - SceneQuantization.origin.z) / SceneQuantization.scale.z),
+            };
+
+            float encodedRadius = std::sqrt(Clamp01(radius / SceneQuantization.scaleMax));
+
+            sphereWords.push_back(PackUnorm2x16(normalized.x, normalized.y));
+            sphereWords.push_back(PackUnorm2x16(normalized.z, encodedRadius));
+
+            float materialRoll = RandomUnorm(rng);
+            u32 materialIndex = 0;
+            if (materialRoll < 0.7f)
+            {
+               materialIndex = randomIndex(DiffuseIndices, rng);
+            }
+            else if (materialRoll < 0.95f)
+            {
+               materialIndex = randomIndex(MetallicIndices, rng);
+            }
+            else
+            {
+               materialIndex = randomIndex(EmissiveIndices, rng);
+            }
+            materialIds.push_back(materialIndex);
+
+            u32 cellIndex = flattenCell(cellX, cellZ);
+            cellNext[newIndex] = cellHeads[cellIndex];
+            cellHeads[cellIndex] = newIndex;
+
             placed = true;
             break;
          }
@@ -1927,37 +2059,7 @@ void BuildSpheres()
       if (!placed)
       {
          LogWarn("[scene] Failed to place sphere %u without overlaps (skipping)", index);
-         continue;
       }
-
-      Vec3 normalized = {
-         Clamp01((center.x - SceneQuantization.origin.x) / SceneQuantization.scale.x),
-         Clamp01((center.y - SceneQuantization.origin.y) / SceneQuantization.scale.y),
-         Clamp01((center.z - SceneQuantization.origin.z) / SceneQuantization.scale.z),
-      };
-
-      float encodedRadius = std::sqrt(Clamp01(radius / SceneQuantization.scaleMax));
-
-      sphereWords.push_back(PackUnorm2x16(normalized.x, normalized.y));
-      sphereWords.push_back(PackUnorm2x16(normalized.z, encodedRadius));
-
-      float materialRoll = RandomUnorm(rng);
-      u32 materialIndex = 0;
-      if (materialRoll < 0.7f)
-      {
-         materialIndex = randomIndex(DiffuseIndices, rng);
-      }
-      else if (materialRoll < 0.95f)
-      {
-         materialIndex = randomIndex(MetallicIndices, rng);
-      }
-      else
-      {
-         materialIndex = randomIndex(EmissiveIndices, rng);
-      }
-      materialIds.push_back(materialIndex);
-      centers.push_back(center);
-      radii.push_back(radius);
    }
 
    if (sphereWords.empty())
