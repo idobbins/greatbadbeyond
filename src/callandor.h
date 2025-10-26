@@ -109,7 +109,7 @@ struct PathParams
 {
     Vec2 resolution;
     float time;
-    u32 frameIndex;
+    u32 sampleSeed;
     CameraParams camera;
     SphereQuantConfig quant;
     u32 sphereCount;

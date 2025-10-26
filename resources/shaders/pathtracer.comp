@@ -14,7 +14,7 @@ layout(std430, set = 0, binding = 7) readonly buffer GridIndices { uint cellIndi
 layout(push_constant) uniform PathParams {
     vec2 resolution;
     float time;
-    uint frameIndex;
+    uint sampleSeed;
 
     vec3 camPos;
     float camFov;
@@ -44,6 +44,8 @@ const vec3 PlaneNormal = vec3(0.0, 1.0, 0.0);
 const float PlaneD = 0.0;
 const int HIT_NONE = -1;
 const int HIT_PLANE = -2;
+const int MaxBounces = 3;
+const int SamplesPerPixel = 1;
 
 uint hash32(uint x)
 {
@@ -359,82 +361,77 @@ void main()
         return;
     }
 
-    uint seed = (pix.x * 1973u) ^ (pix.y * 9277u) ^ (pc.frameIndex * 26699u) ^ 0x68bc21ebu;
-    Ray ray = makePrimary(pix, seed);
+    uint timeSeed = floatBitsToUint(pc.time);
+    uint baseSeed = (pix.x * 1973u) ^ (pix.y * 9277u) ^ (pc.sampleSeed * 26699u) ^ (timeSeed * 911u) ^ 0x68bc21ebu;
+    vec3 accumulated = vec3(0.0);
 
-    vec3 throughput = vec3(1.0);
-    vec3 radiance = vec3(0.0);
-
-    for (int bounce = 0; bounce < 3; ++bounce)
+    for (int sampleIndex = 0; sampleIndex < SamplesPerPixel; ++sampleIndex)
     {
-        HitInfo hit;
-        bool anyHit = traceScene(ray, hit);
-        if (!anyHit)
+        uint seed = hash32(baseSeed ^ uint(sampleIndex));
+        Ray ray = makePrimary(pix, seed);
+
+        vec3 throughput = vec3(1.0);
+        vec3 radiance = vec3(0.0);
+
+        for (int bounce = 0; bounce < MaxBounces; ++bounce)
         {
-            radiance += throughput * sky(ray.d);
-            break;
-        }
-
-        vec3 hitPoint = ray.o + ray.d * hit.t;
-        vec3 albedo = vec3(0.8);
-        float rough = 1.0;
-        vec3 emitCol = vec3(0.0);
-        float metallic = 0.0;
-
-        if (hit.primitive == HIT_PLANE)
-        {
-            albedo = vec3(0.8);
-            rough = 1.0;
-        }
-        else if (hit.primitive >= 0)
-        {
-            uint midx = mid[hit.primitive];
-            vec4 alb = albRgh[midx];
-            vec4 emi = emit[midx];
-            albedo = alb.xyz;
-            rough = alb.w;
-            emitCol = emi.xyz;
-            metallic = clamp(emi.w, 0.0, 1.0);
-        }
-
-        radiance += throughput * emitCol;
-
-        float u1 = rnd(seed);
-        float u2 = rnd(seed);
-        float r = sqrt(u1);
-        float theta = 6.2831853 * u2;
-        vec3 tangent = normalize(abs(hit.normal.x) > 0.5 ? cross(hit.normal, vec3(0, 1, 0)) : cross(hit.normal, vec3(1, 0, 0)));
-        vec3 bitangent = cross(hit.normal, tangent);
-        vec3 hemi = normalize(
-            tangent * (r * cos(theta)) +
-            bitangent * (r * sin(theta)) +
-            hit.normal * sqrt(max(0.0, 1.0 - u1)));
-
-        vec3 diffuseDir = hemi;
-        vec3 reflectDir = normalize(reflect(ray.d, hit.normal));
-        vec3 specDir = normalize(mix(reflectDir, diffuseDir, clamp(rough, 0.0, 1.0)));
-        vec3 newDir = normalize(mix(diffuseDir, specDir, metallic));
-
-        ray.o = hitPoint + hit.normal * 0.001;
-        ray.d = newDir;
-        vec3 energyColor = mix(albedo, vec3(1.0), metallic);
-        throughput *= energyColor;
-
-        if (bounce > 3)
-        {
-            float p = clamp(max(max(throughput.r, throughput.g), throughput.b), 0.05, 0.98);
-            if (rnd(seed) > p)
+            HitInfo hit;
+            bool anyHit = traceScene(ray, hit);
+            if (!anyHit)
             {
+                radiance += throughput * sky(ray.d);
                 break;
             }
-            throughput /= p;
+
+            vec3 hitPoint = ray.o + ray.d * hit.t;
+            vec3 albedo = vec3(0.8);
+            float rough = 1.0;
+            vec3 emitCol = vec3(0.0);
+            float metallic = 0.0;
+
+            if (hit.primitive == HIT_PLANE)
+            {
+                albedo = vec3(0.8);
+                rough = 1.0;
+            }
+            else if (hit.primitive >= 0)
+            {
+                uint midx = mid[hit.primitive];
+                vec4 alb = albRgh[midx];
+                vec4 emi = emit[midx];
+                albedo = alb.xyz;
+                rough = alb.w;
+                emitCol = emi.xyz;
+                metallic = clamp(emi.w, 0.0, 1.0);
+            }
+
+            radiance += throughput * emitCol;
+
+            float u1 = rnd(seed);
+            float u2 = rnd(seed);
+            float r = sqrt(u1);
+            float theta = 6.2831853 * u2;
+            vec3 tangent = normalize(abs(hit.normal.x) > 0.5 ? cross(hit.normal, vec3(0, 1, 0)) : cross(hit.normal, vec3(1, 0, 0)));
+            vec3 bitangent = cross(hit.normal, tangent);
+            vec3 hemi = normalize(
+                tangent * (r * cos(theta)) +
+                bitangent * (r * sin(theta)) +
+                hit.normal * sqrt(max(0.0, 1.0 - u1)));
+
+            vec3 diffuseDir = hemi;
+            vec3 reflectDir = normalize(reflect(ray.d, hit.normal));
+            vec3 specDir = normalize(mix(reflectDir, diffuseDir, clamp(rough, 0.0, 1.0)));
+            vec3 newDir = normalize(mix(diffuseDir, specDir, metallic));
+
+            ray.o = hitPoint + hit.normal * 0.001;
+            ray.d = newDir;
+            vec3 energyColor = mix(albedo, vec3(1.0), metallic);
+            throughput *= energyColor;
         }
+
+        accumulated += radiance;
     }
 
-    vec4 prev = (pc.frameIndex == 0u)
-        ? vec4(0.0)
-        : imageLoad(accumImg, ivec2(pix));
-    float n = float(pc.frameIndex);
-    vec3 avg = (prev.xyz * n + radiance) / (n + 1.0);
+    vec3 avg = accumulated / float(SamplesPerPixel);
     imageStore(accumImg, ivec2(pix), vec4(avg, 1.0));
 }

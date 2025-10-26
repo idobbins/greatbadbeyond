@@ -98,7 +98,7 @@ static struct VulkanData
    u32 gridResolutionX;
    u32 gridResolutionY;
    u32 gridResolutionZ;
-   u32 accumFrame;
+   u32 frameSeed;
 
    bool instanceReady;
    bool validationLayersEnabled;
@@ -323,7 +323,7 @@ void DestroyDebugMessenger()
 
 void ResetCameraAccum()
 {
-   Vulkan.accumFrame = 0;
+   Vulkan.frameSeed = 0;
 }
 
 void CreateVulkan()
@@ -2829,7 +2829,7 @@ auto RecordCommandBuffer(u32 frameIndex, u32 imageIndex, const GradientParams &g
    PathParams params = {};
    params.resolution = {safeWidth, safeHeight};
    params.time = gradient.time;
-   params.frameIndex = Vulkan.accumFrame;
+   params.sampleSeed = Vulkan.frameSeed;
    params.camera = GetCameraParams();
    params.quant = GetSphereQuantConfig();
    params.sphereCount = Vulkan.sphereCount;
@@ -3069,9 +3069,9 @@ auto SubmitFrame(u32 frameIndex, u32 imageIndex) -> VkResult
 
    Assert(presentResult == VK_SUCCESS, "Failed to present swapchain image");
 
-   if (Vulkan.accumFrame < (std::numeric_limits<u32>::max() - 1u))
+   if (Vulkan.frameSeed < (std::numeric_limits<u32>::max() - 1u))
    {
-      Vulkan.accumFrame += 1u;
+      Vulkan.frameSeed += 1u;
    }
 
    Vulkan.currentFrame = (Vulkan.currentFrame + 1) % FrameOverlap;
