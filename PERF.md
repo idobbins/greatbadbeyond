@@ -25,6 +25,8 @@ Real-time ray tracing on modern consumer GPUs (NVIDIA RTX and AMD RDNA) demands 
 ## Uniform Grid Acceleration
 
 - Scene builds now voxelize every CPU-placed sphere into a fixed-resolution uniform grid that matches the quantized world bounds. Each cell carries an offset/count pair into a compact primitive index list stored in two new SSBOs so the GPU never walks data it does not need.
+- Grid resolution now clamps to the spawn occupancy hints derived from the placement footprint (X/Z) and sphere height envelope (Y), so voxel density tracks the sphere spawning configuration even if the finalized sphere count diverges from the request.
+- Target cell size is selected by minimizing an estimated ray-intersection cost function that models how many primitives a ray is expected to test at the current density, ensuring the chosen resolution reflects the spawn-time distribution instead of an arbitrary cube-root guess.
 - `PathParams` push constants include the grid resolution, cell/index counts, and the compute shader walks the grid with an Amanatides & Woo style 3D DDA, clamping traversal by the closest hit seen so far (including the ground plane) to terminate as soon as a nearer primitive is found.
 - Traversal therefore touches only a handful of cache-coherent `cells[]`/`cellIndices[]` entries per ray instead of looping over all spheres, which dramatically reduces divergence and memory bandwidth on dense scenes while keeping the structure static and cheap to rebuild on the CPU.
 

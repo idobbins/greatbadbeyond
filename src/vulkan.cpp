@@ -2079,7 +2079,73 @@ void BuildSpheres()
    float targetCellSize = static_cast<float>(std::cbrt(static_cast<double>(gridVolume) / static_cast<double>(safeSphereCount)));
    targetCellSize = std::clamp(targetCellSize, MinCellSize, MaxCellSize);
 
-   const auto computeAxisResolution = [&](float axisLength) -> u32
+   const float averageRadius = 0.5f * (MinRadius + SceneQuantization.scaleMax);
+   const float averageDiameter = std::max((averageRadius * 2.0f) + PlacementSpacing, MinCellSize);
+   const float gridDiagonal = std::max(std::sqrt((gridScale.x * gridScale.x) + (gridScale.y * gridScale.y) + (gridScale.z * gridScale.z)), 1.0f);
+
+   const auto estimateRayTestCost = [&](float candidateSize) -> float
+   {
+      float cellSize = std::clamp(candidateSize, MinCellSize, MaxCellSize);
+      float axisCoverage = std::max(averageDiameter / cellSize, 1.0f);
+      float cellsPerSphere = axisCoverage * axisCoverage * axisCoverage;
+      float volumePerCell = std::max(cellSize * cellSize * cellSize, 1e-3f);
+      float gridCells = gridVolume / volumePerCell;
+      float avgRefsPerCell = (gridCells > 0.0f) ? ((static_cast<float>(placedSphereCount) * cellsPerSphere) / gridCells) : static_cast<float>(placedSphereCount);
+      float cellsVisited = gridDiagonal / cellSize;
+      return avgRefsPerCell * cellsVisited;
+   };
+
+   float bestCellSize = targetCellSize;
+   float bestCost = estimateRayTestCost(bestCellSize);
+   const auto evaluateCandidate = [&](float candidate)
+   {
+      float clamped = std::clamp(candidate, MinCellSize, MaxCellSize);
+      float cost = estimateRayTestCost(clamped);
+      if (cost < bestCost)
+      {
+         bestCost = cost;
+         bestCellSize = clamped;
+      }
+   };
+
+   float spawnCellX = SceneQuantization.scale.x / static_cast<float>(std::max(occupancyColumns, 1u));
+   float spawnCellZ = SceneQuantization.scale.z / static_cast<float>(std::max(occupancyRows, 1u));
+   evaluateCandidate(spawnCellX);
+   evaluateCandidate(spawnCellZ);
+   evaluateCandidate(averageDiameter);
+
+   constexpr u32 RayCostProbeCount = 16u;
+   for (u32 sample = 0; sample < RayCostProbeCount; ++sample)
+   {
+      float t = (RayCostProbeCount > 1u) ? (static_cast<float>(sample) / static_cast<float>(RayCostProbeCount - 1u)) : 0.0f;
+      float probe = MinCellSize + t * (MaxCellSize - MinCellSize);
+      evaluateCandidate(probe);
+   }
+
+   targetCellSize = bestCellSize;
+
+   const auto computeSpawnHint = [&](float axisLength, float cellLength) -> u32
+   {
+      if (axisLength <= 0.0f)
+      {
+         return 1u;
+      }
+      float denominator = std::max(cellLength, MinCellSize);
+      float cells = axisLength / denominator;
+      float needed = std::ceil(cells);
+      if (!std::isfinite(needed) || (needed < 1.0f))
+      {
+         needed = 1.0f;
+      }
+      return static_cast<u32>(needed);
+   };
+
+   const u32 spawnResolutionXHint = std::max(occupancyColumns, 1u);
+   const u32 spawnResolutionZHint = std::max(occupancyRows, 1u);
+   const float verticalSpawnCell = SceneQuantization.scaleMax + PlacementSpacing;
+   const u32 spawnResolutionYHint = computeSpawnHint(SceneQuantization.scale.y, verticalSpawnCell);
+
+   const auto computeAxisResolution = [&](float axisLength, u32 spawnHint) -> u32
    {
       if (axisLength <= 0.0f)
       {
@@ -2092,6 +2158,10 @@ void BuildSpheres()
          needed = 1.0f;
       }
       u32 resolution = static_cast<u32>(needed);
+      if ((spawnHint > 0u) && (spawnHint > resolution))
+      {
+         resolution = spawnHint;
+      }
       if (resolution > MaxCellsPerAxis)
       {
          resolution = MaxCellsPerAxis;
@@ -2099,9 +2169,9 @@ void BuildSpheres()
       return resolution;
    };
 
-   Vulkan.gridResolutionX = computeAxisResolution(SceneQuantization.scale.x);
-   Vulkan.gridResolutionY = computeAxisResolution(SceneQuantization.scale.y);
-   Vulkan.gridResolutionZ = computeAxisResolution(SceneQuantization.scale.z);
+   Vulkan.gridResolutionX = computeAxisResolution(SceneQuantization.scale.x, spawnResolutionXHint);
+   Vulkan.gridResolutionY = computeAxisResolution(SceneQuantization.scale.y, spawnResolutionYHint);
+   Vulkan.gridResolutionZ = computeAxisResolution(SceneQuantization.scale.z, spawnResolutionZHint);
 
    u64 gridCellCount64 =
       static_cast<u64>(Vulkan.gridResolutionX) *
