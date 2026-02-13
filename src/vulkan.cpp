@@ -35,7 +35,7 @@ static constexpr const char *ForwardVertexShaderName = "forward_opaque.vert.spv"
 static constexpr const char *ForwardFragmentShaderName = "forward_opaque.frag.spv";
 static constexpr u32 SceneGridWidth = 32;
 static constexpr u32 SceneGridDepth = 32;
-static constexpr float SceneGridSpacing = 2.0f;
+static constexpr float SceneGridSpacing = 1.15f;
 
 #ifndef VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME
 #define VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME "VK_KHR_portability_subset"
@@ -1359,31 +1359,39 @@ void CreateScene()
    Assert(!vertices.empty(), "Scene OBJ did not produce any vertices");
    Assert(!indices.empty(), "Scene OBJ did not produce any indices");
 
-   // Center the source cube around origin before creating the grid layout.
+   // Center only on XZ so layout is world-ground aligned.
    Vec3 minBounds = vertices[0].position;
    Vec3 maxBounds = vertices[0].position;
    for (const Vertex &vertex : vertices)
    {
       minBounds.x = std::min(minBounds.x, vertex.position.x);
-      minBounds.y = std::min(minBounds.y, vertex.position.y);
       minBounds.z = std::min(minBounds.z, vertex.position.z);
 
       maxBounds.x = std::max(maxBounds.x, vertex.position.x);
-      maxBounds.y = std::max(maxBounds.y, vertex.position.y);
       maxBounds.z = std::max(maxBounds.z, vertex.position.z);
    }
 
-   Vec3 center = {
+   Vec3 centerXZ = {
       (minBounds.x + maxBounds.x) * 0.5f,
-      (minBounds.y + maxBounds.y) * 0.5f,
+      0.0f,
       (minBounds.z + maxBounds.z) * 0.5f,
    };
 
    for (Vertex &vertex : vertices)
    {
-      vertex.position.x -= center.x;
-      vertex.position.y -= center.y;
-      vertex.position.z -= center.z;
+      vertex.position.x -= centerXZ.x;
+      vertex.position.z -= centerXZ.z;
+   }
+
+   // Put the cube base on the ground plane (y = 0) before grid expansion.
+   float minY = vertices[0].position.y;
+   for (const Vertex &vertex : vertices)
+   {
+      minY = std::min(minY, vertex.position.y);
+   }
+   for (Vertex &vertex : vertices)
+   {
+      vertex.position.y -= minY;
    }
 
    std::vector<Vertex> baseVertices = vertices;
@@ -1405,6 +1413,7 @@ void CreateScene()
       for (u32 x = 0; x < SceneGridWidth; ++x)
       {
          float worldX = (static_cast<float>(x) - xOffsetStart) * SceneGridSpacing;
+         float worldY = 0.0f;
          float worldZ = (static_cast<float>(z) - zOffsetStart) * SceneGridSpacing;
 
          u32 vertexOffset = static_cast<u32>(gridVertices.size());
@@ -1412,6 +1421,7 @@ void CreateScene()
          {
             Vertex expanded = source;
             expanded.position.x += worldX;
+            expanded.position.y += worldY;
             expanded.position.z += worldZ;
             gridVertices.push_back(expanded);
          }
