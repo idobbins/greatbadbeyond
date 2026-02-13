@@ -5,6 +5,7 @@
 
 #include <vulkan/vulkan.h>
 #include <GLFW/glfw3.h>
+#include <zlib.h>
 
 #include <array>
 #include <algorithm>
@@ -84,8 +85,13 @@ static struct VulkanData
    VkDeviceMemory sceneVertexMemory;
    VkBuffer sceneIndexBuffer;
    VkDeviceMemory sceneIndexMemory;
+   VkBuffer uploadStagingBuffer;
+   VkDeviceMemory uploadStagingMemory;
+   void *uploadStagingMapped;
+   VkDeviceSize uploadStagingCapacity;
    u32 sceneIndexCount;
    u32 frameSeed;
+   vector<byte> decodeScratch;
 
    bool instanceReady;
    bool validationLayersEnabled;
@@ -371,7 +377,12 @@ void DestroyInstance()
    Vulkan.sceneVertexMemory = VK_NULL_HANDLE;
    Vulkan.sceneIndexBuffer = VK_NULL_HANDLE;
    Vulkan.sceneIndexMemory = VK_NULL_HANDLE;
+   Vulkan.uploadStagingBuffer = VK_NULL_HANDLE;
+   Vulkan.uploadStagingMemory = VK_NULL_HANDLE;
+   Vulkan.uploadStagingMapped = nullptr;
+   Vulkan.uploadStagingCapacity = 0;
    Vulkan.sceneIndexCount = 0;
+   Vulkan.decodeScratch.clear();
    Vulkan.colorResourcesReady = false;
    Vulkan.depthResourcesReady = false;
    Vulkan.sceneReady = false;
@@ -1283,11 +1294,35 @@ void CreateScene()
    std::span<const std::byte> manifestBlob = GetManifestBlobBytes();
    Assert(!manifestBlob.empty(), "Manifest pack is empty");
 
-   manifest::ResolvedAsset sceneAsset = manifest::kenney::handles::n3d_assets::prototype_kit::models_obj_format_shape_cube_obj.Resolve(manifestBlob);
+   manifest::ResolvedAsset sceneAsset = manifest::kenney::handles::n3d_assets::prototype_kit::models_obj_format_shape_triangular_prism_obj.Resolve(manifestBlob);
    Assert(sceneAsset.valid, "Scene asset handle failed to resolve");
    Assert(sceneAsset.format == manifest::AssetFormat::MESH_PNUV_F32_U32, "Scene asset is not a packed mesh payload");
 
    std::span<const std::byte> payload = sceneAsset.payload;
+   if (sceneAsset.compression == manifest::CompressionCodec::DEFLATE_ZLIB)
+   {
+      Assert(sceneAsset.decodedSize > 0, "Compressed scene mesh has zero decoded size");
+      Assert(sceneAsset.decodedSize <= static_cast<u64>(numeric_limits<usize>::max()), "Decoded scene mesh exceeds addressable memory");
+      Assert(sceneAsset.payload.size() <= static_cast<usize>(numeric_limits<uLong>::max()), "Compressed payload size exceeds zlib input limits");
+
+      usize decodedSize = static_cast<usize>(sceneAsset.decodedSize);
+      Vulkan.decodeScratch.resize(decodedSize);
+      uLongf inflateSize = static_cast<uLongf>(decodedSize);
+      int inflateResult = uncompress(
+         reinterpret_cast<Bytef *>(Vulkan.decodeScratch.data()),
+         &inflateSize,
+         reinterpret_cast<const Bytef *>(sceneAsset.payload.data()),
+         static_cast<uLong>(sceneAsset.payload.size()));
+      Assert(inflateResult == Z_OK, "Failed to decompress scene mesh payload");
+      Assert(inflateSize == decodedSize, "Scene mesh decompressed size mismatch");
+      payload = {Vulkan.decodeScratch.data(), decodedSize};
+   }
+   else
+   {
+      Assert(sceneAsset.compression == manifest::CompressionCodec::NONE, "Unsupported scene asset compression codec");
+      Vulkan.decodeScratch.clear();
+   }
+
    usize vertexCount = static_cast<usize>(sceneAsset.meta0);
    usize indexCount = static_cast<usize>(sceneAsset.meta1);
    usize vertexStride = static_cast<usize>(sceneAsset.meta2);
@@ -1388,12 +1423,12 @@ void CreateScene()
    Assert(!vertices.empty(), "Grid vertices cannot be empty");
    Assert(!indices.empty(), "Grid indices cannot be empty");
 
-   const auto createBufferWithData = [&](VkBufferUsageFlags usage, const void *data, VkDeviceSize size, VkBuffer &buffer, VkDeviceMemory &memory)
+   const auto createDeviceLocalBuffer = [&](VkBufferUsageFlags usage, VkDeviceSize size, VkBuffer &buffer, VkDeviceMemory &memory)
    {
       VkBufferCreateInfo bufferInfo = {
          .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
          .size = size,
-         .usage = usage,
+         .usage = usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
          .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
       };
 
@@ -1406,9 +1441,7 @@ void CreateScene()
       VkMemoryAllocateInfo allocInfo = {
          .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
          .allocationSize = requirements.size,
-         .memoryTypeIndex = FindMemoryType(
-            requirements.memoryTypeBits,
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT),
+         .memoryTypeIndex = FindMemoryType(requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT),
       };
 
       VkResult allocResult = vkAllocateMemory(Vulkan.device, &allocInfo, nullptr, &memory);
@@ -1416,18 +1449,146 @@ void CreateScene()
 
       VkResult bindResult = vkBindBufferMemory(Vulkan.device, buffer, memory, 0);
       Assert(bindResult == VK_SUCCESS, "Failed to bind scene buffer memory");
+   };
+
+   const auto createOrResizeStagingBuffer = [&](VkDeviceSize requiredSize)
+   {
+      Assert(requiredSize > 0, "Staging buffer size must be non-zero");
+
+      if ((Vulkan.uploadStagingBuffer != VK_NULL_HANDLE) && (Vulkan.uploadStagingCapacity >= requiredSize))
+      {
+         return;
+      }
+
+      if (Vulkan.uploadStagingMapped != nullptr)
+      {
+         vkUnmapMemory(Vulkan.device, Vulkan.uploadStagingMemory);
+         Vulkan.uploadStagingMapped = nullptr;
+      }
+      if (Vulkan.uploadStagingBuffer != VK_NULL_HANDLE)
+      {
+         vkDestroyBuffer(Vulkan.device, Vulkan.uploadStagingBuffer, nullptr);
+         Vulkan.uploadStagingBuffer = VK_NULL_HANDLE;
+      }
+      if (Vulkan.uploadStagingMemory != VK_NULL_HANDLE)
+      {
+         vkFreeMemory(Vulkan.device, Vulkan.uploadStagingMemory, nullptr);
+         Vulkan.uploadStagingMemory = VK_NULL_HANDLE;
+      }
+
+      VkBufferCreateInfo bufferInfo = {
+         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+         .size = requiredSize,
+         .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+      };
+
+      VkResult createResult = vkCreateBuffer(Vulkan.device, &bufferInfo, nullptr, &Vulkan.uploadStagingBuffer);
+      Assert(createResult == VK_SUCCESS, "Failed to create staging buffer");
+
+      VkMemoryRequirements requirements = {};
+      vkGetBufferMemoryRequirements(Vulkan.device, Vulkan.uploadStagingBuffer, &requirements);
+
+      VkMemoryAllocateInfo allocInfo = {
+         .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+         .allocationSize = requirements.size,
+         .memoryTypeIndex = FindMemoryType(
+            requirements.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT),
+      };
+
+      VkResult allocResult = vkAllocateMemory(Vulkan.device, &allocInfo, nullptr, &Vulkan.uploadStagingMemory);
+      Assert(allocResult == VK_SUCCESS, "Failed to allocate staging buffer memory");
+
+      VkResult bindResult = vkBindBufferMemory(Vulkan.device, Vulkan.uploadStagingBuffer, Vulkan.uploadStagingMemory, 0);
+      Assert(bindResult == VK_SUCCESS, "Failed to bind staging buffer memory");
 
       void *mapped = nullptr;
-      VkResult mapResult = vkMapMemory(Vulkan.device, memory, 0, size, 0, &mapped);
-      Assert(mapResult == VK_SUCCESS, "Failed to map scene buffer memory");
-      std::memcpy(mapped, data, static_cast<size_t>(size));
-      vkUnmapMemory(Vulkan.device, memory);
+      VkResult mapResult = vkMapMemory(Vulkan.device, Vulkan.uploadStagingMemory, 0, requiredSize, 0, &mapped);
+      Assert(mapResult == VK_SUCCESS, "Failed to map staging buffer memory");
+
+      Vulkan.uploadStagingMapped = mapped;
+      Vulkan.uploadStagingCapacity = requiredSize;
    };
 
    VkDeviceSize vertexBytes = static_cast<VkDeviceSize>(vertices.size() * sizeof(Vertex));
    VkDeviceSize indexBytes = static_cast<VkDeviceSize>(indices.size() * sizeof(u32));
-   createBufferWithData(VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, vertices.data(), vertexBytes, Vulkan.sceneVertexBuffer, Vulkan.sceneVertexMemory);
-   createBufferWithData(VK_BUFFER_USAGE_INDEX_BUFFER_BIT, indices.data(), indexBytes, Vulkan.sceneIndexBuffer, Vulkan.sceneIndexMemory);
+   VkDeviceSize totalUploadBytes = vertexBytes + indexBytes;
+
+   createOrResizeStagingBuffer(totalUploadBytes);
+   Assert(Vulkan.uploadStagingMapped != nullptr, "Staging buffer is not mapped");
+
+   byte *stagingBytes = reinterpret_cast<byte *>(Vulkan.uploadStagingMapped);
+   std::memcpy(stagingBytes, vertices.data(), static_cast<size_t>(vertexBytes));
+   std::memcpy(stagingBytes + static_cast<usize>(vertexBytes), indices.data(), static_cast<size_t>(indexBytes));
+
+   createDeviceLocalBuffer(VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, vertexBytes, Vulkan.sceneVertexBuffer, Vulkan.sceneVertexMemory);
+   createDeviceLocalBuffer(VK_BUFFER_USAGE_INDEX_BUFFER_BIT, indexBytes, Vulkan.sceneIndexBuffer, Vulkan.sceneIndexMemory);
+
+   VkCommandPool uploadPool = VK_NULL_HANDLE;
+   VkCommandBuffer uploadCmd = VK_NULL_HANDLE;
+   VkFence uploadFence = VK_NULL_HANDLE;
+
+   VkCommandPoolCreateInfo poolInfo = {
+      .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+      .flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
+      .queueFamilyIndex = Vulkan.graphicsQueueFamilyIndex,
+   };
+   VkResult poolResult = vkCreateCommandPool(Vulkan.device, &poolInfo, nullptr, &uploadPool);
+   Assert(poolResult == VK_SUCCESS, "Failed to create upload command pool");
+
+   VkCommandBufferAllocateInfo cmdAlloc = {
+      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+      .commandPool = uploadPool,
+      .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+      .commandBufferCount = 1,
+   };
+   VkResult cmdAllocResult = vkAllocateCommandBuffers(Vulkan.device, &cmdAlloc, &uploadCmd);
+   Assert(cmdAllocResult == VK_SUCCESS, "Failed to allocate upload command buffer");
+
+   VkCommandBufferBeginInfo cmdBegin = {
+      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+      .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+   };
+   VkResult cmdBeginResult = vkBeginCommandBuffer(uploadCmd, &cmdBegin);
+   Assert(cmdBeginResult == VK_SUCCESS, "Failed to begin upload command buffer");
+
+   VkBufferCopy vertexCopy = {
+      .srcOffset = 0,
+      .dstOffset = 0,
+      .size = vertexBytes,
+   };
+   vkCmdCopyBuffer(uploadCmd, Vulkan.uploadStagingBuffer, Vulkan.sceneVertexBuffer, 1, &vertexCopy);
+
+   VkBufferCopy indexCopy = {
+      .srcOffset = vertexBytes,
+      .dstOffset = 0,
+      .size = indexBytes,
+   };
+   vkCmdCopyBuffer(uploadCmd, Vulkan.uploadStagingBuffer, Vulkan.sceneIndexBuffer, 1, &indexCopy);
+
+   VkResult cmdEndResult = vkEndCommandBuffer(uploadCmd);
+   Assert(cmdEndResult == VK_SUCCESS, "Failed to end upload command buffer");
+
+   VkFenceCreateInfo fenceInfo = {
+      .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+   };
+   VkResult fenceResult = vkCreateFence(Vulkan.device, &fenceInfo, nullptr, &uploadFence);
+   Assert(fenceResult == VK_SUCCESS, "Failed to create upload fence");
+
+   VkSubmitInfo submitInfo = {
+      .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+      .commandBufferCount = 1,
+      .pCommandBuffers = &uploadCmd,
+   };
+   VkResult submitResult = vkQueueSubmit(Vulkan.graphicsQueue, 1, &submitInfo, uploadFence);
+   Assert(submitResult == VK_SUCCESS, "Failed to submit upload command buffer");
+
+   VkResult waitResult = vkWaitForFences(Vulkan.device, 1, &uploadFence, VK_TRUE, UINT64_MAX);
+   Assert(waitResult == VK_SUCCESS, "Failed to wait for upload fence");
+
+   vkDestroyFence(Vulkan.device, uploadFence, nullptr);
+   vkDestroyCommandPool(Vulkan.device, uploadPool, nullptr);
 
    Vulkan.sceneIndexCount = static_cast<u32>(indices.size());
    Vulkan.sceneReady = true;
@@ -1446,7 +1607,12 @@ void DestroyScene()
       Vulkan.sceneVertexMemory = VK_NULL_HANDLE;
       Vulkan.sceneIndexBuffer = VK_NULL_HANDLE;
       Vulkan.sceneIndexMemory = VK_NULL_HANDLE;
+      Vulkan.uploadStagingBuffer = VK_NULL_HANDLE;
+      Vulkan.uploadStagingMemory = VK_NULL_HANDLE;
+      Vulkan.uploadStagingMapped = nullptr;
+      Vulkan.uploadStagingCapacity = 0;
       Vulkan.sceneIndexCount = 0;
+      Vulkan.decodeScratch.clear();
       Vulkan.sceneReady = false;
       return;
    }
@@ -1472,6 +1638,24 @@ void DestroyScene()
       vkFreeMemory(Vulkan.device, Vulkan.sceneIndexMemory, nullptr);
       Vulkan.sceneIndexMemory = VK_NULL_HANDLE;
    }
+
+   if (Vulkan.uploadStagingMapped != nullptr)
+   {
+      vkUnmapMemory(Vulkan.device, Vulkan.uploadStagingMemory);
+      Vulkan.uploadStagingMapped = nullptr;
+   }
+   if (Vulkan.uploadStagingBuffer != VK_NULL_HANDLE)
+   {
+      vkDestroyBuffer(Vulkan.device, Vulkan.uploadStagingBuffer, nullptr);
+      Vulkan.uploadStagingBuffer = VK_NULL_HANDLE;
+   }
+   if (Vulkan.uploadStagingMemory != VK_NULL_HANDLE)
+   {
+      vkFreeMemory(Vulkan.device, Vulkan.uploadStagingMemory, nullptr);
+      Vulkan.uploadStagingMemory = VK_NULL_HANDLE;
+   }
+   Vulkan.uploadStagingCapacity = 0;
+   Vulkan.decodeScratch.clear();
 
    Vulkan.sceneIndexCount = 0;
    Vulkan.sceneReady = false;

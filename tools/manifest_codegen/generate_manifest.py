@@ -7,7 +7,10 @@ import csv
 import hashlib
 import os
 import struct
+import sys
 import tempfile
+import time
+import zlib
 from array import array
 from collections import defaultdict
 from dataclasses import dataclass
@@ -19,7 +22,7 @@ from PIL import Image
 
 
 PACK_MAGIC = 0x4B504247  # "GBPK"
-PACK_VERSION = 1
+PACK_VERSION = 2
 INVALID_INDEX = 0xFFFFFFFF
 
 FLAG_ALIAS = 1 << 0
@@ -37,8 +40,11 @@ FORMAT_MESH_PNUV_F32_U32 = 1
 FORMAT_IMAGE_RGBA8_MIPS = 2
 FORMAT_AUDIO_PCM16_INTERLEAVED = 3
 
+CODEC_NONE = 0
+CODEC_DEFLATE_ZLIB = 1
+
 HEADER_STRUCT = struct.Struct("<IIIIIQQQQQQ")
-RECORD_STRUCT = struct.Struct("<" + ("I" * 20) + ("Q" * 2))
+RECORD_STRUCT = struct.Struct("<" + ("I" * 21) + ("Q" * 3))
 
 
 @dataclass(frozen=True)
@@ -73,8 +79,10 @@ class BuildRecord:
     meta1: int = 0
     meta2: int = 0
     meta3: int = 0
+    compression_codec: int = CODEC_NONE
     payload_offset: int = 0
     payload_size: int = 0
+    decoded_size: int = 0
 
 
 class StringTableBuilder:
@@ -97,6 +105,53 @@ class StringTableBuilder:
     @property
     def bytes(self) -> bytes:
         return bytes(self._bytes)
+
+
+class ProgressBar:
+    def __init__(self, label: str, total: int) -> None:
+        self.label = label
+        self.total = max(total, 1)
+        self.current = 0
+        self.is_tty = sys.stderr.isatty()
+        self.start_time = time.monotonic()
+        self.last_emit_time = 0.0
+        self.next_non_tty_ratio = 0.0
+
+    def _format_line(self) -> str:
+        ratio = min(max(self.current / self.total, 0.0), 1.0)
+        elapsed = time.monotonic() - self.start_time
+        if self.is_tty:
+            width = 34
+            filled = int(width * ratio)
+            bar = ("#" * filled) + ("-" * (width - filled))
+            return f"[{self.label}] [{bar}] {self.current}/{self.total} {ratio*100:5.1f}% {elapsed:6.1f}s"
+        return f"[{self.label}] {self.current}/{self.total} ({ratio*100:5.1f}%) {elapsed:6.1f}s"
+
+    def update(self, current: int) -> None:
+        self.current = min(max(current, 0), self.total)
+        now = time.monotonic()
+
+        if self.is_tty:
+            if (self.current < self.total) and ((now - self.last_emit_time) < 0.08):
+                return
+            self.last_emit_time = now
+            sys.stderr.write("\r" + self._format_line())
+            if self.current >= self.total:
+                sys.stderr.write("\n")
+            sys.stderr.flush()
+            return
+
+        ratio = self.current / self.total
+        if (self.current < self.total) and (ratio < self.next_non_tty_ratio):
+            return
+
+        self.next_non_tty_ratio = min(1.0, ratio + 0.05)
+        sys.stderr.write(self._format_line() + "\n")
+        sys.stderr.flush()
+
+    def finish(self) -> None:
+        if self.current < self.total:
+            self.update(self.total)
 
 
 def sanitize_identifier(value: str) -> str:
@@ -393,6 +448,27 @@ def build_native_payload(row: AssetRow, source_path: Path) -> tuple[int, int, in
     return fallback_kind, FORMAT_RAW_BYTES, 0, 0, 0, 0, raw, 0
 
 
+def should_attempt_compression(fmt_enum: int) -> bool:
+    if fmt_enum == FORMAT_MESH_PNUV_F32_U32:
+        return False
+    return True
+
+
+def maybe_compress_payload(fmt_enum: int, payload: bytes) -> tuple[int, bytes]:
+    if not should_attempt_compression(fmt_enum):
+        return CODEC_NONE, payload
+
+    if len(payload) < 256:
+        return CODEC_NONE, payload
+
+    compressed = zlib.compress(payload, level=6)
+    minimum_savings = max(64, len(payload) // 100)
+    if len(compressed) + minimum_savings < len(payload):
+        return CODEC_DEFLATE_ZLIB, compressed
+
+    return CODEC_NONE, payload
+
+
 def generate_header(rows: list[AssetRow], out_header: Path, pack_size: int) -> None:
     out_header.parent.mkdir(parents=True, exist_ok=True)
 
@@ -423,7 +499,7 @@ def generate_header(rows: list[AssetRow], out_header: Path, pack_size: int) -> N
         f.write("namespace manifest\n")
         f.write("{\n")
         f.write("inline constexpr std::uint32_t kPackMagic = 0x4B504247u;\n")
-        f.write("inline constexpr std::uint32_t kPackVersion = 1u;\n")
+        f.write(f"inline constexpr std::uint32_t kPackVersion = {PACK_VERSION}u;\n")
         f.write("inline constexpr std::uint32_t kInvalidIndex = 0xFFFFFFFFu;\n\n")
 
         f.write("enum class AssetKind : std::uint32_t\n")
@@ -442,6 +518,12 @@ def generate_header(rows: list[AssetRow], out_header: Path, pack_size: int) -> N
         f.write("    MESH_PNUV_F32_U32 = 1,\n")
         f.write("    IMAGE_RGBA8_MIPS = 2,\n")
         f.write("    AUDIO_PCM16_INTERLEAVED = 3,\n")
+        f.write("};\n\n")
+
+        f.write("enum class CompressionCodec : std::uint32_t\n")
+        f.write("{\n")
+        f.write("    NONE = 0,\n")
+        f.write("    DEFLATE_ZLIB = 1,\n")
         f.write("};\n\n")
 
         f.write("enum AssetFlags : std::uint32_t\n")
@@ -488,8 +570,10 @@ def generate_header(rows: list[AssetRow], out_header: Path, pack_size: int) -> N
         f.write("    std::uint32_t meta1;\n")
         f.write("    std::uint32_t meta2;\n")
         f.write("    std::uint32_t meta3;\n")
+        f.write("    std::uint32_t compression;\n")
         f.write("    std::uint64_t payloadOffset;\n")
         f.write("    std::uint64_t payloadSize;\n")
+        f.write("    std::uint64_t decodedSize;\n")
         f.write("};\n")
         f.write("#pragma pack(pop)\n\n")
 
@@ -511,6 +595,8 @@ def generate_header(rows: list[AssetRow], out_header: Path, pack_size: int) -> N
         f.write("    std::uint32_t meta1;\n")
         f.write("    std::uint32_t meta2;\n")
         f.write("    std::uint32_t meta3;\n")
+        f.write("    CompressionCodec compression;\n")
+        f.write("    std::uint64_t decodedSize;\n")
         f.write("    std::span<const std::byte> payload;\n")
         f.write("};\n\n")
 
@@ -615,6 +701,8 @@ def generate_header(rows: list[AssetRow], out_header: Path, pack_size: int) -> N
         f.write("    result.meta1 = record.meta1;\n")
         f.write("    result.meta2 = record.meta2;\n")
         f.write("    result.meta3 = record.meta3;\n")
+        f.write("    result.compression = static_cast<CompressionCodec>(record.compression);\n")
+        f.write("    result.decodedSize = record.decodedSize;\n")
         f.write("    result.payload = TryResolvePayload(pack, *header, record);\n")
         f.write("    result.valid = !result.payload.empty();\n")
         f.write("    return result;\n")
@@ -663,7 +751,8 @@ def build_pack(rows: list[AssetRow], source_root: Path, blob_path: Path) -> tupl
 
     try:
         payload_offset = 0
-        dedup: dict[tuple[int, bytes, int, int, int, int], tuple[int, int, int]] = {}
+        dedup: dict[tuple[int, bytes, int, int, int, int], tuple[int, int, int, int, int]] = {}
+        row_progress = ProgressBar("pack:records", len(rows))
 
         with payload_tmp_path.open("wb") as payload_out:
             for idx, row in enumerate(rows):
@@ -703,13 +792,18 @@ def build_pack(rows: list[AssetRow], source_root: Path, blob_path: Path) -> tupl
                 dedup_key = (fmt_enum, digest, meta0, meta1, meta2, meta3)
 
                 if dedup_key in dedup:
-                    canonical_index, canonical_offset, canonical_size = dedup[dedup_key]
+                    canonical_index, canonical_offset, canonical_size, canonical_codec, canonical_decoded_size = dedup[dedup_key]
                     record.flags |= FLAG_ALIAS
                     record.alias_index = canonical_index
                     record.payload_offset = canonical_offset
                     record.payload_size = canonical_size
+                    record.compression_codec = canonical_codec
+                    record.decoded_size = canonical_decoded_size
                     records.append(record)
                     continue
+
+                compression_codec, stored_payload = maybe_compress_payload(fmt_enum, payload)
+                decoded_size = len(payload)
 
                 record.kind_enum = kind_enum
                 record.format_enum = fmt_enum
@@ -717,13 +811,19 @@ def build_pack(rows: list[AssetRow], source_root: Path, blob_path: Path) -> tupl
                 record.meta1 = meta1
                 record.meta2 = meta2
                 record.meta3 = meta3
+                record.compression_codec = compression_codec
                 record.payload_offset = payload_offset
-                record.payload_size = len(payload)
-                payload_out.write(payload)
+                record.payload_size = len(stored_payload)
+                record.decoded_size = decoded_size
+                payload_out.write(stored_payload)
 
-                dedup[dedup_key] = (idx, payload_offset, len(payload))
-                payload_offset += len(payload)
+                dedup[dedup_key] = (idx, payload_offset, len(stored_payload), compression_codec, decoded_size)
+                payload_offset += len(stored_payload)
                 records.append(record)
+                if ((idx + 1) % 128) == 0 or (idx + 1) == len(rows):
+                    row_progress.update(idx + 1)
+
+        row_progress.finish()
 
         def resolve_alias_root(index: int) -> int:
             visited: set[int] = set()
@@ -738,12 +838,17 @@ def build_pack(rows: list[AssetRow], source_root: Path, blob_path: Path) -> tupl
                 current = next_index
             return index
 
+        alias_progress = ProgressBar("pack:aliases", len(records))
         for idx, record in enumerate(records):
             if record.alias_index == INVALID_INDEX:
+                if ((idx + 1) % 512) == 0 or (idx + 1) == len(records):
+                    alias_progress.update(idx + 1)
                 continue
 
             root = resolve_alias_root(record.alias_index)
             if root == idx:
+                if ((idx + 1) % 512) == 0 or (idx + 1) == len(records):
+                    alias_progress.update(idx + 1)
                 continue
             target = records[root]
             record.alias_index = root
@@ -753,8 +858,13 @@ def build_pack(rows: list[AssetRow], source_root: Path, blob_path: Path) -> tupl
             record.meta1 = target.meta1
             record.meta2 = target.meta2
             record.meta3 = target.meta3
+            record.compression_codec = target.compression_codec
             record.payload_offset = target.payload_offset
             record.payload_size = target.payload_size
+            record.decoded_size = target.decoded_size
+            if ((idx + 1) % 512) == 0 or (idx + 1) == len(records):
+                alias_progress.update(idx + 1)
+        alias_progress.finish()
 
         string_table = string_builder.bytes
         asset_table_size = len(records) * RECORD_STRUCT.size
@@ -766,6 +876,7 @@ def build_pack(rows: list[AssetRow], source_root: Path, blob_path: Path) -> tupl
         payload_size = payload_tmp_path.stat().st_size
 
         blob_path.parent.mkdir(parents=True, exist_ok=True)
+        write_progress = ProgressBar("pack:write", int(payload_size))
         with blob_path.open("wb") as out, payload_tmp_path.open("rb") as payload_in:
             header_bytes = HEADER_STRUCT.pack(
                 PACK_MAGIC,
@@ -806,16 +917,22 @@ def build_pack(rows: list[AssetRow], source_root: Path, blob_path: Path) -> tupl
                         record.meta1,
                         record.meta2,
                         record.meta3,
+                        record.compression_codec,
                         record.payload_offset,
                         record.payload_size,
+                        record.decoded_size,
                     )
                 )
 
+            bytes_written = 0
             while True:
                 chunk = payload_in.read(1024 * 1024)
                 if not chunk:
                     break
                 out.write(chunk)
+                bytes_written += len(chunk)
+                write_progress.update(bytes_written)
+        write_progress.finish()
 
         return records, blob_path.stat().st_size
     finally:
@@ -841,6 +958,7 @@ def main() -> None:
     audio_count = sum(1 for r in records if r.format_enum == FORMAT_AUDIO_PCM16_INTERLEAVED)
     raw_count = sum(1 for r in records if r.format_enum == FORMAT_RAW_BYTES)
     failed_count = sum(1 for r in records if (r.flags & FLAG_CONVERSION_FAILED) != 0)
+    compressed_count = sum(1 for r in records if r.compression_codec != CODEC_NONE)
 
     print(f"generated header: {args.header}")
     print(f"generated pack  : {args.blob}")
@@ -851,6 +969,7 @@ def main() -> None:
     print(f"image records   : {image_count}")
     print(f"audio records   : {audio_count}")
     print(f"raw records     : {raw_count}")
+    print(f"compressed      : {compressed_count}")
     print(f"failed convert  : {failed_count}")
 
 

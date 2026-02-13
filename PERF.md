@@ -63,7 +63,9 @@ Pack status (February 13, 2026):
 - `asset count = 84,470`
 - `alias count = 8,353`
 - `mesh/image/audio/raw = 5,009 / 54,216 / 1,342 / 23,903`
-- `pack bytes = 12,400,250,685`
+- `compressed records = 74,369`
+- `pack bytes = 1,314,807,875`
+- Pack is memory-mapped at runtime; assets decompress into reusable scratch then upload via reusable staging buffer.
 
 ## Profiling Gates
 

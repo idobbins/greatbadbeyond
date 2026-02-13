@@ -46,6 +46,7 @@ Build a real forward raster renderer in `greadbadbeyond` with these properties:
 - Asset ingestion is now prebuilt into a single binary pack: `resources/external/kenney_assets.pack`.
 - `manifest.h` is generated ahead-of-time and exposes namespace-scoped `AssetHandle` constants for direct code access.
 - Runtime loads one pack file and resolves handles by index; no runtime hash-table lookup path is required.
+- Pack records include per-asset compression metadata (`NONE` or `DEFLATE_ZLIB`) and decoded byte size.
 - v1 conversion policy.
 Models: `.obj` -> `MESH_PNUV_F32_U32` payload (interleaved position/normal/uv + `u32` index buffer).
 Images: raster formats (`png`, `jpg`, `jpeg`, `bmp`, `tga`, `webp`, `gif`) -> `IMAGE_RGBA8_MIPS`.
@@ -54,7 +55,8 @@ Everything else: `RAW_BYTES` fallback.
 - Canonical selection and dedupe.
 Extension-preference aliasing chooses one canonical asset per family (model/image/audio stem groups).
 Content-identical payloads are deduplicated and alias-linked to one canonical payload.
-- Latest full generation (February 13, 2026): `asset count = 84,470`, `alias count = 8,353`, `pack bytes = 12,400,250,685`.
+- Runtime path uses memory-mapped pack IO plus reusable CPU decode scratch and reusable GPU staging buffer.
+- Latest full generation (February 13, 2026): `asset count = 84,470`, `alias count = 8,353`, `compressed records = 74,369`, `pack bytes = 1,314,807,875`.
 
 ## Target Architecture (v1)
 
