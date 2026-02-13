@@ -19,6 +19,7 @@ static constexpr std::size_t InstanceLayerScratchBytes = 1024;
 
 static constexpr uint32_t swapchainImageCount = 3;
 static constexpr uint32_t FrameOverlap = 2;
+static constexpr VkSampleCountFlagBits preferredMsaaSamples = VK_SAMPLE_COUNT_2_BIT;
 
 static constexpr int DefaultWindowWidth = 1280;
 static constexpr int DefaultWindowHeight = 720;

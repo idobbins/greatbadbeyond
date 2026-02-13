@@ -13,6 +13,7 @@ This document tracks performance decisions for the forward renderer direction.
 - Vulkan instance/device/swapchain lifecycle is stable.
 - Frame overlap + acquire/record/submit/present is stable.
 - Dynamic rendering draws indexed forward geometry (single centered scene mesh).
+- Preferred 2x MSAA resolves directly into the swapchain when supported by the GPU.
 - Legacy compute rendering path has been removed from the active frame loop.
 
 ## Immediate Targets

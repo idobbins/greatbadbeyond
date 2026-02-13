@@ -75,6 +75,11 @@ static struct VulkanData
    VkShaderModule forwardFragmentShader;
    VkPipelineLayout forwardPipelineLayout;
    VkPipeline forwardPipeline;
+   VkSampleCountFlagBits msaaSamples;
+   VkImage colorImage;
+   VkDeviceMemory colorMemory;
+   VkImageView colorView;
+   VkImageLayout colorLayout;
    VkImage depthImage;
    VkDeviceMemory depthMemory;
    VkImageView depthView;
@@ -95,6 +100,7 @@ static struct VulkanData
    bool swapchainReady;
    bool swapchainImageViewsReady;
    bool frameResourcesReady;
+   bool colorResourcesReady;
    bool depthResourcesReady;
    bool sceneReady;
    bool forwardRendererReady;
@@ -356,6 +362,11 @@ void DestroyInstance()
    Vulkan.swapchainImageCount = 0;
    Vulkan.swapchainExtent = {0, 0};
    Vulkan.swapchainFormat = VK_FORMAT_UNDEFINED;
+   Vulkan.msaaSamples = VK_SAMPLE_COUNT_1_BIT;
+   Vulkan.colorImage = VK_NULL_HANDLE;
+   Vulkan.colorMemory = VK_NULL_HANDLE;
+   Vulkan.colorView = VK_NULL_HANDLE;
+   Vulkan.colorLayout = VK_IMAGE_LAYOUT_UNDEFINED;
    Vulkan.depthImage = VK_NULL_HANDLE;
    Vulkan.depthMemory = VK_NULL_HANDLE;
    Vulkan.depthView = VK_NULL_HANDLE;
@@ -366,6 +377,7 @@ void DestroyInstance()
    Vulkan.sceneIndexBuffer = VK_NULL_HANDLE;
    Vulkan.sceneIndexMemory = VK_NULL_HANDLE;
    Vulkan.sceneIndexCount = 0;
+   Vulkan.colorResourcesReady = false;
    Vulkan.depthResourcesReady = false;
    Vulkan.sceneReady = false;
    Vulkan.forwardRendererReady = false;
@@ -621,6 +633,43 @@ void SetPhysicalDevice()
          continue;
       }
 
+      VkSampleCountFlags supportedSampleCounts =
+         properties.limits.framebufferColorSampleCounts &
+         properties.limits.framebufferDepthSampleCounts;
+      auto chooseSampleCount = [](VkSampleCountFlags supported, VkSampleCountFlagBits requested) -> VkSampleCountFlagBits
+      {
+         const std::array<VkSampleCountFlagBits, 7> candidates = {
+            VK_SAMPLE_COUNT_64_BIT,
+            VK_SAMPLE_COUNT_32_BIT,
+            VK_SAMPLE_COUNT_16_BIT,
+            VK_SAMPLE_COUNT_8_BIT,
+            VK_SAMPLE_COUNT_4_BIT,
+            VK_SAMPLE_COUNT_2_BIT,
+            VK_SAMPLE_COUNT_1_BIT,
+         };
+
+         bool allowCandidate = false;
+         for (VkSampleCountFlagBits candidate : candidates)
+         {
+            if (candidate == requested)
+            {
+               allowCandidate = true;
+            }
+
+            if (!allowCandidate)
+            {
+               continue;
+            }
+
+            if ((supported & candidate) != 0)
+            {
+               return candidate;
+            }
+         }
+
+         return VK_SAMPLE_COUNT_1_BIT;
+      };
+
       const auto &features = GetPhysicalDeviceFeatures(device);
       const auto &features13 = features.v13;
 
@@ -642,8 +691,24 @@ void SetPhysicalDevice()
       Vulkan.presentQueue = VK_NULL_HANDLE;
       Vulkan.transferQueue = VK_NULL_HANDLE;
       Vulkan.computeQueue = VK_NULL_HANDLE;
+      Vulkan.msaaSamples = chooseSampleCount(supportedSampleCounts, preferredMsaaSamples);
 
-      LogInfo("[vulkan] Selected physical device: %s", properties.deviceName);
+      auto sampleCountToInt = [](VkSampleCountFlagBits sampleCount) -> u32
+      {
+         switch (sampleCount)
+         {
+            case VK_SAMPLE_COUNT_1_BIT: return 1;
+            case VK_SAMPLE_COUNT_2_BIT: return 2;
+            case VK_SAMPLE_COUNT_4_BIT: return 4;
+            case VK_SAMPLE_COUNT_8_BIT: return 8;
+            case VK_SAMPLE_COUNT_16_BIT: return 16;
+            case VK_SAMPLE_COUNT_32_BIT: return 32;
+            case VK_SAMPLE_COUNT_64_BIT: return 64;
+            default: return 1;
+         }
+      };
+
+      LogInfo("[vulkan] Selected physical device: %s (MSAA=%ux)", properties.deviceName, sampleCountToInt(Vulkan.msaaSamples));
       return;
    }
 
@@ -1527,6 +1592,117 @@ void DestroyScene()
    Vulkan.sceneReady = false;
 }
 
+void CreateColorResources()
+{
+   if (Vulkan.msaaSamples == VK_SAMPLE_COUNT_1_BIT)
+   {
+      Vulkan.colorResourcesReady = false;
+      Vulkan.colorImage = VK_NULL_HANDLE;
+      Vulkan.colorMemory = VK_NULL_HANDLE;
+      Vulkan.colorView = VK_NULL_HANDLE;
+      Vulkan.colorLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+      return;
+   }
+
+   if (Vulkan.colorResourcesReady)
+   {
+      return;
+   }
+
+   Assert(Vulkan.deviceReady, "Create the Vulkan device before color resources");
+   Assert(Vulkan.swapchainReady, "Create the Vulkan swapchain before color resources");
+   Assert(Vulkan.msaaSamples != static_cast<VkSampleCountFlagBits>(0), "MSAA sample count is not initialized");
+
+   VkExtent2D extent = Vulkan.swapchainExtent;
+   Assert((extent.width > 0) && (extent.height > 0), "Swapchain extent is invalid for color resources");
+
+   VkImageCreateInfo imageInfo = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+      .imageType = VK_IMAGE_TYPE_2D,
+      .format = Vulkan.swapchainFormat,
+      .extent = {extent.width, extent.height, 1},
+      .mipLevels = 1,
+      .arrayLayers = 1,
+      .samples = Vulkan.msaaSamples,
+      .tiling = VK_IMAGE_TILING_OPTIMAL,
+      .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+      .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+      .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+   };
+
+   VkResult imageResult = vkCreateImage(Vulkan.device, &imageInfo, nullptr, &Vulkan.colorImage);
+   Assert(imageResult == VK_SUCCESS, "Failed to create color image");
+
+   VkMemoryRequirements requirements = {};
+   vkGetImageMemoryRequirements(Vulkan.device, Vulkan.colorImage, &requirements);
+
+   VkMemoryAllocateInfo allocInfo = {
+      .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+      .allocationSize = requirements.size,
+      .memoryTypeIndex = FindMemoryType(requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT),
+   };
+
+   VkResult allocResult = vkAllocateMemory(Vulkan.device, &allocInfo, nullptr, &Vulkan.colorMemory);
+   Assert(allocResult == VK_SUCCESS, "Failed to allocate color image memory");
+
+   VkResult bindResult = vkBindImageMemory(Vulkan.device, Vulkan.colorImage, Vulkan.colorMemory, 0);
+   Assert(bindResult == VK_SUCCESS, "Failed to bind color image memory");
+
+   VkImageViewCreateInfo viewInfo = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+      .image = Vulkan.colorImage,
+      .viewType = VK_IMAGE_VIEW_TYPE_2D,
+      .format = Vulkan.swapchainFormat,
+      .subresourceRange = {
+         .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+         .baseMipLevel = 0,
+         .levelCount = 1,
+         .baseArrayLayer = 0,
+         .layerCount = 1,
+      },
+   };
+
+   VkResult viewResult = vkCreateImageView(Vulkan.device, &viewInfo, nullptr, &Vulkan.colorView);
+   Assert(viewResult == VK_SUCCESS, "Failed to create color image view");
+
+   Vulkan.colorLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+   Vulkan.colorResourcesReady = true;
+}
+
+void DestroyColorResources()
+{
+   if (Vulkan.device == VK_NULL_HANDLE)
+   {
+      Vulkan.colorResourcesReady = false;
+      Vulkan.colorImage = VK_NULL_HANDLE;
+      Vulkan.colorMemory = VK_NULL_HANDLE;
+      Vulkan.colorView = VK_NULL_HANDLE;
+      Vulkan.colorLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+      return;
+   }
+
+   if (Vulkan.colorView != VK_NULL_HANDLE)
+   {
+      vkDestroyImageView(Vulkan.device, Vulkan.colorView, nullptr);
+      Vulkan.colorView = VK_NULL_HANDLE;
+   }
+
+   if (Vulkan.colorImage != VK_NULL_HANDLE)
+   {
+      vkDestroyImage(Vulkan.device, Vulkan.colorImage, nullptr);
+      Vulkan.colorImage = VK_NULL_HANDLE;
+   }
+
+   if (Vulkan.colorMemory != VK_NULL_HANDLE)
+   {
+      vkFreeMemory(Vulkan.device, Vulkan.colorMemory, nullptr);
+      Vulkan.colorMemory = VK_NULL_HANDLE;
+   }
+
+   Vulkan.colorResourcesReady = false;
+   Vulkan.colorLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+}
+
 void CreateDepthResources()
 {
    if (Vulkan.depthResourcesReady)
@@ -1537,6 +1713,8 @@ void CreateDepthResources()
    Assert(Vulkan.deviceReady, "Create the Vulkan device before depth resources");
    Assert(Vulkan.swapchainReady, "Create the Vulkan swapchain before depth resources");
    Assert(Vulkan.physicalDeviceReady, "Select a physical device before creating depth resources");
+
+   Assert(Vulkan.msaaSamples != static_cast<VkSampleCountFlagBits>(0), "MSAA sample count is not initialized");
 
    VkFormat selectedFormat = VK_FORMAT_UNDEFINED;
    const std::array<VkFormat, 3> depthCandidates = {
@@ -1569,7 +1747,7 @@ void CreateDepthResources()
       .extent = {extent.width, extent.height, 1},
       .mipLevels = 1,
       .arrayLayers = 1,
-      .samples = VK_SAMPLE_COUNT_1_BIT,
+      .samples = Vulkan.msaaSamples,
       .tiling = VK_IMAGE_TILING_OPTIMAL,
       .usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
       .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
@@ -1667,6 +1845,7 @@ void CreateForwardRenderer()
    }
 
    Assert(Vulkan.sceneReady, "Create scene before creating forward renderer");
+   CreateColorResources();
    CreateDepthResources();
    CreateForwardPipeline();
    Vulkan.forwardRendererReady = true;
@@ -1681,6 +1860,7 @@ void DestroyForwardRenderer()
 
    DestroyForwardPipeline();
    DestroyDepthResources();
+   DestroyColorResources();
    Vulkan.forwardRendererReady = false;
 }
 
@@ -1693,7 +1873,12 @@ void CreateForwardPipeline()
 
    Assert(Vulkan.deviceReady, "Create the Vulkan device before pipelines");
    Assert(Vulkan.swapchainReady, "Create the Vulkan swapchain before pipelines");
+   Assert(Vulkan.msaaSamples != static_cast<VkSampleCountFlagBits>(0), "MSAA sample count is not initialized");
    Assert(Vulkan.depthResourcesReady, "Create depth resources before pipelines");
+   if (Vulkan.msaaSamples != VK_SAMPLE_COUNT_1_BIT)
+   {
+      Assert(Vulkan.colorResourcesReady, "Create color resources before MSAA forward pipeline");
+   }
    Assert(ShaderCacheDirectory[0] != '\0', "Shader cache directory is not defined");
 
    array<char, 512> vertexPath {};
@@ -1805,7 +1990,7 @@ void CreateForwardPipeline()
 
    VkPipelineMultisampleStateCreateInfo multisampling = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-      .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+      .rasterizationSamples = Vulkan.msaaSamples,
       .sampleShadingEnable = VK_FALSE,
    };
 
@@ -2140,8 +2325,15 @@ auto DrawFrameForward(u32 frameIndex, u32 imageIndex, const GradientParams &grad
    Assert(Vulkan.sceneReady, "Create the scene before drawing");
    Assert(Vulkan.forwardRendererReady, "Create the forward renderer before drawing");
    Assert(Vulkan.forwardPipelineReady, "Forward pipeline must be ready before recording commands");
+   Assert(Vulkan.msaaSamples != static_cast<VkSampleCountFlagBits>(0), "MSAA sample count is not initialized");
    Assert(Vulkan.depthResourcesReady, "Depth resources must be ready before recording commands");
    Assert(Vulkan.depthView != VK_NULL_HANDLE, "Depth view is not initialized");
+   bool msaaEnabled = Vulkan.msaaSamples != VK_SAMPLE_COUNT_1_BIT;
+   if (msaaEnabled)
+   {
+      Assert(Vulkan.colorResourcesReady, "MSAA color resources must be ready before recording commands");
+      Assert(Vulkan.colorView != VK_NULL_HANDLE, "MSAA color view is not initialized");
+   }
    Assert(frameIndex < FrameOverlap, "Frame index out of range");
    Assert(imageIndex < Vulkan.swapchainImageCount, "Swapchain image index out of range");
 
@@ -2222,6 +2414,35 @@ auto DrawFrameForward(u32 frameIndex, u32 imageIndex, const GradientParams &grad
       1,
       &barrierToAttachment);
 
+   if (msaaEnabled)
+   {
+      VkImageMemoryBarrier colorBarrier = {
+         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+         .srcAccessMask = (Vulkan.colorLayout == VK_IMAGE_LAYOUT_UNDEFINED) ? 0u : VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+         .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+         .oldLayout = Vulkan.colorLayout,
+         .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+         .image = Vulkan.colorImage,
+         .subresourceRange = subresource,
+      };
+
+      vkCmdPipelineBarrier(
+         frame.commandBuffer,
+         (Vulkan.colorLayout == VK_IMAGE_LAYOUT_UNDEFINED)
+            ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
+            : VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+         0,
+         0,
+         nullptr,
+         0,
+         nullptr,
+         1,
+         &colorBarrier);
+   }
+
    VkImageMemoryBarrier depthBarrier = {
       .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
       .srcAccessMask = (Vulkan.depthLayout == VK_IMAGE_LAYOUT_UNDEFINED) ? 0u : VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
@@ -2254,12 +2475,18 @@ auto DrawFrameForward(u32 frameIndex, u32 imageIndex, const GradientParams &grad
       .stencil = 0u,
    };
 
+   VkImageView colorAttachmentView = msaaEnabled ? Vulkan.colorView : imageView;
+   VkAttachmentStoreOp colorStoreOp = msaaEnabled ? VK_ATTACHMENT_STORE_OP_DONT_CARE : VK_ATTACHMENT_STORE_OP_STORE;
+
    VkRenderingAttachmentInfo colorAttachment = {
       .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-      .imageView = imageView,
+      .imageView = colorAttachmentView,
       .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+      .resolveMode = msaaEnabled ? VK_RESOLVE_MODE_AVERAGE_BIT : VK_RESOLVE_MODE_NONE,
+      .resolveImageView = msaaEnabled ? imageView : VK_NULL_HANDLE,
+      .resolveImageLayout = msaaEnabled ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
       .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
-      .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+      .storeOp = colorStoreOp,
       .clearValue = {.color = clearColor},
    };
 
@@ -2436,6 +2663,10 @@ auto DrawFrameForward(u32 frameIndex, u32 imageIndex, const GradientParams &grad
    {
       Vulkan.swapchainImageLayouts[imageIndex] = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
       Vulkan.depthLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+      if (msaaEnabled)
+      {
+         Vulkan.colorLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+      }
    }
 
    return endResult;

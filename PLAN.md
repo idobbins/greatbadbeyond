@@ -16,19 +16,29 @@ Build a real forward raster renderer in `greadbadbeyond` with these properties:
 - Add systems only after measurable need.
 - Preserve existing stable frame lifecycle (acquire -> record -> submit -> present).
 
+## First-Principles Constraints
+
+- Forward renderer is the default architecture; no deferred path.
+- No temporal accumulation in the core pipeline (`TAA`, temporal denoisers, temporal upscalers).
+- Prefer deterministic recompute and stable IDs over hidden mutable state.
+- Prefer flat, cache-friendly data (SoA) over pointer-heavy object graphs.
+- Add complexity only after profiling proves a bottleneck.
+- Keep behavior inspectable: explicit buffers, explicit passes, explicit synchronization.
+
 ## Non-Goals (for v1)
 
 - No ray tracing or compute-based lighting.
-- No SSAO, SSR, deferred path, or prepass.
+- No SSAO, SSR, or deferred path.
 - No bindless or descriptor indexing.
 - No scene graph framework.
+- No temporal anti-aliasing.
 
 ## Current State Snapshot
 
 - Vulkan lifecycle and swapchain lifecycle are stable.
 - Frame overlap and sync objects are stable.
 - Dynamic rendering path exists.
-- World-space forward mesh path exists for a single scene object.
+- World-space forward mesh path exists (current test content is grid-expanded).
 - Legacy compute rendering path is removed from active code.
 
 ## Target Architecture (v1)
@@ -37,11 +47,12 @@ CPU data:
 
 - `MeshGpu`: vertex/index buffer handles and counts.
 - `MaterialGpu`: pipeline/material binding state.
-- `RenderObject`: `meshId`, `materialId`, transform.
-- `DrawItem`: `pipelineKey`, `materialId`, `meshId`, `firstIndex`, `indexCount`, `firstInstance`, `instanceCount`.
+- `ObjectId`, `MeshId`, `MaterialId`: stable integer IDs.
+- `ObjectTransformSoA`: flat arrays (`position[]`, `rotation[]`, `scale[]`) indexed by `ObjectId`.
+- `ObjectMaterialSoA`: `meshId[]`, `materialId[]` indexed by `ObjectId`.
+- `DrawItemSoA`: flat arrays for `pipelineKey[]`, `materialId[]`, `meshId[]`, `firstIndex[]`, `indexCount[]`, `firstInstance[]`, `instanceCount[]`.
 - `FrameGlobals`: view, proj, camera position, time.
-- `std::vector<RenderObject>` scene storage.
-- `std::vector<DrawItem>` draw list rebuilt each frame.
+- Draw list rebuilt each frame from SoA data.
 
 GPU data:
 
@@ -57,9 +68,16 @@ Pass 0 (required): Forward opaque
 - Transition depth image -> `DEPTH_ATTACHMENT_OPTIMAL`.
 - Begin dynamic rendering with color + depth.
 - Bind forward pipeline + descriptor set(s).
-- Draw opaque `DrawItem` list sorted by pipeline -> material -> mesh.
+- Draw opaque list from `DrawItemSoA`.
+- Sort by pipeline -> material -> mesh only if profiling shows CPU submission cost is bottleneck.
 - End rendering.
 - Transition swapchain image -> `PRESENT_SRC_KHR`.
+
+Pass 0.5 (optional, profile-gated): Depth prepass
+
+- Add only when overdraw or fragment cost dominates measured frame time.
+- Record depth-only pass for opaque geometry before color pass.
+- Keep it toggleable and measurable.
 
 Pass 1 (later): Forward transparent
 
@@ -100,7 +118,7 @@ Acceptance:
 - Project builds.
 - App startup/shutdown uses forward API naming and lifecycle.
 
-### Phase 2: Depth Resources (Day 1)
+### Phase 2: Depth Resources (Day 1) + Optional Z Prepass Hook
 
 Changes:
 
@@ -108,12 +126,14 @@ Changes:
 - Pick supported depth format (`D32` fallback chain).
 - Recreate depth resources with swapchain recreation.
 - Enable depth testing in forward graphics pipeline state.
+- Add a compile-time/runtime toggle point for optional depth prepass.
 
 Acceptance:
 
 - Build succeeds.
 - Resize/recreate path remains stable.
 - Validation output has no depth-layout misuse.
+- Prepass toggle path compiles and can be enabled without changing architecture.
 
 ### Phase 3: Mesh Pipeline (replace fullscreen draw path)
 
@@ -161,14 +181,16 @@ Acceptance:
 
 Changes:
 
-- Add scene containers and draw-item build step.
-- Add stable sort by pipeline/material/mesh.
+- Add SoA scene containers with stable IDs for objects/materials/meshes.
+- Build draw-item arrays from SoA each frame.
+- Add profile-gated stable sort by pipeline/material/mesh.
 - Loop draw list in `DrawFrameForward`.
 
 Acceptance:
 
 - One or more objects render via draw-list loop.
 - Draw call order is deterministic frame-to-frame.
+- Data traversal is index-based and avoids pointer chasing in hot paths.
 
 ### Phase 7: Lighting v0
 
@@ -190,11 +212,27 @@ Changes:
 - Improve logging for asset load failures and Vulkan setup failures.
 - Add runtime assertions for invalid mesh/material references.
 - Document render path and asset expectations in `PERF.md`.
+- Add on-screen debug visualization toggles for timings and scene/light counts.
+- Add shader hot-reload path for rapid iteration (debug builds).
 
 Acceptance:
 
 - Clean debug build with warnings treated as regressions.
 - Basic smoke test checklist passes.
+- Debug overlays can be toggled at runtime without destabilizing frame loop.
+
+### Phase 9: Forward+ / Clustered Lights (Optional, Profile-Gated)
+
+Changes:
+
+- Add tiled/clustered light culling only if measured light scaling requires it.
+- Keep baseline forward path as fallback.
+- Compare CPU-driven baseline vs clustered path on identical scenes.
+
+Acceptance:
+
+- Demonstrated performance win at target light counts.
+- Added complexity is justified by measured data and can be disabled.
 
 ## File-Level Worklist
 
@@ -204,6 +242,7 @@ Acceptance:
 - `src/camera.cpp`: continue feeding camera state; no major architecture changes.
 - `resources/shaders/*.vert|*.frag`: forward mesh shaders.
 - `src/asset_obj.cpp`: minimal OBJ parse/load path.
+- `src/debug_*.cpp` or equivalent: runtime visualization and instrumentation hooks.
 - `CMakeLists.txt`: add new source files and shader inputs.
 - `resources/models/kenney/prototype/*`: first in-repo model assets.
 
@@ -216,12 +255,18 @@ Acceptance:
 - `./build/debug/greadbadbeyond`
 - Resize window and confirm no crash.
 - Confirm one centered model render before adding additional features.
+- Profiling gates before each new system:
+- CPU: record submission time and draw call count.
+- GPU: record pass timings with timestamp queries where supported.
+- Overdraw: estimate fragment pressure before enabling prepass.
+- Feature additions must include before/after numbers in notes.
 
 ## Risks and Mitigations
 
 - OBJ format edge cases: keep loader intentionally narrow for v1 and fail loudly.
 - Swapchain + depth recreation bugs: keep depth lifecycle strictly paired with swapchain lifecycle.
 - Over-scoping: postpone transparent path and clustered lights until base opaque path is stable and measured.
+- Complexity creep: reject changes that cannot show measurable benefit.
 
 ## Guardrails
 
@@ -229,3 +274,5 @@ Acceptance:
 - No extra passes without profiling evidence.
 - Keep create/destroy order explicit and symmetric.
 - Keep runtime data flow explainable from structs + draw loop + shaders.
+- No temporal AA in core renderer.
+- Prefer SoA + stable IDs for hot-path scene traversal.

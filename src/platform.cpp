@@ -109,9 +109,10 @@ void CreateWindow()
     glfwDefaultWindowHints();
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
-// #if defined(__APPLE__)
-    glfwWindowHint(GLFW_COCOA_RETINA_FRAMEBUFFER, GLFW_FALSE);
-// #endif
+#if defined(__APPLE__)
+    // Keep logical window size while rendering at native HiDPI framebuffer resolution.
+    glfwWindowHint(GLFW_COCOA_RETINA_FRAMEBUFFER, GLFW_TRUE);
+#endif
 
     Platform.Window.title = DefaultWindowTitle;
     Platform.Window.handle = glfwCreateWindow(DefaultWindowWidth, DefaultWindowHeight, Platform.Window.title.data(), nullptr, nullptr);

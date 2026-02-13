@@ -269,6 +269,8 @@ auto FindMemoryType(u32 typeBits, VkMemoryPropertyFlags properties) -> u32;
 // Pipeline-related functions
 void CreateForwardPipeline();
 void DestroyForwardPipeline();
+void CreateColorResources();
+void DestroyColorResources();
 void CreateDepthResources();
 void DestroyDepthResources();
 void CreateScene();
