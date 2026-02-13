@@ -12,8 +12,8 @@ This document tracks performance decisions for the forward renderer direction.
 
 - Vulkan instance/device/swapchain lifecycle is stable.
 - Frame overlap + acquire/record/submit/present is stable.
-- Dynamic rendering draws a fullscreen triangle via graphics pipeline only.
-- Compute/path-tracing/ReSTIR code has been removed from active renderer flow.
+- Dynamic rendering draws indexed forward geometry (single centered scene mesh).
+- Legacy compute rendering path has been removed from the active frame loop.
 
 ## Immediate Targets
 

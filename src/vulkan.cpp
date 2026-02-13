@@ -11,10 +11,13 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <memory_resource>
 #include <ostream>
+#include <sstream>
+#include <string>
 #include <vector>
 
 using namespace std;
@@ -22,10 +25,14 @@ using namespace std;
 #ifndef SHADER_CACHE_DIRECTORY
 #define SHADER_CACHE_DIRECTORY ""
 #endif
+#ifndef ASSET_SOURCE_DIRECTORY
+#define ASSET_SOURCE_DIRECTORY ""
+#endif
 
 static constexpr const char *ShaderCacheDirectory = SHADER_CACHE_DIRECTORY;
-static constexpr const char *FullscreenVertexShaderName = "fullscreen_triangle.vert.spv";
-static constexpr const char *FullscreenFragmentShaderName = "fullscreen_triangle.frag.spv";
+static constexpr const char *AssetSourceDirectory = ASSET_SOURCE_DIRECTORY;
+static constexpr const char *ForwardVertexShaderName = "forward_opaque.vert.spv";
+static constexpr const char *ForwardFragmentShaderName = "forward_opaque.frag.spv";
 
 #ifndef VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME
 #define VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME "VK_KHR_portability_subset"
@@ -61,10 +68,20 @@ static struct VulkanData
    array<FrameResources, FrameOverlap> frames;
    u32 currentFrame;
 
-   VkShaderModule fullscreenVertexShader;
-   VkShaderModule fullscreenFragmentShader;
-   VkPipelineLayout fullscreenPipelineLayout;
-   VkPipeline fullscreenPipeline;
+   VkShaderModule forwardVertexShader;
+   VkShaderModule forwardFragmentShader;
+   VkPipelineLayout forwardPipelineLayout;
+   VkPipeline forwardPipeline;
+   VkImage depthImage;
+   VkDeviceMemory depthMemory;
+   VkImageView depthView;
+   VkFormat depthFormat;
+   VkImageLayout depthLayout;
+   VkBuffer sceneVertexBuffer;
+   VkDeviceMemory sceneVertexMemory;
+   VkBuffer sceneIndexBuffer;
+   VkDeviceMemory sceneIndexMemory;
+   u32 sceneIndexCount;
    u32 frameSeed;
 
    bool instanceReady;
@@ -75,9 +92,34 @@ static struct VulkanData
    bool swapchainReady;
    bool swapchainImageViewsReady;
    bool frameResourcesReady;
-   bool fullscreenPipelineReady;
+   bool depthResourcesReady;
+   bool sceneReady;
+   bool forwardRendererReady;
+   bool forwardPipelineReady;
 
 } Vulkan;
+
+auto FindMemoryType(u32 typeBits, VkMemoryPropertyFlags properties) -> u32
+{
+   Assert(Vulkan.physicalDevice != VK_NULL_HANDLE, "Physical device must be selected before querying memory types");
+
+   VkPhysicalDeviceMemoryProperties memoryProperties = {};
+   vkGetPhysicalDeviceMemoryProperties(Vulkan.physicalDevice, &memoryProperties);
+
+   for (u32 index = 0; index < memoryProperties.memoryTypeCount; ++index)
+   {
+      bool typeSupported = (typeBits & (1u << index)) != 0;
+      bool flagsMatch = (memoryProperties.memoryTypes[index].propertyFlags & properties) == properties;
+
+      if (typeSupported && flagsMatch)
+      {
+         return index;
+      }
+   }
+
+   Assert(false, "Failed to find compatible Vulkan memory type");
+   return 0;
+}
 
 VKAPI_ATTR VkBool32 VKAPI_CALL VulkanDebugCallback(
     VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
@@ -172,7 +214,8 @@ void CreateVulkan()
    CreateDevice();
    CreateSwapchain();
    CreateSwapchainImageViews();
-   CreateFullscreenPipeline();
+   CreateScene();
+   CreateForwardRenderer();
    CreateFrameResources();
 }
 
@@ -184,7 +227,8 @@ void DestroyVulkan()
    }
 
    DestroyFrameResources();
-   DestroyFullscreenPipeline();
+   DestroyForwardRenderer();
+   DestroyScene();
    DestroySwapchain();
    DestroyDevice();
    DestroySurface();
@@ -309,6 +353,20 @@ void DestroyInstance()
    Vulkan.swapchainImageCount = 0;
    Vulkan.swapchainExtent = {0, 0};
    Vulkan.swapchainFormat = VK_FORMAT_UNDEFINED;
+   Vulkan.depthImage = VK_NULL_HANDLE;
+   Vulkan.depthMemory = VK_NULL_HANDLE;
+   Vulkan.depthView = VK_NULL_HANDLE;
+   Vulkan.depthFormat = VK_FORMAT_UNDEFINED;
+   Vulkan.depthLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+   Vulkan.sceneVertexBuffer = VK_NULL_HANDLE;
+   Vulkan.sceneVertexMemory = VK_NULL_HANDLE;
+   Vulkan.sceneIndexBuffer = VK_NULL_HANDLE;
+   Vulkan.sceneIndexMemory = VK_NULL_HANDLE;
+   Vulkan.sceneIndexCount = 0;
+   Vulkan.depthResourcesReady = false;
+   Vulkan.sceneReady = false;
+   Vulkan.forwardRendererReady = false;
+   Vulkan.forwardPipelineReady = false;
 
    for (VkImage &image : Vulkan.swapchainImages)
    {
@@ -1149,15 +1207,438 @@ void DestroySwapchain()
    }
 }
 
-void CreateFullscreenPipeline()
+void CreateScene()
 {
-   if (Vulkan.fullscreenPipelineReady)
+   if (Vulkan.sceneReady)
+   {
+      return;
+   }
+
+   Assert(Vulkan.deviceReady, "Create Vulkan device before scene");
+
+   std::string objPath = "resources/models/kenney/prototype/shape-cube.obj";
+   if (AssetSourceDirectory[0] != '\0')
+   {
+      objPath = std::string(AssetSourceDirectory) + "/models/kenney/prototype/shape-cube.obj";
+   }
+
+   std::ifstream objFile(objPath);
+   Assert(objFile.is_open(), "Failed to open scene OBJ asset");
+
+   std::vector<Vec3> positions;
+   std::vector<Vec3> normals;
+   std::vector<Vec2> uvs;
+   std::vector<Vertex> vertices;
+   std::vector<u32> indices;
+
+   std::string line;
+   while (std::getline(objFile, line))
+   {
+      if (line.empty() || (line[0] == '#'))
+      {
+         continue;
+      }
+
+      std::istringstream lineStream(line);
+      std::string tag;
+      lineStream >> tag;
+
+      if (tag == "v")
+      {
+         float x = 0.0f;
+         float y = 0.0f;
+         float z = 0.0f;
+         lineStream >> x >> y >> z;
+         positions.push_back({x, y, z});
+      }
+      else if (tag == "vn")
+      {
+         float x = 0.0f;
+         float y = 0.0f;
+         float z = 0.0f;
+         lineStream >> x >> y >> z;
+         normals.push_back({x, y, z});
+      }
+      else if (tag == "vt")
+      {
+         float u = 0.0f;
+         float v = 0.0f;
+         lineStream >> u >> v;
+         uvs.push_back({u, 1.0f - v});
+      }
+      else if (tag == "f")
+      {
+         std::vector<std::string> faceTokens;
+         std::string faceToken;
+         while (lineStream >> faceToken)
+         {
+            faceTokens.push_back(faceToken);
+         }
+
+         if (faceTokens.size() < 3)
+         {
+            continue;
+         }
+
+         const auto emitFaceVertex = [&](const std::string &token)
+         {
+            int pIndex = 0;
+            int tIndex = 0;
+            int nIndex = 0;
+
+            if (std::sscanf(token.c_str(), "%d/%d/%d", &pIndex, &tIndex, &nIndex) == 3)
+            {
+            }
+            else if (std::sscanf(token.c_str(), "%d//%d", &pIndex, &nIndex) == 2)
+            {
+               tIndex = 0;
+            }
+            else if (std::sscanf(token.c_str(), "%d/%d", &pIndex, &tIndex) == 2)
+            {
+               nIndex = 0;
+            }
+            else
+            {
+               int scanned = std::sscanf(token.c_str(), "%d", &pIndex);
+               Assert(scanned == 1, "Unsupported OBJ face token");
+               tIndex = 0;
+               nIndex = 0;
+            }
+
+            const auto toZeroIndex = [](int index, size_t count) -> int
+            {
+               if (index > 0)
+               {
+                  return index - 1;
+               }
+               if (index < 0)
+               {
+                  return static_cast<int>(count) + index;
+               }
+               return -1;
+            };
+
+            int pZero = toZeroIndex(pIndex, positions.size());
+            Assert((pZero >= 0) && (pZero < static_cast<int>(positions.size())), "OBJ position index out of range");
+
+            Vertex vertex = {};
+            vertex.position = positions[static_cast<size_t>(pZero)];
+            vertex.normal = {0.0f, 1.0f, 0.0f};
+            vertex.uv = {0.0f, 0.0f};
+
+            if (nIndex != 0)
+            {
+               int nZero = toZeroIndex(nIndex, normals.size());
+               Assert((nZero >= 0) && (nZero < static_cast<int>(normals.size())), "OBJ normal index out of range");
+               vertex.normal = normals[static_cast<size_t>(nZero)];
+            }
+
+            if (tIndex != 0)
+            {
+               int tZero = toZeroIndex(tIndex, uvs.size());
+               Assert((tZero >= 0) && (tZero < static_cast<int>(uvs.size())), "OBJ UV index out of range");
+               vertex.uv = uvs[static_cast<size_t>(tZero)];
+            }
+
+            vertices.push_back(vertex);
+            indices.push_back(static_cast<u32>(indices.size()));
+         };
+
+         for (size_t tri = 1; (tri + 1) < faceTokens.size(); ++tri)
+         {
+            emitFaceVertex(faceTokens[0]);
+            emitFaceVertex(faceTokens[tri]);
+            emitFaceVertex(faceTokens[tri + 1]);
+         }
+      }
+   }
+
+   Assert(!vertices.empty(), "Scene OBJ did not produce any vertices");
+   Assert(!indices.empty(), "Scene OBJ did not produce any indices");
+
+   // Center mesh geometry around world origin for the initial single-object scene.
+   Vec3 minBounds = vertices[0].position;
+   Vec3 maxBounds = vertices[0].position;
+   for (const Vertex &vertex : vertices)
+   {
+      minBounds.x = std::min(minBounds.x, vertex.position.x);
+      minBounds.y = std::min(minBounds.y, vertex.position.y);
+      minBounds.z = std::min(minBounds.z, vertex.position.z);
+
+      maxBounds.x = std::max(maxBounds.x, vertex.position.x);
+      maxBounds.y = std::max(maxBounds.y, vertex.position.y);
+      maxBounds.z = std::max(maxBounds.z, vertex.position.z);
+   }
+
+   Vec3 center = {
+      (minBounds.x + maxBounds.x) * 0.5f,
+      (minBounds.y + maxBounds.y) * 0.5f,
+      (minBounds.z + maxBounds.z) * 0.5f,
+   };
+
+   for (Vertex &vertex : vertices)
+   {
+      vertex.position.x -= center.x;
+      vertex.position.y -= center.y;
+      vertex.position.z -= center.z;
+   }
+
+   const auto createBufferWithData = [&](VkBufferUsageFlags usage, const void *data, VkDeviceSize size, VkBuffer &buffer, VkDeviceMemory &memory)
+   {
+      VkBufferCreateInfo bufferInfo = {
+         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+         .size = size,
+         .usage = usage,
+         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+      };
+
+      VkResult createResult = vkCreateBuffer(Vulkan.device, &bufferInfo, nullptr, &buffer);
+      Assert(createResult == VK_SUCCESS, "Failed to create scene buffer");
+
+      VkMemoryRequirements requirements = {};
+      vkGetBufferMemoryRequirements(Vulkan.device, buffer, &requirements);
+
+      VkMemoryAllocateInfo allocInfo = {
+         .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+         .allocationSize = requirements.size,
+         .memoryTypeIndex = FindMemoryType(
+            requirements.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT),
+      };
+
+      VkResult allocResult = vkAllocateMemory(Vulkan.device, &allocInfo, nullptr, &memory);
+      Assert(allocResult == VK_SUCCESS, "Failed to allocate scene buffer memory");
+
+      VkResult bindResult = vkBindBufferMemory(Vulkan.device, buffer, memory, 0);
+      Assert(bindResult == VK_SUCCESS, "Failed to bind scene buffer memory");
+
+      void *mapped = nullptr;
+      VkResult mapResult = vkMapMemory(Vulkan.device, memory, 0, size, 0, &mapped);
+      Assert(mapResult == VK_SUCCESS, "Failed to map scene buffer memory");
+      std::memcpy(mapped, data, static_cast<size_t>(size));
+      vkUnmapMemory(Vulkan.device, memory);
+   };
+
+   VkDeviceSize vertexBytes = static_cast<VkDeviceSize>(vertices.size() * sizeof(Vertex));
+   VkDeviceSize indexBytes = static_cast<VkDeviceSize>(indices.size() * sizeof(u32));
+   createBufferWithData(VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, vertices.data(), vertexBytes, Vulkan.sceneVertexBuffer, Vulkan.sceneVertexMemory);
+   createBufferWithData(VK_BUFFER_USAGE_INDEX_BUFFER_BIT, indices.data(), indexBytes, Vulkan.sceneIndexBuffer, Vulkan.sceneIndexMemory);
+
+   Vulkan.sceneIndexCount = static_cast<u32>(indices.size());
+   Vulkan.sceneReady = true;
+}
+
+void DestroyScene()
+{
+   if (!Vulkan.sceneReady)
+   {
+      return;
+   }
+
+   if (Vulkan.device == VK_NULL_HANDLE)
+   {
+      Vulkan.sceneVertexBuffer = VK_NULL_HANDLE;
+      Vulkan.sceneVertexMemory = VK_NULL_HANDLE;
+      Vulkan.sceneIndexBuffer = VK_NULL_HANDLE;
+      Vulkan.sceneIndexMemory = VK_NULL_HANDLE;
+      Vulkan.sceneIndexCount = 0;
+      Vulkan.sceneReady = false;
+      return;
+   }
+
+   if (Vulkan.sceneVertexBuffer != VK_NULL_HANDLE)
+   {
+      vkDestroyBuffer(Vulkan.device, Vulkan.sceneVertexBuffer, nullptr);
+      Vulkan.sceneVertexBuffer = VK_NULL_HANDLE;
+   }
+   if (Vulkan.sceneVertexMemory != VK_NULL_HANDLE)
+   {
+      vkFreeMemory(Vulkan.device, Vulkan.sceneVertexMemory, nullptr);
+      Vulkan.sceneVertexMemory = VK_NULL_HANDLE;
+   }
+
+   if (Vulkan.sceneIndexBuffer != VK_NULL_HANDLE)
+   {
+      vkDestroyBuffer(Vulkan.device, Vulkan.sceneIndexBuffer, nullptr);
+      Vulkan.sceneIndexBuffer = VK_NULL_HANDLE;
+   }
+   if (Vulkan.sceneIndexMemory != VK_NULL_HANDLE)
+   {
+      vkFreeMemory(Vulkan.device, Vulkan.sceneIndexMemory, nullptr);
+      Vulkan.sceneIndexMemory = VK_NULL_HANDLE;
+   }
+
+   Vulkan.sceneIndexCount = 0;
+   Vulkan.sceneReady = false;
+}
+
+void CreateDepthResources()
+{
+   if (Vulkan.depthResourcesReady)
+   {
+      return;
+   }
+
+   Assert(Vulkan.deviceReady, "Create the Vulkan device before depth resources");
+   Assert(Vulkan.swapchainReady, "Create the Vulkan swapchain before depth resources");
+   Assert(Vulkan.physicalDeviceReady, "Select a physical device before creating depth resources");
+
+   VkFormat selectedFormat = VK_FORMAT_UNDEFINED;
+   const std::array<VkFormat, 3> depthCandidates = {
+      VK_FORMAT_D32_SFLOAT,
+      VK_FORMAT_D32_SFLOAT_S8_UINT,
+      VK_FORMAT_D24_UNORM_S8_UINT,
+   };
+
+   for (VkFormat candidate : depthCandidates)
+   {
+      VkFormatProperties properties = {};
+      vkGetPhysicalDeviceFormatProperties(Vulkan.physicalDevice, candidate, &properties);
+      if ((properties.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) != 0)
+      {
+         selectedFormat = candidate;
+         break;
+      }
+   }
+
+   Assert(selectedFormat != VK_FORMAT_UNDEFINED, "No supported depth format found");
+   Vulkan.depthFormat = selectedFormat;
+
+   VkExtent2D extent = Vulkan.swapchainExtent;
+   Assert((extent.width > 0) && (extent.height > 0), "Swapchain extent is invalid for depth resources");
+
+   VkImageCreateInfo imageInfo = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+      .imageType = VK_IMAGE_TYPE_2D,
+      .format = Vulkan.depthFormat,
+      .extent = {extent.width, extent.height, 1},
+      .mipLevels = 1,
+      .arrayLayers = 1,
+      .samples = VK_SAMPLE_COUNT_1_BIT,
+      .tiling = VK_IMAGE_TILING_OPTIMAL,
+      .usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+      .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+      .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+   };
+
+   VkResult imageResult = vkCreateImage(Vulkan.device, &imageInfo, nullptr, &Vulkan.depthImage);
+   Assert(imageResult == VK_SUCCESS, "Failed to create depth image");
+
+   VkMemoryRequirements requirements = {};
+   vkGetImageMemoryRequirements(Vulkan.device, Vulkan.depthImage, &requirements);
+
+   VkMemoryAllocateInfo allocInfo = {
+      .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+      .allocationSize = requirements.size,
+      .memoryTypeIndex = FindMemoryType(requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT),
+   };
+
+   VkResult allocResult = vkAllocateMemory(Vulkan.device, &allocInfo, nullptr, &Vulkan.depthMemory);
+   Assert(allocResult == VK_SUCCESS, "Failed to allocate depth image memory");
+
+   VkResult bindResult = vkBindImageMemory(Vulkan.device, Vulkan.depthImage, Vulkan.depthMemory, 0);
+   Assert(bindResult == VK_SUCCESS, "Failed to bind depth image memory");
+
+   bool hasStencil = (Vulkan.depthFormat == VK_FORMAT_D32_SFLOAT_S8_UINT) ||
+                     (Vulkan.depthFormat == VK_FORMAT_D24_UNORM_S8_UINT);
+   VkImageAspectFlags aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+   if (hasStencil)
+   {
+      aspectMask |= VK_IMAGE_ASPECT_STENCIL_BIT;
+   }
+
+   VkImageViewCreateInfo viewInfo = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+      .image = Vulkan.depthImage,
+      .viewType = VK_IMAGE_VIEW_TYPE_2D,
+      .format = Vulkan.depthFormat,
+      .subresourceRange = {
+         .aspectMask = aspectMask,
+         .baseMipLevel = 0,
+         .levelCount = 1,
+         .baseArrayLayer = 0,
+         .layerCount = 1,
+      },
+   };
+
+   VkResult viewResult = vkCreateImageView(Vulkan.device, &viewInfo, nullptr, &Vulkan.depthView);
+   Assert(viewResult == VK_SUCCESS, "Failed to create depth image view");
+
+   Vulkan.depthLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+   Vulkan.depthResourcesReady = true;
+}
+
+void DestroyDepthResources()
+{
+   if (Vulkan.device == VK_NULL_HANDLE)
+   {
+      Vulkan.depthResourcesReady = false;
+      Vulkan.depthImage = VK_NULL_HANDLE;
+      Vulkan.depthMemory = VK_NULL_HANDLE;
+      Vulkan.depthView = VK_NULL_HANDLE;
+      Vulkan.depthFormat = VK_FORMAT_UNDEFINED;
+      Vulkan.depthLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+      return;
+   }
+
+   if (Vulkan.depthView != VK_NULL_HANDLE)
+   {
+      vkDestroyImageView(Vulkan.device, Vulkan.depthView, nullptr);
+      Vulkan.depthView = VK_NULL_HANDLE;
+   }
+
+   if (Vulkan.depthImage != VK_NULL_HANDLE)
+   {
+      vkDestroyImage(Vulkan.device, Vulkan.depthImage, nullptr);
+      Vulkan.depthImage = VK_NULL_HANDLE;
+   }
+
+   if (Vulkan.depthMemory != VK_NULL_HANDLE)
+   {
+      vkFreeMemory(Vulkan.device, Vulkan.depthMemory, nullptr);
+      Vulkan.depthMemory = VK_NULL_HANDLE;
+   }
+
+   Vulkan.depthResourcesReady = false;
+   Vulkan.depthFormat = VK_FORMAT_UNDEFINED;
+   Vulkan.depthLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+}
+
+void CreateForwardRenderer()
+{
+   if (Vulkan.forwardRendererReady)
+   {
+      return;
+   }
+
+   Assert(Vulkan.sceneReady, "Create scene before creating forward renderer");
+   CreateDepthResources();
+   CreateForwardPipeline();
+   Vulkan.forwardRendererReady = true;
+}
+
+void DestroyForwardRenderer()
+{
+   if (!Vulkan.forwardRendererReady)
+   {
+      return;
+   }
+
+   DestroyForwardPipeline();
+   DestroyDepthResources();
+   Vulkan.forwardRendererReady = false;
+}
+
+void CreateForwardPipeline()
+{
+   if (Vulkan.forwardPipelineReady)
    {
       return;
    }
 
    Assert(Vulkan.deviceReady, "Create the Vulkan device before pipelines");
    Assert(Vulkan.swapchainReady, "Create the Vulkan swapchain before pipelines");
+   Assert(Vulkan.depthResourcesReady, "Create depth resources before pipelines");
    Assert(ShaderCacheDirectory[0] != '\0', "Shader cache directory is not defined");
 
    array<char, 512> vertexPath {};
@@ -1169,16 +1650,16 @@ void CreateFullscreenPipeline()
       Assert((written > 0) && (static_cast<size_t>(written) < buffer.size()), "Shader path truncated");
    };
 
-   buildPath(ShaderCacheDirectory, FullscreenVertexShaderName, vertexPath);
-   buildPath(ShaderCacheDirectory, FullscreenFragmentShaderName, fragmentPath);
+   buildPath(ShaderCacheDirectory, ForwardVertexShaderName, vertexPath);
+   buildPath(ShaderCacheDirectory, ForwardFragmentShaderName, fragmentPath);
 
-   Vulkan.fullscreenVertexShader = CreateShader(vertexPath.data());
-   Vulkan.fullscreenFragmentShader = CreateShader(fragmentPath.data());
+   Vulkan.forwardVertexShader = CreateShader(vertexPath.data());
+   Vulkan.forwardFragmentShader = CreateShader(fragmentPath.data());
 
    VkPushConstantRange pushConstant = {
       .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
       .offset = 0,
-      .size = sizeof(GradientParams),
+      .size = sizeof(ForwardPushConstants),
    };
 
    VkPipelineLayoutCreateInfo layoutInfo = {
@@ -1189,30 +1670,57 @@ void CreateFullscreenPipeline()
       .pPushConstantRanges = &pushConstant,
    };
 
-   VkResult layoutResult = vkCreatePipelineLayout(Vulkan.device, &layoutInfo, nullptr, &Vulkan.fullscreenPipelineLayout);
-   Assert(layoutResult == VK_SUCCESS, "Failed to create fullscreen pipeline layout");
+   VkResult layoutResult = vkCreatePipelineLayout(Vulkan.device, &layoutInfo, nullptr, &Vulkan.forwardPipelineLayout);
+   Assert(layoutResult == VK_SUCCESS, "Failed to create forward pipeline layout");
 
    VkPipelineShaderStageCreateInfo shaderStages[2] = {
       {
          .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
          .stage = VK_SHADER_STAGE_VERTEX_BIT,
-         .module = Vulkan.fullscreenVertexShader,
+         .module = Vulkan.forwardVertexShader,
          .pName = "main",
       },
       {
          .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
          .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
-         .module = Vulkan.fullscreenFragmentShader,
+         .module = Vulkan.forwardFragmentShader,
          .pName = "main",
+      },
+   };
+
+   VkVertexInputBindingDescription vertexBinding = {
+      .binding = 0,
+      .stride = static_cast<u32>(sizeof(Vertex)),
+      .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+   };
+
+   std::array<VkVertexInputAttributeDescription, 3> vertexAttributes = {
+      VkVertexInputAttributeDescription{
+         .location = 0,
+         .binding = 0,
+         .format = VK_FORMAT_R32G32B32_SFLOAT,
+         .offset = static_cast<u32>(offsetof(Vertex, position)),
+      },
+      VkVertexInputAttributeDescription{
+         .location = 1,
+         .binding = 0,
+         .format = VK_FORMAT_R32G32B32_SFLOAT,
+         .offset = static_cast<u32>(offsetof(Vertex, normal)),
+      },
+      VkVertexInputAttributeDescription{
+         .location = 2,
+         .binding = 0,
+         .format = VK_FORMAT_R32G32_SFLOAT,
+         .offset = static_cast<u32>(offsetof(Vertex, uv)),
       },
    };
 
    VkPipelineVertexInputStateCreateInfo vertexInput = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-      .vertexBindingDescriptionCount = 0,
-      .pVertexBindingDescriptions = nullptr,
-      .vertexAttributeDescriptionCount = 0,
-      .pVertexAttributeDescriptions = nullptr,
+      .vertexBindingDescriptionCount = 1,
+      .pVertexBindingDescriptions = &vertexBinding,
+      .vertexAttributeDescriptionCount = static_cast<u32>(vertexAttributes.size()),
+      .pVertexAttributeDescriptions = vertexAttributes.data(),
    };
 
    VkPipelineInputAssemblyStateCreateInfo inputAssembly = {
@@ -1246,6 +1754,17 @@ void CreateFullscreenPipeline()
       .sampleShadingEnable = VK_FALSE,
    };
 
+   VkPipelineDepthStencilStateCreateInfo depthStencil = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+      .depthTestEnable = VK_TRUE,
+      .depthWriteEnable = VK_TRUE,
+      .depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL,
+      .depthBoundsTestEnable = VK_FALSE,
+      .stencilTestEnable = VK_FALSE,
+      .minDepthBounds = 0.0f,
+      .maxDepthBounds = 1.0f,
+   };
+
    VkPipelineColorBlendAttachmentState colorBlendAttachment = {
       .blendEnable = VK_FALSE,
       .colorWriteMask = VK_COLOR_COMPONENT_R_BIT |
@@ -1273,6 +1792,8 @@ void CreateFullscreenPipeline()
       .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
       .colorAttachmentCount = 1,
       .pColorAttachmentFormats = &Vulkan.swapchainFormat,
+      .depthAttachmentFormat = Vulkan.depthFormat,
+      .stencilAttachmentFormat = VK_FORMAT_UNDEFINED,
    };
 
    uint32_t shaderStageCount = static_cast<uint32_t>(sizeof(shaderStages) / sizeof(shaderStages[0]));
@@ -1287,10 +1808,10 @@ void CreateFullscreenPipeline()
       .pViewportState = &viewportState,
       .pRasterizationState = &rasterizer,
       .pMultisampleState = &multisampling,
-      .pDepthStencilState = nullptr,
+      .pDepthStencilState = &depthStencil,
       .pColorBlendState = &colorBlending,
       .pDynamicState = &dynamicState,
-      .layout = Vulkan.fullscreenPipelineLayout,
+      .layout = Vulkan.forwardPipelineLayout,
       .renderPass = VK_NULL_HANDLE,
       .subpass = 0,
    };
@@ -1301,39 +1822,39 @@ void CreateFullscreenPipeline()
       1,
       &pipelineInfo,
       nullptr,
-      &Vulkan.fullscreenPipeline);
-   Assert(pipelineResult == VK_SUCCESS, "Failed to create fullscreen graphics pipeline");
+      &Vulkan.forwardPipeline);
+   Assert(pipelineResult == VK_SUCCESS, "Failed to create forward graphics pipeline");
 
-   Vulkan.fullscreenPipelineReady = true;
+   Vulkan.forwardPipelineReady = true;
 }
 
-void DestroyFullscreenPipeline()
+void DestroyForwardPipeline()
 {
-   if ((Vulkan.fullscreenPipeline == VK_NULL_HANDLE) &&
-       (Vulkan.fullscreenPipelineLayout == VK_NULL_HANDLE) &&
-       (Vulkan.fullscreenVertexShader == VK_NULL_HANDLE) &&
-       (Vulkan.fullscreenFragmentShader == VK_NULL_HANDLE))
+   if ((Vulkan.forwardPipeline == VK_NULL_HANDLE) &&
+       (Vulkan.forwardPipelineLayout == VK_NULL_HANDLE) &&
+       (Vulkan.forwardVertexShader == VK_NULL_HANDLE) &&
+       (Vulkan.forwardFragmentShader == VK_NULL_HANDLE))
    {
-      Vulkan.fullscreenPipelineReady = false;
+      Vulkan.forwardPipelineReady = false;
       return;
    }
 
-   if ((Vulkan.device != VK_NULL_HANDLE) && (Vulkan.fullscreenPipeline != VK_NULL_HANDLE))
+   if ((Vulkan.device != VK_NULL_HANDLE) && (Vulkan.forwardPipeline != VK_NULL_HANDLE))
    {
-      vkDestroyPipeline(Vulkan.device, Vulkan.fullscreenPipeline, nullptr);
-      Vulkan.fullscreenPipeline = VK_NULL_HANDLE;
+      vkDestroyPipeline(Vulkan.device, Vulkan.forwardPipeline, nullptr);
+      Vulkan.forwardPipeline = VK_NULL_HANDLE;
    }
 
-   if ((Vulkan.device != VK_NULL_HANDLE) && (Vulkan.fullscreenPipelineLayout != VK_NULL_HANDLE))
+   if ((Vulkan.device != VK_NULL_HANDLE) && (Vulkan.forwardPipelineLayout != VK_NULL_HANDLE))
    {
-      vkDestroyPipelineLayout(Vulkan.device, Vulkan.fullscreenPipelineLayout, nullptr);
-      Vulkan.fullscreenPipelineLayout = VK_NULL_HANDLE;
+      vkDestroyPipelineLayout(Vulkan.device, Vulkan.forwardPipelineLayout, nullptr);
+      Vulkan.forwardPipelineLayout = VK_NULL_HANDLE;
    }
 
-   DestroyShader(Vulkan.fullscreenVertexShader);
-   DestroyShader(Vulkan.fullscreenFragmentShader);
+   DestroyShader(Vulkan.forwardVertexShader);
+   DestroyShader(Vulkan.forwardFragmentShader);
 
-   Vulkan.fullscreenPipelineReady = false;
+   Vulkan.forwardPipelineReady = false;
 }
 
 void RecreateSwapchain()
@@ -1359,14 +1880,14 @@ void RecreateSwapchain()
    vkDeviceWaitIdle(Vulkan.device);
 
    DestroyFrameResources();
-   DestroyFullscreenPipeline();
+   DestroyForwardRenderer();
    DestroySwapchainImageViews();
    Vulkan.swapchainReady = false;
    Vulkan.swapchainImageViewsReady = false;
 
    CreateSwapchain();
    CreateSwapchainImageViews();
-   CreateFullscreenPipeline();
+   CreateForwardRenderer();
    CreateFrameResources();
    ResetCameraAccum();
 }
@@ -1556,12 +2077,16 @@ auto AcquireNextImage(u32 &imageIndex, u32 &frameIndex) -> VkResult
    return acquireResult;
 }
 
-auto RecordCommandBuffer(u32 frameIndex, u32 imageIndex, const GradientParams &gradient) -> VkResult
+auto DrawFrameForward(u32 frameIndex, u32 imageIndex, const GradientParams &gradient) -> VkResult
 {
    Assert(Vulkan.swapchainReady, "Create the Vulkan swapchain before recording commands");
    Assert(Vulkan.swapchainImageViewsReady, "Create swapchain image views before recording commands");
    Assert(Vulkan.frameResourcesReady, "Frame resources must exist before recording commands");
-   Assert(Vulkan.fullscreenPipelineReady, "Fullscreen pipeline must be ready before recording commands");
+   Assert(Vulkan.sceneReady, "Create the scene before drawing");
+   Assert(Vulkan.forwardRendererReady, "Create the forward renderer before drawing");
+   Assert(Vulkan.forwardPipelineReady, "Forward pipeline must be ready before recording commands");
+   Assert(Vulkan.depthResourcesReady, "Depth resources must be ready before recording commands");
+   Assert(Vulkan.depthView != VK_NULL_HANDLE, "Depth view is not initialized");
    Assert(frameIndex < FrameOverlap, "Frame index out of range");
    Assert(imageIndex < Vulkan.swapchainImageCount, "Swapchain image index out of range");
 
@@ -1602,6 +2127,22 @@ auto RecordCommandBuffer(u32 frameIndex, u32 imageIndex, const GradientParams &g
       .layerCount = 1,
    };
 
+   bool hasStencil = (Vulkan.depthFormat == VK_FORMAT_D32_SFLOAT_S8_UINT) ||
+                     (Vulkan.depthFormat == VK_FORMAT_D24_UNORM_S8_UINT);
+   VkImageAspectFlags depthAspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+   if (hasStencil)
+   {
+      depthAspectMask |= VK_IMAGE_ASPECT_STENCIL_BIT;
+   }
+
+   VkImageSubresourceRange depthSubresource = {
+      .aspectMask = depthAspectMask,
+      .baseMipLevel = 0,
+      .levelCount = 1,
+      .baseArrayLayer = 0,
+      .layerCount = 1,
+   };
+
    VkImageMemoryBarrier barrierToAttachment = {
       .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
       .srcAccessMask = 0,
@@ -1626,7 +2167,37 @@ auto RecordCommandBuffer(u32 frameIndex, u32 imageIndex, const GradientParams &g
       1,
       &barrierToAttachment);
 
+   VkImageMemoryBarrier depthBarrier = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+      .srcAccessMask = (Vulkan.depthLayout == VK_IMAGE_LAYOUT_UNDEFINED) ? 0u : VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+      .dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+      .oldLayout = Vulkan.depthLayout,
+      .newLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+      .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+      .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+      .image = Vulkan.depthImage,
+      .subresourceRange = depthSubresource,
+   };
+
+   vkCmdPipelineBarrier(
+      frame.commandBuffer,
+      (Vulkan.depthLayout == VK_IMAGE_LAYOUT_UNDEFINED)
+         ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
+         : (VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT),
+      VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+      0,
+      0,
+      nullptr,
+      0,
+      nullptr,
+      1,
+      &depthBarrier);
+
    VkClearColorValue clearColor = {{0.0f, 0.0f, 0.0f, 1.0f}};
+   VkClearDepthStencilValue clearDepth = {
+      .depth = 1.0f,
+      .stencil = 0u,
+   };
 
    VkRenderingAttachmentInfo colorAttachment = {
       .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
@@ -1635,6 +2206,15 @@ auto RecordCommandBuffer(u32 frameIndex, u32 imageIndex, const GradientParams &g
       .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
       .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
       .clearValue = {.color = clearColor},
+   };
+
+   VkRenderingAttachmentInfo depthAttachment = {
+      .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+      .imageView = Vulkan.depthView,
+      .imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+      .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+      .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+      .clearValue = {.depthStencil = clearDepth},
    };
 
    VkRenderingInfo renderingInfo = {
@@ -1646,6 +2226,7 @@ auto RecordCommandBuffer(u32 frameIndex, u32 imageIndex, const GradientParams &g
       .layerCount = 1,
       .colorAttachmentCount = 1,
       .pColorAttachments = &colorAttachment,
+      .pDepthAttachment = &depthAttachment,
    };
 
    vkCmdBeginRendering(frame.commandBuffer, &renderingInfo);
@@ -1666,17 +2247,108 @@ auto RecordCommandBuffer(u32 frameIndex, u32 imageIndex, const GradientParams &g
    };
    vkCmdSetScissor(frame.commandBuffer, 0, 1, &scissor);
 
-   vkCmdBindPipeline(frame.commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, Vulkan.fullscreenPipeline);
+   vkCmdBindPipeline(frame.commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, Vulkan.forwardPipeline);
+   Assert(Vulkan.sceneVertexBuffer != VK_NULL_HANDLE, "Scene vertex buffer is not initialized");
+   Assert(Vulkan.sceneIndexBuffer != VK_NULL_HANDLE, "Scene index buffer is not initialized");
+   Assert(Vulkan.sceneIndexCount > 0, "Scene index count is zero");
+
+   VkDeviceSize vertexOffset = 0;
+   vkCmdBindVertexBuffers(frame.commandBuffer, 0, 1, &Vulkan.sceneVertexBuffer, &vertexOffset);
+   vkCmdBindIndexBuffer(frame.commandBuffer, Vulkan.sceneIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+
+   CameraParams camera = GetCameraParams();
+   float nearPlane = 0.05f;
+   float farPlane = 200.0f;
+   float aspect = (extent.height > 0) ? (static_cast<float>(extent.width) / static_cast<float>(extent.height)) : 1.0f;
+   if (aspect <= 0.0f)
+   {
+      aspect = 1.0f;
+   }
+
+   auto dot3 = [](const Vec3 &a, const Vec3 &b) -> float
+   {
+      return a.x*b.x + a.y*b.y + a.z*b.z;
+   };
+   auto setIdentity = [](float *matrix)
+   {
+      std::memset(matrix, 0, sizeof(float) * 16);
+      matrix[0] = 1.0f;
+      matrix[5] = 1.0f;
+      matrix[10] = 1.0f;
+      matrix[15] = 1.0f;
+   };
+   auto multiplyMat4 = [](const float *a, const float *b, float *result)
+   {
+      float temp[16] = {};
+      for (int column = 0; column < 4; ++column)
+      {
+         for (int row = 0; row < 4; ++row)
+         {
+            float sum = 0.0f;
+            for (int k = 0; k < 4; ++k)
+            {
+               sum += a[k*4 + row] * b[column*4 + k];
+            }
+            temp[column*4 + row] = sum;
+         }
+      }
+      std::memcpy(result, temp, sizeof(temp));
+   };
+
+   float model[16] = {};
+   setIdentity(model);
+
+   float view[16] = {};
+   view[0] = camera.right.x;
+   view[1] = camera.right.y;
+   view[2] = camera.right.z;
+   view[3] = 0.0f;
+   view[4] = camera.up.x;
+   view[5] = camera.up.y;
+   view[6] = camera.up.z;
+   view[7] = 0.0f;
+   view[8] = -camera.forward.x;
+   view[9] = -camera.forward.y;
+   view[10] = -camera.forward.z;
+   view[11] = 0.0f;
+   view[12] = -dot3(camera.right, camera.position);
+   view[13] = -dot3(camera.up, camera.position);
+   view[14] = dot3(camera.forward, camera.position);
+   view[15] = 1.0f;
+
+   float proj[16] = {};
+   float tanHalfFov = std::tan(camera.verticalFovRadians * 0.5f);
+   if (tanHalfFov <= 0.0f)
+   {
+      tanHalfFov = 0.001f;
+   }
+   float focal = 1.0f / tanHalfFov;
+   proj[0] = focal / aspect;
+   proj[5] = -focal;
+   proj[10] = farPlane / (nearPlane - farPlane);
+   proj[11] = -1.0f;
+   proj[14] = (nearPlane * farPlane) / (nearPlane - farPlane);
+
+   ForwardPushConstants constants = {};
+   float viewProj[16] = {};
+   multiplyMat4(proj, view, viewProj);
+   multiplyMat4(viewProj, model, constants.mvp);
+
+   float pulse = 0.92f + 0.08f * std::sin(gradient.time * 0.75f);
+   constants.tint[0] = pulse;
+   constants.tint[1] = pulse;
+   constants.tint[2] = pulse;
+   constants.tint[3] = 1.0f;
 
    vkCmdPushConstants(
       frame.commandBuffer,
-      Vulkan.fullscreenPipelineLayout,
+      Vulkan.forwardPipelineLayout,
       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
       0,
-      sizeof(GradientParams),
-      &gradient);
+      sizeof(ForwardPushConstants),
+      &constants);
 
-   vkCmdDraw(frame.commandBuffer, 3, 1, 0, 0);
+   vkCmdDrawIndexed(frame.commandBuffer, Vulkan.sceneIndexCount, 1, 0, 0, 0);
 
    vkCmdEndRendering(frame.commandBuffer);
 
@@ -1708,6 +2380,7 @@ auto RecordCommandBuffer(u32 frameIndex, u32 imageIndex, const GradientParams &g
    if (endResult == VK_SUCCESS)
    {
       Vulkan.swapchainImageLayouts[imageIndex] = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+      Vulkan.depthLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
    }
 
    return endResult;

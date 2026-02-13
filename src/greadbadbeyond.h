@@ -97,6 +97,19 @@ struct CameraParams
     float pad3;
 };
 
+struct Vertex
+{
+    Vec3 position;
+    Vec3 normal;
+    Vec2 uv;
+};
+
+struct ForwardPushConstants
+{
+    float mvp[16];
+    float tint[4];
+};
+
 //------------------------------------------------------------------------------------
 // Window and Platform Functions (Module: platform)
 //------------------------------------------------------------------------------------
@@ -214,7 +227,7 @@ void RecreateSwapchain();
 void CreateFrameResources();
 void DestroyFrameResources();
 auto AcquireNextImage(u32 &imageIndex, u32 &frameIndex) -> VkResult;
-auto RecordCommandBuffer(u32 frameIndex, u32 imageIndex, const GradientParams &gradient) -> VkResult;
+auto DrawFrameForward(u32 frameIndex, u32 imageIndex, const GradientParams &gradient) -> VkResult;
 auto SubmitFrame(u32 frameIndex, u32 imageIndex) -> VkResult;
 
 // VMA-related functions
@@ -249,10 +262,17 @@ void DestroyDescriptorSet();
 // Shader-related functions
 auto CreateShader(const char *path) -> VkShaderModule;
 void DestroyShader(VkShaderModule &shader);
+auto FindMemoryType(u32 typeBits, VkMemoryPropertyFlags properties) -> u32;
 
 // Pipeline-related functions
-void CreateFullscreenPipeline();
-void DestroyFullscreenPipeline();
+void CreateForwardPipeline();
+void DestroyForwardPipeline();
+void CreateDepthResources();
+void DestroyDepthResources();
+void CreateScene();
+void DestroyScene();
+void CreateForwardRenderer();
+void DestroyForwardRenderer();
 
 // Drawing-related functions
 void DrawFrame();

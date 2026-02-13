@@ -28,8 +28,8 @@ Build a real forward raster renderer in `greadbadbeyond` with these properties:
 - Vulkan lifecycle and swapchain lifecycle are stable.
 - Frame overlap and sync objects are stable.
 - Dynamic rendering path exists.
-- Fullscreen graphics path exists.
-- Path tracer/compute API and runtime path are removed from active code.
+- World-space forward mesh path exists for a single scene object.
+- Legacy compute rendering path is removed from active code.
 
 ## Target Architecture (v1)
 

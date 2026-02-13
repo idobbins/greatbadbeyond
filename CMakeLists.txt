@@ -43,8 +43,8 @@ endif()
 set(SHADER_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/resources/shaders)
 set(SHADER_OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/shaders)
 set(SHADER_SOURCES
-    ${SHADER_SOURCE_DIR}/fullscreen_triangle.vert
-    ${SHADER_SOURCE_DIR}/fullscreen_triangle.frag
+    ${SHADER_SOURCE_DIR}/forward_opaque.vert
+    ${SHADER_SOURCE_DIR}/forward_opaque.frag
 )
 
 set(SHADER_OUTPUTS "")
@@ -75,7 +75,10 @@ target_include_directories(${PROJECT_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/s
 
 target_link_libraries(${PROJECT_NAME} PRIVATE glfw Vulkan::Vulkan)
 add_dependencies(${PROJECT_NAME} shaders)
-target_compile_definitions(${PROJECT_NAME} PRIVATE SHADER_CACHE_DIRECTORY="${SHADER_OUTPUT_DIR}")
+target_compile_definitions(${PROJECT_NAME} PRIVATE
+    SHADER_CACHE_DIRECTORY="${SHADER_OUTPUT_DIR}"
+    ASSET_SOURCE_DIRECTORY="${CMAKE_CURRENT_SOURCE_DIR}/resources"
+)
 
 if(MSVC)
     target_compile_options(${PROJECT_NAME} PRIVATE /W4 /permissive-)

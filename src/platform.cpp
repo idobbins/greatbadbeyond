@@ -315,10 +315,10 @@ void MainLoop()
         gradient.time = static_cast<float>(glfwGetTime());
         gradient.padding = 0.0f;
 
-        VkResult recordResult = RecordCommandBuffer(frameIndex, imageIndex, gradient);
+        VkResult recordResult = DrawFrameForward(frameIndex, imageIndex, gradient);
         if (recordResult != VK_SUCCESS)
         {
-            LogError("[vulkan] RecordCommandBuffer failed (result=%d)", recordResult);
+            LogError("[vulkan] DrawFrameForward failed (result=%d)", recordResult);
             break;
         }
 
