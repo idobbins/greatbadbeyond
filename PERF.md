@@ -50,13 +50,20 @@ This minimizes pipeline and descriptor churn before adding more systems.
 
 For first scene bring-up, use one OBJ from:
 
-- `/Users/idobbins/Downloads/Kenney/3D assets/Prototype Kit/Models/OBJ format/shape-cube.obj`
+- `resources/external/Kenney/3D assets/Prototype Kit/Models/OBJ format/shape-cube.obj`
 
 Target behavior:
 
 - Single centered model at world origin.
 - Camera starts offset and looks toward origin.
-- Texture path from MTL resolves to local imported asset folder under `resources/models/`.
+- Scene assets resolve via generated manifest handles plus `kenney_assets.pack`.
+
+Pack status (February 13, 2026):
+
+- `asset count = 84,470`
+- `alias count = 8,353`
+- `mesh/image/audio/raw = 5,009 / 54,216 / 1,342 / 23,903`
+- `pack bytes = 12,400,250,685`
 
 ## Profiling Gates
 

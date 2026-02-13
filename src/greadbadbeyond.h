@@ -159,6 +159,15 @@ void UpdateCameraFromInput(float deltaSeconds);
 auto GetCameraParams() -> CameraParams;
 
 //------------------------------------------------------------------------------------
+// Asset Manifest Blob Functions (Module: manifest_blob)
+//------------------------------------------------------------------------------------
+
+void CreateManifestBlob();
+void DestroyManifestBlob();
+auto IsManifestBlobReady() -> bool;
+auto GetManifestBlobBytes() -> std::span<const std::byte>;
+
+//------------------------------------------------------------------------------------
 // Vulkan Functions (Module: vulkan)
 //------------------------------------------------------------------------------------
 

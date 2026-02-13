@@ -41,6 +41,21 @@ Build a real forward raster renderer in `greadbadbeyond` with these properties:
 - World-space forward mesh path exists (current test content is grid-expanded).
 - Legacy compute rendering path is removed from active code.
 
+## Asset Pack Direction (Active)
+
+- Asset ingestion is now prebuilt into a single binary pack: `resources/external/kenney_assets.pack`.
+- `manifest.h` is generated ahead-of-time and exposes namespace-scoped `AssetHandle` constants for direct code access.
+- Runtime loads one pack file and resolves handles by index; no runtime hash-table lookup path is required.
+- v1 conversion policy.
+Models: `.obj` -> `MESH_PNUV_F32_U32` payload (interleaved position/normal/uv + `u32` index buffer).
+Images: raster formats (`png`, `jpg`, `jpeg`, `bmp`, `tga`, `webp`, `gif`) -> `IMAGE_RGBA8_MIPS`.
+Audio: semantic audio assets -> `AUDIO_PCM16_INTERLEAVED`.
+Everything else: `RAW_BYTES` fallback.
+- Canonical selection and dedupe.
+Extension-preference aliasing chooses one canonical asset per family (model/image/audio stem groups).
+Content-identical payloads are deduplicated and alias-linked to one canonical payload.
+- Latest full generation (February 13, 2026): `asset count = 84,470`, `alias count = 8,353`, `pack bytes = 12,400,250,685`.
+
 ## Target Architecture (v1)
 
 CPU data:
@@ -89,19 +104,19 @@ Pass 1 (later): Forward transparent
 
 Source asset for first render target:
 
-- `/Users/idobbins/Downloads/Kenney/3D assets/Prototype Kit/Models/OBJ format/shape-cube.obj`
-- `/Users/idobbins/Downloads/Kenney/3D assets/Prototype Kit/Models/OBJ format/shape-cube.mtl`
-- `/Users/idobbins/Downloads/Kenney/3D assets/Prototype Kit/Models/OBJ format/Textures/colormap.png`
+- `resources/external/Kenney/3D assets/Prototype Kit/Models/OBJ format/shape-cube.obj`
+- `resources/external/Kenney/3D assets/Prototype Kit/Models/OBJ format/shape-cube.mtl`
+- `resources/external/Kenney/3D assets/Prototype Kit/Models/OBJ format/Textures/colormap.png`
 
 Repository destination:
 
-- `resources/models/kenney/prototype/shape-cube.obj`
-- `resources/models/kenney/prototype/shape-cube.mtl`
-- `resources/models/kenney/prototype/Textures/colormap.png`
+- `resources/external/Kenney/3D assets/Prototype Kit/Models/OBJ format/shape-cube.obj`
+- `resources/external/Kenney/3D assets/Prototype Kit/Models/OBJ format/shape-cube.mtl`
+- `resources/external/Kenney/3D assets/Prototype Kit/Models/OBJ format/Textures/colormap.png`
 
 Import rule:
 
-- Runtime reads only from repository paths, never directly from `Downloads`.
+- Runtime reads assets through generated manifest handles and pack metadata.
 
 ## Phase Plan
 
@@ -162,7 +177,7 @@ Changes:
 Acceptance:
 
 - `shape-cube.obj` renders centered in scene.
-- Texture resolves from `resources/models/kenney/prototype/Textures/colormap.png`.
+- Texture resolves from `resources/external/Kenney/3D assets/Prototype Kit/Models/OBJ format/Textures/colormap.png`.
 
 ### Phase 5: Frame Globals UBO
 
@@ -244,7 +259,7 @@ Acceptance:
 - `src/asset_obj.cpp`: minimal OBJ parse/load path.
 - `src/debug_*.cpp` or equivalent: runtime visualization and instrumentation hooks.
 - `CMakeLists.txt`: add new source files and shader inputs.
-- `resources/models/kenney/prototype/*`: first in-repo model assets.
+- `resources/external/Kenney/*`: source content indexed by generated manifest metadata.
 
 ## Validation Checklist Per Phase
 

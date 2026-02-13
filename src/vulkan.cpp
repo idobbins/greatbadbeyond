@@ -1,6 +1,7 @@
 #include <greadbadbeyond.h>
 #include <config.h>
 #include <utils.h>
+#include <manifest.h>
 
 #include <vulkan/vulkan.h>
 #include <GLFW/glfw3.h>
@@ -11,12 +12,10 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
-#include <fstream>
 #include <iostream>
 #include <limits>
 #include <memory_resource>
 #include <ostream>
-#include <sstream>
 #include <string>
 #include <vector>
 
@@ -25,12 +24,8 @@ using namespace std;
 #ifndef SHADER_CACHE_DIRECTORY
 #define SHADER_CACHE_DIRECTORY ""
 #endif
-#ifndef ASSET_SOURCE_DIRECTORY
-#define ASSET_SOURCE_DIRECTORY ""
-#endif
 
 static constexpr const char *ShaderCacheDirectory = SHADER_CACHE_DIRECTORY;
-static constexpr const char *AssetSourceDirectory = ASSET_SOURCE_DIRECTORY;
 static constexpr const char *ForwardVertexShaderName = "forward_opaque.vert.spv";
 static constexpr const char *ForwardFragmentShaderName = "forward_opaque.frag.spv";
 static constexpr u32 SceneGridWidth = 32;
@@ -1284,150 +1279,45 @@ void CreateScene()
 
    Assert(Vulkan.deviceReady, "Create Vulkan device before scene");
 
-   std::string objPath = "resources/models/kenney/prototype/shape-cube.obj";
-   if (AssetSourceDirectory[0] != '\0')
+   Assert(IsManifestBlobReady(), "Create manifest pack before scene");
+   std::span<const std::byte> manifestBlob = GetManifestBlobBytes();
+   Assert(!manifestBlob.empty(), "Manifest pack is empty");
+
+   manifest::ResolvedAsset sceneAsset = manifest::kenney::handles::n3d_assets::prototype_kit::models_obj_format_shape_cube_obj.Resolve(manifestBlob);
+   Assert(sceneAsset.valid, "Scene asset handle failed to resolve");
+   Assert(sceneAsset.format == manifest::AssetFormat::MESH_PNUV_F32_U32, "Scene asset is not a packed mesh payload");
+
+   std::span<const std::byte> payload = sceneAsset.payload;
+   usize vertexCount = static_cast<usize>(sceneAsset.meta0);
+   usize indexCount = static_cast<usize>(sceneAsset.meta1);
+   usize vertexStride = static_cast<usize>(sceneAsset.meta2);
+   usize indexOffset = static_cast<usize>(sceneAsset.meta3);
+
+   Assert(vertexCount > 0, "Packed scene mesh has zero vertices");
+   Assert(indexCount > 0, "Packed scene mesh has zero indices");
+   Assert(vertexStride == sizeof(Vertex), "Packed scene mesh vertex stride does not match Vertex layout");
+
+   usize expectedVertexBytes = vertexCount * sizeof(Vertex);
+   usize expectedIndexBytes = indexCount * sizeof(u32);
+   usize expectedPayloadBytes = expectedVertexBytes + expectedIndexBytes;
+
+   Assert(indexOffset == expectedVertexBytes, "Packed scene mesh index offset is invalid");
+   Assert(payload.size() == expectedPayloadBytes, "Packed scene mesh payload size does not match metadata");
+
+   std::vector<Vertex> baseVertices(vertexCount);
+   std::vector<u32> baseIndices(indexCount);
+   std::memcpy(baseVertices.data(), payload.data(), expectedVertexBytes);
+   std::memcpy(baseIndices.data(), payload.data() + indexOffset, expectedIndexBytes);
+
+   for (u32 index : baseIndices)
    {
-      objPath = std::string(AssetSourceDirectory) + "/models/kenney/prototype/shape-cube.obj";
+      Assert(index < baseVertices.size(), "Packed scene mesh index references out-of-range vertex");
    }
-
-   std::ifstream objFile(objPath);
-   Assert(objFile.is_open(), "Failed to open scene OBJ asset");
-
-   std::vector<Vec3> positions;
-   std::vector<Vec3> normals;
-   std::vector<Vec2> uvs;
-   std::vector<Vertex> vertices;
-   std::vector<u32> indices;
-
-   std::string line;
-   while (std::getline(objFile, line))
-   {
-      if (line.empty() || (line[0] == '#'))
-      {
-         continue;
-      }
-
-      std::istringstream lineStream(line);
-      std::string tag;
-      lineStream >> tag;
-
-      if (tag == "v")
-      {
-         float x = 0.0f;
-         float y = 0.0f;
-         float z = 0.0f;
-         lineStream >> x >> y >> z;
-         positions.push_back({x, y, z});
-      }
-      else if (tag == "vn")
-      {
-         float x = 0.0f;
-         float y = 0.0f;
-         float z = 0.0f;
-         lineStream >> x >> y >> z;
-         normals.push_back({x, y, z});
-      }
-      else if (tag == "vt")
-      {
-         float u = 0.0f;
-         float v = 0.0f;
-         lineStream >> u >> v;
-         uvs.push_back({u, 1.0f - v});
-      }
-      else if (tag == "f")
-      {
-         std::vector<std::string> faceTokens;
-         std::string faceToken;
-         while (lineStream >> faceToken)
-         {
-            faceTokens.push_back(faceToken);
-         }
-
-         if (faceTokens.size() < 3)
-         {
-            continue;
-         }
-
-         const auto emitFaceVertex = [&](const std::string &token)
-         {
-            int pIndex = 0;
-            int tIndex = 0;
-            int nIndex = 0;
-
-            if (std::sscanf(token.c_str(), "%d/%d/%d", &pIndex, &tIndex, &nIndex) == 3)
-            {
-            }
-            else if (std::sscanf(token.c_str(), "%d//%d", &pIndex, &nIndex) == 2)
-            {
-               tIndex = 0;
-            }
-            else if (std::sscanf(token.c_str(), "%d/%d", &pIndex, &tIndex) == 2)
-            {
-               nIndex = 0;
-            }
-            else
-            {
-               int scanned = std::sscanf(token.c_str(), "%d", &pIndex);
-               Assert(scanned == 1, "Unsupported OBJ face token");
-               tIndex = 0;
-               nIndex = 0;
-            }
-
-            const auto toZeroIndex = [](int index, size_t count) -> int
-            {
-               if (index > 0)
-               {
-                  return index - 1;
-               }
-               if (index < 0)
-               {
-                  return static_cast<int>(count) + index;
-               }
-               return -1;
-            };
-
-            int pZero = toZeroIndex(pIndex, positions.size());
-            Assert((pZero >= 0) && (pZero < static_cast<int>(positions.size())), "OBJ position index out of range");
-
-            Vertex vertex = {};
-            vertex.position = positions[static_cast<size_t>(pZero)];
-            vertex.normal = {0.0f, 1.0f, 0.0f};
-            vertex.uv = {0.0f, 0.0f};
-
-            if (nIndex != 0)
-            {
-               int nZero = toZeroIndex(nIndex, normals.size());
-               Assert((nZero >= 0) && (nZero < static_cast<int>(normals.size())), "OBJ normal index out of range");
-               vertex.normal = normals[static_cast<size_t>(nZero)];
-            }
-
-            if (tIndex != 0)
-            {
-               int tZero = toZeroIndex(tIndex, uvs.size());
-               Assert((tZero >= 0) && (tZero < static_cast<int>(uvs.size())), "OBJ UV index out of range");
-               vertex.uv = uvs[static_cast<size_t>(tZero)];
-            }
-
-            vertices.push_back(vertex);
-            indices.push_back(static_cast<u32>(indices.size()));
-         };
-
-         for (size_t tri = 1; (tri + 1) < faceTokens.size(); ++tri)
-         {
-            emitFaceVertex(faceTokens[0]);
-            emitFaceVertex(faceTokens[tri]);
-            emitFaceVertex(faceTokens[tri + 1]);
-         }
-      }
-   }
-
-   Assert(!vertices.empty(), "Scene OBJ did not produce any vertices");
-   Assert(!indices.empty(), "Scene OBJ did not produce any indices");
 
    // Center only on XZ so layout is world-ground aligned.
-   Vec3 minBounds = vertices[0].position;
-   Vec3 maxBounds = vertices[0].position;
-   for (const Vertex &vertex : vertices)
+   Vec3 minBounds = baseVertices[0].position;
+   Vec3 maxBounds = baseVertices[0].position;
+   for (const Vertex &vertex : baseVertices)
    {
       minBounds.x = std::min(minBounds.x, vertex.position.x);
       minBounds.z = std::min(minBounds.z, vertex.position.z);
@@ -1442,33 +1332,31 @@ void CreateScene()
       (minBounds.z + maxBounds.z) * 0.5f,
    };
 
-   for (Vertex &vertex : vertices)
+   for (Vertex &vertex : baseVertices)
    {
       vertex.position.x -= centerXZ.x;
       vertex.position.z -= centerXZ.z;
    }
 
    // Put the cube base on the ground plane (y = 0) before grid expansion.
-   float minY = vertices[0].position.y;
-   for (const Vertex &vertex : vertices)
+   float minY = baseVertices[0].position.y;
+   for (const Vertex &vertex : baseVertices)
    {
       minY = std::min(minY, vertex.position.y);
    }
-   for (Vertex &vertex : vertices)
+   for (Vertex &vertex : baseVertices)
    {
       vertex.position.y -= minY;
    }
 
-   std::vector<Vertex> baseVertices = vertices;
-   std::vector<u32> baseIndices = indices;
    Assert(!baseVertices.empty(), "Base mesh vertices cannot be empty");
    Assert(!baseIndices.empty(), "Base mesh indices cannot be empty");
 
    usize gridInstanceCount = static_cast<usize>(SceneGridWidth) * static_cast<usize>(SceneGridDepth);
-   std::vector<Vertex> gridVertices;
-   std::vector<u32> gridIndices;
-   gridVertices.reserve(baseVertices.size() * gridInstanceCount);
-   gridIndices.reserve(baseIndices.size() * gridInstanceCount);
+   std::vector<Vertex> vertices;
+   std::vector<u32> indices;
+   vertices.reserve(baseVertices.size() * gridInstanceCount);
+   indices.reserve(baseIndices.size() * gridInstanceCount);
 
    float xOffsetStart = (static_cast<float>(SceneGridWidth) - 1.0f) * 0.5f;
    float zOffsetStart = (static_cast<float>(SceneGridDepth) - 1.0f) * 0.5f;
@@ -1481,25 +1369,22 @@ void CreateScene()
          float worldY = 0.0f;
          float worldZ = (static_cast<float>(z) - zOffsetStart) * SceneGridSpacing;
 
-         u32 vertexOffset = static_cast<u32>(gridVertices.size());
+         u32 vertexOffset = static_cast<u32>(vertices.size());
          for (const Vertex &source : baseVertices)
          {
             Vertex expanded = source;
             expanded.position.x += worldX;
             expanded.position.y += worldY;
             expanded.position.z += worldZ;
-            gridVertices.push_back(expanded);
+            vertices.push_back(expanded);
          }
 
          for (u32 sourceIndex : baseIndices)
          {
-            gridIndices.push_back(vertexOffset + sourceIndex);
+            indices.push_back(vertexOffset + sourceIndex);
          }
       }
    }
-
-   vertices = std::move(gridVertices);
-   indices = std::move(gridIndices);
    Assert(!vertices.empty(), "Grid vertices cannot be empty");
    Assert(!indices.empty(), "Grid indices cannot be empty");
 
