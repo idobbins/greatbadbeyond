@@ -1,143 +1,231 @@
-# Forward Renderer Roadmap
+# Forward Renderer Implementation Plan
 
-This plan aligns the renderer with a simple, principled, world-space forward raster pipeline.
-The current frame loop, swapchain lifecycle, and camera flow remain the backbone.
+## Goal
+
+Build a real forward raster renderer in `greadbadbeyond` with these properties:
+
+- CPU-driven scene + draw submission.
+- World-space mesh rendering (not fullscreen proxy rendering).
+- Dynamic rendering with depth from day 1.
+- Single-pass opaque forward baseline.
+- One imported Kenney 3D asset rendered at world origin as the first scene proof.
 
 ## North Star
 
-- CPU-driven forward renderer.
-- Data-oriented scene representation.
-- Minimal passes and explicit data flow.
-- Add complexity only when profiling proves it is needed.
+- Keep the renderer explicit and small.
+- Add systems only after measurable need.
+- Preserve existing stable frame lifecycle (acquire -> record -> submit -> present).
 
-## Immediate Scope Changes
+## Non-Goals (for v1)
 
-Remove and unwind:
+- No ray tracing or compute-based lighting.
+- No SSAO, SSR, deferred path, or prepass.
+- No bindless or descriptor indexing.
+- No scene graph framework.
 
-- Path tracing storage image, sampler, and related descriptor layout/pool/set.
-- Compute pipelines and ReSTIR buffers.
-- Compute dispatches and compute-to-graphics synchronization barriers.
+## Current State Snapshot
 
-Keep:
+- Vulkan lifecycle and swapchain lifecycle are stable.
+- Frame overlap and sync objects are stable.
+- Dynamic rendering path exists.
+- Fullscreen graphics path exists.
+- Path tracer/compute API and runtime path are removed from active code.
 
-- `FrameOverlap` resources (command pool/buffer, semaphores, fences).
-- Dynamic rendering for swapchain images.
-- Camera module and input integration.
+## Target Architecture (v1)
 
-## Engine Architecture Targets
+CPU data:
 
-CPU-side data:
+- `MeshGpu`: vertex/index buffer handles and counts.
+- `MaterialGpu`: pipeline/material binding state.
+- `RenderObject`: `meshId`, `materialId`, transform.
+- `DrawItem`: `pipelineKey`, `materialId`, `meshId`, `firstIndex`, `indexCount`, `firstInstance`, `instanceCount`.
+- `FrameGlobals`: view, proj, camera position, time.
+- `std::vector<RenderObject>` scene storage.
+- `std::vector<DrawItem>` draw list rebuilt each frame.
 
-- `MeshGpu`: vertex/index buffers and counts.
-- `MaterialGpu`: pipeline key and descriptor binding data.
-- `RenderObject`: `meshId`, `materialId`, world transform, optional bounds.
-- `FrameGlobals`: view/proj, camera position, time, exposure.
-- `Light`: directional plus a bounded array of point lights.
-- Scene containers: `std::vector<RenderObject>` persistent scene list, plus `std::vector<DrawItem>` rebuilt each frame or on scene changes.
+GPU data:
 
-`DrawItem` baseline fields:
+- Per-frame globals UBO (`set = 0`).
+- Transform buffer (SSBO) for object/world matrices.
+- Light buffer (SSBO or small UBO).
 
-- `pipelineKey`, `materialId`, `meshId`, `firstIndex`, `indexCount`, `instanceCount`, `firstInstance`.
+## Pass Plan
 
-GPU-side data:
+Pass 0 (required): Forward opaque
 
-- Per-frame globals UBO (set 0).
-- Light buffer (SSBO preferred; UBO acceptable for very small limits).
-- Per-object transform buffer (SSBO for scalable instancing).
-- No bindless or descriptor indexing in v1.
-
-## Rendering Passes
-
-Pass 0 (required): forward opaque to swapchain image.
-
-- Begin dynamic rendering with color attachment.
-- Include depth attachment from day 1.
-- Draw opaque items sorted by pipeline, then material, then mesh.
-
-Pass 1 (later): forward transparent.
-
-- Reuse forward pass setup.
-- Back-to-front sort by depth.
-- Blend-enabled pipeline state.
-
-## Vulkan Integration Plan
-
-Public API additions in `src/greadbadbeyond.h`:
-
-- `void CreateScene();`
-- `void DestroyScene();`
-- `void CreateForwardRenderer();`
-- `void DestroyForwardRenderer();`
-- `void DrawFrameForward(u32 frameIndex, u32 imageIndex);`
-
-`VulkanData` additions:
-
-- `VkPipelineLayout forwardPipelineLayout;`
-- `VkPipeline forwardPipeline;`
-- `VkDescriptorSetLayout frameSetLayout;`
-- `VkDescriptorPool frameDescriptorPool;`
-- `std::array<VkDescriptorSet, FrameOverlap> frameDescriptorSets;`
-- `std::array<VkBuffer, FrameOverlap> frameUniformBuffers;`
-- `std::array<VkDeviceMemory, FrameOverlap> frameUniformMemory;`
-
-Depth resources:
-
-- `VkImage depthImage;`
-- `VkDeviceMemory depthMemory;`
-- `VkImageView depthView;`
-- `VkFormat depthFormat;`
-
-Command recording shape:
-
-- Transition swapchain image to `VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL`.
-- Transition depth image to `VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL`.
+- Transition swapchain image -> `COLOR_ATTACHMENT_OPTIMAL`.
+- Transition depth image -> `DEPTH_ATTACHMENT_OPTIMAL`.
 - Begin dynamic rendering with color + depth.
-- Bind forward pipeline and frame descriptor set.
-- Draw sorted `DrawItem` list.
+- Bind forward pipeline + descriptor set(s).
+- Draw opaque `DrawItem` list sorted by pipeline -> material -> mesh.
 - End rendering.
-- Transition swapchain image to `VK_IMAGE_LAYOUT_PRESENT_SRC_KHR`.
+- Transition swapchain image -> `PRESENT_SRC_KHR`.
 
-## Phased Execution
+Pass 1 (later): Forward transparent
 
-0. Baseline confirmation (done)
-- Keep acquire-record-submit-present and resize recreation paths stable.
+- Same dynamic rendering infrastructure.
+- Back-to-front ordering.
+- Blend-enabled pipeline.
 
-1. Compute/path-tracing de-scope
-- Remove compute descriptors, pipelines, shader wiring, and dispatch logic.
-- Keep fullscreen/clear fallback only if needed for bring-up.
+## Kenney Asset Bring-Up (first content target)
 
-2. Depth + first forward draw
-- Create/destroy depth image resources with swapchain lifecycle.
-- Add simple forward shader pair and draw one hardcoded triangle/mesh with depth test.
+Source asset for first render target:
 
-3. Mesh pipeline
-- Add `Vertex` format, vertex/index buffer upload path, indexed draw call.
-- Render one mesh from scene data.
+- `/Users/idobbins/Downloads/Kenney/3D assets/Prototype Kit/Models/OBJ format/shape-cube.obj`
+- `/Users/idobbins/Downloads/Kenney/3D assets/Prototype Kit/Models/OBJ format/shape-cube.mtl`
+- `/Users/idobbins/Downloads/Kenney/3D assets/Prototype Kit/Models/OBJ format/Textures/colormap.png`
 
-4. Frame globals
-- Add per-frame globals UBO.
-- Feed camera view/projection + time every frame.
+Repository destination:
 
-5. Object transforms + instancing
-- Add transform SSBO.
-- Support instance draws for objects sharing mesh/material.
+- `resources/models/kenney/prototype/shape-cube.obj`
+- `resources/models/kenney/prototype/shape-cube.mtl`
+- `resources/models/kenney/prototype/Textures/colormap.png`
 
-6. Lighting v0
-- Implement directional + small point-light array in forward shader.
-- Keep shader small and explicit.
+Import rule:
 
-7. CPU batching and sorting
-- Build `DrawItem` list from scene.
-- Stable sort by pipeline/material/mesh before issuing draws.
+- Runtime reads only from repository paths, never directly from `Downloads`.
 
-8. Transparent path (optional)
-- Add separate transparent draw list and blending pipeline.
+## Phase Plan
 
-9. Advanced lighting scale (only when profiling requires)
-- Add clustered forward light lists.
-- Gate this work on measured light-count bottlenecks.
+### Phase 1: Forward API and State Scaffolding
+
+Changes:
+
+- Add forward-facing API entry points to `src/greadbadbeyond.h`:
+- `CreateScene`, `DestroyScene`, `CreateForwardRenderer`, `DestroyForwardRenderer`, `DrawFrameForward`.
+- Add forward renderer state fields to Vulkan global bucket in `src/vulkan.cpp`.
+
+Acceptance:
+
+- Project builds.
+- App startup/shutdown uses forward API naming and lifecycle.
+
+### Phase 2: Depth Resources (Day 1)
+
+Changes:
+
+- Add depth image, memory, and view creation/destruction in `src/vulkan.cpp`.
+- Pick supported depth format (`D32` fallback chain).
+- Recreate depth resources with swapchain recreation.
+- Enable depth testing in forward graphics pipeline state.
+
+Acceptance:
+
+- Build succeeds.
+- Resize/recreate path remains stable.
+- Validation output has no depth-layout misuse.
+
+### Phase 3: Mesh Pipeline (replace fullscreen draw path)
+
+Changes:
+
+- Add `Vertex` layout definition in `src/greadbadbeyond.h`.
+- Update shader pair to world-space forward mesh shaders in `resources/shaders/`.
+- Configure vertex input bindings/attributes in `src/vulkan.cpp`.
+- Replace `vkCmdDraw(3,...)` with indexed draw path.
+
+Acceptance:
+
+- Indexed draw executes.
+- Depth-tested geometry visible.
+
+### Phase 4: OBJ Loader + Kenney Cube in Center
+
+Changes:
+
+- Add minimal OBJ parser module (`src/asset_obj.cpp`, declarations in `src/greadbadbeyond.h`).
+- Support: `v`, `vt`, `vn`, `f` (triangles + quads triangulated).
+- Resolve `mtllib` and `map_Kd` paths relative to model directory.
+- Upload parsed mesh to GPU buffers.
+- Create one render object at world origin.
+
+Acceptance:
+
+- `shape-cube.obj` renders centered in scene.
+- Texture resolves from `resources/models/kenney/prototype/Textures/colormap.png`.
+
+### Phase 5: Frame Globals UBO
+
+Changes:
+
+- Add per-frame UBO buffers and descriptor sets.
+- Write camera matrices + camera position + time each frame.
+- Bind frame globals set in draw path.
+
+Acceptance:
+
+- Camera movement affects rendered mesh correctly.
+- No per-frame descriptor allocation churn.
+
+### Phase 6: Scene List and DrawItem Batching
+
+Changes:
+
+- Add scene containers and draw-item build step.
+- Add stable sort by pipeline/material/mesh.
+- Loop draw list in `DrawFrameForward`.
+
+Acceptance:
+
+- One or more objects render via draw-list loop.
+- Draw call order is deterministic frame-to-frame.
+
+### Phase 7: Lighting v0
+
+Changes:
+
+- Add one directional light + bounded point-light array.
+- Add minimal forward shading (Lambert + simple spec) in fragment shader.
+- Add light buffer updates on CPU path.
+
+Acceptance:
+
+- Lighting responds to light direction/position changes.
+- Shader remains compact and understandable.
+
+### Phase 8: Hardening and Diagnostics
+
+Changes:
+
+- Improve logging for asset load failures and Vulkan setup failures.
+- Add runtime assertions for invalid mesh/material references.
+- Document render path and asset expectations in `PERF.md`.
+
+Acceptance:
+
+- Clean debug build with warnings treated as regressions.
+- Basic smoke test checklist passes.
+
+## File-Level Worklist
+
+- `src/greadbadbeyond.h`: API surface, shared structs, asset loader declarations.
+- `src/vulkan.cpp`: forward pipeline, depth resources, descriptor setup, draw loop.
+- `src/platform.cpp`: call forward draw function in main loop.
+- `src/camera.cpp`: continue feeding camera state; no major architecture changes.
+- `resources/shaders/*.vert|*.frag`: forward mesh shaders.
+- `src/asset_obj.cpp`: minimal OBJ parse/load path.
+- `CMakeLists.txt`: add new source files and shader inputs.
+- `resources/models/kenney/prototype/*`: first in-repo model assets.
+
+## Validation Checklist Per Phase
+
+- Configure/build:
+- `cmake -S . -B build/debug -DCMAKE_BUILD_TYPE=Debug`
+- `cmake --build build/debug`
+- Smoke run:
+- `./build/debug/greadbadbeyond`
+- Resize window and confirm no crash.
+- Confirm one centered model render before adding additional features.
+
+## Risks and Mitigations
+
+- OBJ format edge cases: keep loader intentionally narrow for v1 and fail loudly.
+- Swapchain + depth recreation bugs: keep depth lifecycle strictly paired with swapchain lifecycle.
+- Over-scoping: postpone transparent path and clustered lights until base opaque path is stable and measured.
 
 ## Guardrails
 
-- Each extra pass must be justified by measured wins.
-- Avoid hidden systems; features should stay explainable with a few structs and a single clear draw loop.
+- No hidden systems.
+- No extra passes without profiling evidence.
+- Keep create/destroy order explicit and symmetric.
+- Keep runtime data flow explainable from structs + draw loop + shaders.

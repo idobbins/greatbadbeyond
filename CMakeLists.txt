@@ -45,7 +45,6 @@ set(SHADER_OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/shaders)
 set(SHADER_SOURCES
     ${SHADER_SOURCE_DIR}/fullscreen_triangle.vert
     ${SHADER_SOURCE_DIR}/fullscreen_triangle.frag
-    ${SHADER_SOURCE_DIR}/restir_pt.comp
 )
 
 set(SHADER_OUTPUTS "")

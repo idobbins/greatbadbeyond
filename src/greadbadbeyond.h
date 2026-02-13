@@ -97,35 +97,6 @@ struct CameraParams
     float pad3;
 };
 
-struct SphereQuantConfig
-{
-    Vec3 origin;
-    float pad0;
-    Vec3 scale;
-    float scaleMax;
-};
-
-struct PathParams
-{
-    Vec2 resolution;
-    float time;
-    u32 sampleSeed;
-    CameraParams camera;
-    SphereQuantConfig quant;
-    u32 sphereCount;
-    u32 gridCellCount;
-    u32 gridResolutionX;
-    u32 gridResolutionY;
-    u32 gridResolutionZ;
-    u32 gridIndexCount;
-    u32 padA;
-    u32 padB;
-    u32 restirPass;
-    u32 padC;
-    u32 padD;
-    u32 padE;
-};
-
 //------------------------------------------------------------------------------------
 // Window and Platform Functions (Module: platform)
 //------------------------------------------------------------------------------------
@@ -171,13 +142,6 @@ void DestroyCamera();
 void ResetCameraAccum();
 void UpdateCameraFromInput(float deltaSeconds);
 auto GetCameraParams() -> CameraParams;
-
-//------------------------------------------------------------------------------------
-// Scene Functions
-//------------------------------------------------------------------------------------
-
-void BuildSpheres();
-auto GetSphereQuantConfig() -> SphereQuantConfig;
 
 //------------------------------------------------------------------------------------
 // Vulkan Functions (Module: vulkan)
@@ -289,15 +253,6 @@ void DestroyShader(VkShaderModule &shader);
 // Pipeline-related functions
 void CreateFullscreenPipeline();
 void DestroyFullscreenPipeline();
-void CreatePathTracerPipeline();
-void DestroyPathTracerPipeline();
-
-// Path tracer-related functions
-void CreatePathTracerImage();
-void DestroyPathTracerImage();
-void CreatePathTracerDescriptors();
-void DestroyPathTracerDescriptors();
-void DispatchPathTracer();
 
 // Drawing-related functions
 void DrawFrame();
