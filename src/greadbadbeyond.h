@@ -131,7 +131,9 @@ auto GetWindowSize()      -> Size;
 auto GetFramebufferSize() -> Size;
 auto GetWindowHandle()    -> GLFWwindow *;
 void FramebufferSizeCallback(GLFWwindow *window, int width, int height);
+void ScrollCallback(GLFWwindow *window, double xoffset, double yoffset);
 auto ConsumeFramebufferResize() -> bool;
+auto ConsumeMouseWheelDelta() -> float;
 
 void CreateWindow();
 void DestroyWindow();

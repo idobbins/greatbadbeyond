@@ -27,6 +27,11 @@ static struct PlatformData
     } Window;
     struct
     {
+        float mouseWheelDelta;
+
+    } Input;
+    struct
+    {
         double lastTime;
         double lastLogTime;
         double accumulatedMs;
@@ -112,9 +117,11 @@ void CreateWindow()
     Platform.Window.handle = glfwCreateWindow(DefaultWindowWidth, DefaultWindowHeight, Platform.Window.title.data(), nullptr, nullptr);
     Assert(Platform.Window.handle != nullptr, "Failed to create GLFW window");
     glfwSetFramebufferSizeCallback(Platform.Window.handle, FramebufferSizeCallback);
+    glfwSetScrollCallback(Platform.Window.handle, ScrollCallback);
 
     Platform.Window.ready = true;
     Platform.Window.framebufferResized = false;
+    Platform.Input.mouseWheelDelta = 0.0f;
 
     double now = glfwGetTime();
     Platform.FrameTiming.lastTime = now;
@@ -137,6 +144,7 @@ void DestroyWindow()
 
     Platform.Window.ready = false;
     Platform.Window.framebufferResized = false;
+    Platform.Input.mouseWheelDelta = 0.0f;
 
     Platform.FrameTiming.ready = false;
     Platform.FrameTiming.deltaSeconds = 0.0f;
@@ -208,11 +216,26 @@ void FramebufferSizeCallback(GLFWwindow *window, int width, int height)
     Platform.Window.framebufferResized = true;
 }
 
+void ScrollCallback(GLFWwindow *window, double xoffset, double yoffset)
+{
+    (void)window;
+    (void)xoffset;
+
+    Platform.Input.mouseWheelDelta += static_cast<float>(yoffset);
+}
+
 auto ConsumeFramebufferResize() -> bool
 {
     bool resized = Platform.Window.framebufferResized;
     Platform.Window.framebufferResized = false;
     return resized;
+}
+
+auto ConsumeMouseWheelDelta() -> float
+{
+    float delta = Platform.Input.mouseWheelDelta;
+    Platform.Input.mouseWheelDelta = 0.0f;
+    return delta;
 }
 
 auto GetWindowHandle() -> GLFWwindow *

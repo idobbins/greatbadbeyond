@@ -33,6 +33,9 @@ static constexpr const char *ShaderCacheDirectory = SHADER_CACHE_DIRECTORY;
 static constexpr const char *AssetSourceDirectory = ASSET_SOURCE_DIRECTORY;
 static constexpr const char *ForwardVertexShaderName = "forward_opaque.vert.spv";
 static constexpr const char *ForwardFragmentShaderName = "forward_opaque.frag.spv";
+static constexpr u32 SceneGridWidth = 32;
+static constexpr u32 SceneGridDepth = 32;
+static constexpr float SceneGridSpacing = 2.0f;
 
 #ifndef VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME
 #define VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME "VK_KHR_portability_subset"
@@ -1356,7 +1359,7 @@ void CreateScene()
    Assert(!vertices.empty(), "Scene OBJ did not produce any vertices");
    Assert(!indices.empty(), "Scene OBJ did not produce any indices");
 
-   // Center mesh geometry around world origin for the initial single-object scene.
+   // Center the source cube around origin before creating the grid layout.
    Vec3 minBounds = vertices[0].position;
    Vec3 maxBounds = vertices[0].position;
    for (const Vertex &vertex : vertices)
@@ -1382,6 +1385,48 @@ void CreateScene()
       vertex.position.y -= center.y;
       vertex.position.z -= center.z;
    }
+
+   std::vector<Vertex> baseVertices = vertices;
+   std::vector<u32> baseIndices = indices;
+   Assert(!baseVertices.empty(), "Base mesh vertices cannot be empty");
+   Assert(!baseIndices.empty(), "Base mesh indices cannot be empty");
+
+   usize gridInstanceCount = static_cast<usize>(SceneGridWidth) * static_cast<usize>(SceneGridDepth);
+   std::vector<Vertex> gridVertices;
+   std::vector<u32> gridIndices;
+   gridVertices.reserve(baseVertices.size() * gridInstanceCount);
+   gridIndices.reserve(baseIndices.size() * gridInstanceCount);
+
+   float xOffsetStart = (static_cast<float>(SceneGridWidth) - 1.0f) * 0.5f;
+   float zOffsetStart = (static_cast<float>(SceneGridDepth) - 1.0f) * 0.5f;
+
+   for (u32 z = 0; z < SceneGridDepth; ++z)
+   {
+      for (u32 x = 0; x < SceneGridWidth; ++x)
+      {
+         float worldX = (static_cast<float>(x) - xOffsetStart) * SceneGridSpacing;
+         float worldZ = (static_cast<float>(z) - zOffsetStart) * SceneGridSpacing;
+
+         u32 vertexOffset = static_cast<u32>(gridVertices.size());
+         for (const Vertex &source : baseVertices)
+         {
+            Vertex expanded = source;
+            expanded.position.x += worldX;
+            expanded.position.z += worldZ;
+            gridVertices.push_back(expanded);
+         }
+
+         for (u32 sourceIndex : baseIndices)
+         {
+            gridIndices.push_back(vertexOffset + sourceIndex);
+         }
+      }
+   }
+
+   vertices = std::move(gridVertices);
+   indices = std::move(gridIndices);
+   Assert(!vertices.empty(), "Grid vertices cannot be empty");
+   Assert(!indices.empty(), "Grid indices cannot be empty");
 
    const auto createBufferWithData = [&](VkBufferUsageFlags usage, const void *data, VkDeviceSize size, VkBuffer &buffer, VkDeviceMemory &memory)
    {
