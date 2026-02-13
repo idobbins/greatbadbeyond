@@ -22,10 +22,10 @@ static constexpr uint32_t FrameOverlap = 2;
 
 static constexpr int DefaultWindowWidth = 1280;
 static constexpr int DefaultWindowHeight = 720;
-static constexpr const char *DefaultWindowTitle = "Callandor";
+static constexpr const char *DefaultWindowTitle = "Greadbadbeyond";
 
-static constexpr const char *DefaultApplicationName = "Callandor";
-static constexpr const char *DefaultEngineName = "Callandor";
+static constexpr const char *DefaultApplicationName = "Greadbadbeyond";
+static constexpr const char *DefaultEngineName = "Greadbadbeyond";
 
 static constexpr VkDebugUtilsMessageSeverityFlagsEXT DefaultDebugSeverityMask =
     VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT |

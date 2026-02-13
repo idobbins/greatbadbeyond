@@ -7,7 +7,7 @@
 
 ## Project Structure & Module Organization
 - `src/main.cpp` owns the application entry point; it spins up GLFW, calls into the Vulkan setup helpers, drives the event loop, and tears everything down.
-- `src/callandor.h` is the shared header that centralizes type aliases, forward declarations, and cross-module APIs so source files include a single entry point.
+- `src/greadbadbeyond.h` is the shared header that centralizes type aliases, forward declarations, and cross-module APIs so source files include a single entry point.
 - `src/config.h` captures compile-time configuration such as cache sizes, default window parameters, and log prefixes used across modules.
 - `src/utils.h` implements inline logging helpers and the `Assert` utility that all translation units rely on.
 - `src/platform.cpp` wraps GLFW setup, window creation/destruction, event polling, and the platform-side `PlatformData` cache; it also exposes the Vulkan instance extension discovery helper.
@@ -20,7 +20,7 @@
 ## Build, Test, and Lint Commands
 - Debug configure: `cmake -S . -B build/debug -DCMAKE_BUILD_TYPE=Debug`.
 - Debug build: `cmake --build build/debug` (also compiles shaders via the `shaders` target).
-- Run the app: `./build/debug/callandor`.
+- Run the app: `./build/debug/greadbadbeyond`.
 - Release configure: `cmake -S . -B build/release -DCMAKE_BUILD_TYPE=Release`.
 - Release build: `cmake --build build/release`.
 - Shader-only rebuild: `cmake --build build/debug --target shaders`.
@@ -43,7 +43,7 @@
 
 ## Adding or Modifying Source Files
 - Register new `.cpp` files in `CMakeLists.txt` `add_executable` sources.
-- Prefer adding declarations to `callandor.h` so new APIs are discoverable.
+- Prefer adding declarations to `greadbadbeyond.h` so new APIs are discoverable.
 - Keep new headers minimal and only when they are shared across modules.
 - Avoid introducing new external dependencies without approval.
 
@@ -57,23 +57,23 @@
 - If the validation layer is missing, `CreateInstance()` will assert early.
 
 ## API / Module Change Checklist
-- Declare new public functions/types in `callandor.h`.
+- Declare new public functions/types in `greadbadbeyond.h`.
 - Keep `Create*`/`Destroy*` pairs symmetric and called from `main.cpp`.
 - Update `config.h` for new limits/defaults instead of hard-coded magic numbers.
 - If render pipelines or shaders change, update `PERF.md` alongside code.
 
 ## Coding Style & Naming Conventions
 - Target ISO C++23 with warnings enabled, but write code in the raylib-style C subset: four-space indentation, brace placement matching the current `.cpp` files, and no RTTI, exceptions, templates, or STL algorithms beyond the handful already in use.
-- Use the primitive aliases in `callandor.h` (`u32`, `f32`, etc.) for engine-facing types.
+- Use the primitive aliases in `greadbadbeyond.h` (`u32`, `f32`, etc.) for engine-facing types.
 - Prefer `std::array`, `std::span`, and `std::pmr::vector` for fixed-size or scratch data; avoid heap-owning abstractions.
-- Do not add translation-unit `static` helper functions; every callable routine (even small helpers) must have external linkage, live in a `.cpp` file, and be declared in `callandor.h` so the header remains the authoritative map of engine capabilities.
-- Global renderer state follows raylib's pattern: group related data inside translation-unit `static` structs (for example `Platform` and `Vulkan`) but surface the controlling functions via `callandor.h`.
-- Includes order: `callandor.h`, local headers (`config.h`, `utils.h`), third-party headers, then standard headers; keep blank lines between groups.
+- Do not add translation-unit `static` helper functions; every callable routine (even small helpers) must have external linkage, live in a `.cpp` file, and be declared in `greadbadbeyond.h` so the header remains the authoritative map of engine capabilities.
+- Global renderer state follows raylib's pattern: group related data inside translation-unit `static` structs (for example `Platform` and `Vulkan`) but surface the controlling functions via `greadbadbeyond.h`.
+- Includes order: `greadbadbeyond.h`, local headers (`config.h`, `utils.h`), third-party headers, then standard headers; keep blank lines between groups.
 - `using namespace std;` appears in existing files; follow local patterns and keep `std::` qualifiers when clarity matters.
 - Always initialize variables, keep comments on the line before the code they explain (`// Describe the block`), include spaces after control flow keywords (`if (condition)`), and align braces vertically.
 - Prefer trailing return syntax (`auto Foo() -> Type`) for non-void functions, but leave `void Foo()` in the traditional form so side-effect-only routines stand out when scanning declarations.
 - Use `nullptr`, `VK_NULL_HANDLE`, and explicit zero-initialization braces to make intent obvious.
-- Avoid trailing whitespace and keep headers sorted logically (`callandor.h`, then local headers, then system headers).
+- Avoid trailing whitespace and keep headers sorted logically (`greadbadbeyond.h`, then local headers, then system headers).
 
 Reference naming patterns (adapted from raylib):
 

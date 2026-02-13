@@ -1,4 +1,4 @@
-#include <callandor.h>
+#include <greadbadbeyond.h>
 #include <config.h>
 #include <utils.h>
 
@@ -26,7 +26,7 @@ using namespace std;
 static constexpr const char *ShaderCacheDirectory = SHADER_CACHE_DIRECTORY;
 static constexpr const char *FullscreenVertexShaderName = "fullscreen_triangle.vert.spv";
 static constexpr const char *FullscreenFragmentShaderName = "fullscreen_triangle.frag.spv";
-static constexpr const char *PathTracerComputeShaderName = "pathtracer.comp.spv";
+static constexpr const char *RestirPtComputeShaderName = "restir_pt.comp.spv";
 static constexpr VkFormat PathTracerImageFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
 static constexpr u32 DefaultSphereCount = 1'000'000;
 
@@ -79,6 +79,10 @@ static struct VulkanData
    VkDescriptorPool pathTracerDescriptorPool;
    VkDescriptorSet pathTracerDescriptorSet;
    VkImageLayout pathTracerImageLayout;
+   VkBuffer restirReservoirBufferA;
+   VkDeviceMemory restirReservoirMemoryA;
+   VkBuffer restirReservoirBufferB;
+   VkDeviceMemory restirReservoirMemoryB;
    VkBuffer spheresHotBuffer;
    VkDeviceMemory spheresHotMemory;
    VkBuffer sphereMaterialIdsBuffer;
@@ -113,6 +117,7 @@ static struct VulkanData
    bool fullscreenPipelineReady;
    bool pathTracerPipelineReady;
    bool pathTracerSceneReady;
+   bool restirBuffersReady;
 
 } Vulkan;
 
@@ -125,6 +130,17 @@ struct GridCell
 };
 
 static_assert(sizeof(GridCell) == sizeof(u32) * 2, "GridCell must contain two uint32_t values");
+
+struct RestirReservoir
+{
+   float radiance[4];
+   float wsumM[4];
+   float hitPos[4];
+   float hitNormal[4];
+   float incidentBsdf[4];
+};
+
+static_assert(sizeof(RestirReservoir) == sizeof(float) * 20, "RestirReservoir must be 20 floats");
 
 static auto FindMemoryType(u32 typeBits, VkMemoryPropertyFlags properties) -> u32
 {
@@ -206,7 +222,14 @@ static void CreateStorageBuffer(const void *data, VkDeviceSize size, VkBuffer &b
    VkResult mapResult = vkMapMemory(Vulkan.device, memory, 0, size, 0, &mapped);
    Assert(mapResult == VK_SUCCESS, "Failed to map storage buffer memory");
 
-   std::memcpy(mapped, data, static_cast<size_t>(size));
+   if (data)
+   {
+      std::memcpy(mapped, data, static_cast<size_t>(size));
+   }
+   else
+   {
+      std::memset(mapped, 0, static_cast<size_t>(size));
+   }
    vkUnmapMemory(Vulkan.device, memory);
 }
 
@@ -1507,7 +1530,21 @@ void CreatePathTracerDescriptors()
          .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
       };
 
-      array<VkDescriptorSetLayoutBinding, 8> bindings = {
+      VkDescriptorSetLayoutBinding reservoirABinding = {
+         .binding = 8,
+         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+         .descriptorCount = 1,
+         .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+      };
+
+      VkDescriptorSetLayoutBinding reservoirBBinding = {
+         .binding = 9,
+         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+         .descriptorCount = 1,
+         .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+      };
+
+      array<VkDescriptorSetLayoutBinding, 10> bindings = {
          storageBinding,
          samplerBinding,
          sphereBinding,
@@ -1516,6 +1553,8 @@ void CreatePathTracerDescriptors()
          emissiveBinding,
          gridCellBinding,
          gridIndexBinding,
+         reservoirABinding,
+         reservoirBBinding,
       };
 
       VkDescriptorSetLayoutCreateInfo layoutInfo = {
@@ -1543,7 +1582,7 @@ void CreatePathTracerDescriptors()
       },
       {
          .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-         .descriptorCount = 6,
+         .descriptorCount = 8,
       },
    };
 
@@ -1591,6 +1630,19 @@ void CreatePathTracerDescriptors()
       &Vulkan.pathTracerDescriptorSet);
    Assert(allocResult == VK_SUCCESS, "Failed to allocate path tracer descriptor set");
 
+   if (!Vulkan.restirBuffersReady)
+   {
+      VkExtent2D extent = Vulkan.swapchainExtent;
+      u64 pixelCount = static_cast<u64>(extent.width) * static_cast<u64>(extent.height);
+      Assert(pixelCount > 0, "Restir reservoir pixel count is zero");
+
+      VkDeviceSize reservoirSize = static_cast<VkDeviceSize>(pixelCount) * sizeof(RestirReservoir);
+      CreateStorageBuffer(nullptr, reservoirSize, Vulkan.restirReservoirBufferA, Vulkan.restirReservoirMemoryA);
+      CreateStorageBuffer(nullptr, reservoirSize, Vulkan.restirReservoirBufferB, Vulkan.restirReservoirMemoryB);
+
+      Vulkan.restirBuffersReady = true;
+   }
+
    VkDescriptorImageInfo storageInfo = {
       .sampler = VK_NULL_HANDLE,
       .imageView = Vulkan.pathTracerImageView,
@@ -1601,6 +1653,18 @@ void CreatePathTracerDescriptors()
       .sampler = Vulkan.pathTracerSampler,
       .imageView = Vulkan.pathTracerImageView,
       .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+   };
+
+   VkDescriptorBufferInfo reservoirAInfo = {
+      .buffer = Vulkan.restirReservoirBufferA,
+      .offset = 0,
+      .range = VK_WHOLE_SIZE,
+   };
+
+   VkDescriptorBufferInfo reservoirBInfo = {
+      .buffer = Vulkan.restirReservoirBufferB,
+      .offset = 0,
+      .range = VK_WHOLE_SIZE,
    };
 
    VkWriteDescriptorSet writes[] = {
@@ -1621,6 +1685,22 @@ void CreatePathTracerDescriptors()
          .descriptorCount = 1,
          .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
          .pImageInfo = &sampledInfo,
+      },
+      {
+         .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+         .dstSet = Vulkan.pathTracerDescriptorSet,
+         .dstBinding = 8,
+         .descriptorCount = 1,
+         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+         .pBufferInfo = &reservoirAInfo,
+      },
+      {
+         .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+         .dstSet = Vulkan.pathTracerDescriptorSet,
+         .dstBinding = 9,
+         .descriptorCount = 1,
+         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+         .pBufferInfo = &reservoirBInfo,
       },
    };
 
@@ -1644,6 +1724,11 @@ void DestroyPathTracerDescriptors()
       Vulkan.pathTracerDescriptorPool = VK_NULL_HANDLE;
       Vulkan.pathTracerSampler = VK_NULL_HANDLE;
       Vulkan.pathTracerDescriptorsReady = false;
+      Vulkan.restirReservoirBufferA = VK_NULL_HANDLE;
+      Vulkan.restirReservoirMemoryA = VK_NULL_HANDLE;
+      Vulkan.restirReservoirBufferB = VK_NULL_HANDLE;
+      Vulkan.restirReservoirMemoryB = VK_NULL_HANDLE;
+      Vulkan.restirBuffersReady = false;
       return;
    }
 
@@ -1658,6 +1743,10 @@ void DestroyPathTracerDescriptors()
       vkDestroySampler(Vulkan.device, Vulkan.pathTracerSampler, nullptr);
       Vulkan.pathTracerSampler = VK_NULL_HANDLE;
    }
+
+   DestroyBuffer(Vulkan.restirReservoirBufferA, Vulkan.restirReservoirMemoryA);
+   DestroyBuffer(Vulkan.restirReservoirBufferB, Vulkan.restirReservoirMemoryB);
+   Vulkan.restirBuffersReady = false;
 
    Vulkan.pathTracerDescriptorSet = VK_NULL_HANDLE;
    Vulkan.pathTracerDescriptorsReady = false;
@@ -2515,11 +2604,11 @@ void CreatePathTracerPipeline()
    vkGetPhysicalDeviceProperties(Vulkan.physicalDevice, &properties);
    Assert(sizeof(PathParams) <= properties.limits.maxPushConstantsSize, "Path tracer push constants exceed device limit");
 
-   array<char, 512> computePath {};
-   int written = std::snprintf(computePath.data(), computePath.size(), "%s/%s", ShaderCacheDirectory, PathTracerComputeShaderName);
-   Assert((written > 0) && (static_cast<size_t>(written) < computePath.size()), "Compute shader path truncated");
+   array<char, 512> restirPath {};
+   int written = std::snprintf(restirPath.data(), restirPath.size(), "%s/%s", ShaderCacheDirectory, RestirPtComputeShaderName);
+   Assert((written > 0) && (static_cast<size_t>(written) < restirPath.size()), "Restir PT shader path truncated");
 
-   Vulkan.pathTracerComputeShader = CreateShader(computePath.data());
+   Vulkan.pathTracerComputeShader = CreateShader(restirPath.data());
 
    VkPushConstantRange pushConstant = {
       .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
@@ -2559,7 +2648,6 @@ void CreatePathTracerPipeline()
       nullptr,
       &Vulkan.pathTracerPipeline);
    Assert(pipelineResult == VK_SUCCESS, "Failed to create path tracer compute pipeline");
-
    Vulkan.pathTracerPipelineReady = true;
 }
 
@@ -2824,6 +2912,7 @@ auto RecordCommandBuffer(u32 frameIndex, u32 imageIndex, const GradientParams &g
    Assert(Vulkan.pathTracerDescriptorsReady, "Path tracer descriptors must exist before recording commands");
    Assert(Vulkan.pathTracerPipelineReady, "Path tracer compute pipeline must exist before recording commands");
    Assert(Vulkan.pathTracerSceneReady, "Path tracer scene buffers must exist before recording commands");
+   Assert(Vulkan.restirBuffersReady, "ReSTIR reservoirs must exist before recording commands");
    Assert(frameIndex < FrameOverlap, "Frame index out of range");
    Assert(imageIndex < Vulkan.swapchainImageCount, "Swapchain image index out of range");
 
@@ -2859,7 +2948,7 @@ auto RecordCommandBuffer(u32 frameIndex, u32 imageIndex, const GradientParams &g
       VkImageMemoryBarrier initializePathTracer = {
          .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
          .srcAccessMask = 0,
-         .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+         .dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
          .oldLayout = Vulkan.pathTracerImageLayout,
          .newLayout = desiredPathTracerLayout,
          .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
@@ -2871,7 +2960,7 @@ auto RecordCommandBuffer(u32 frameIndex, u32 imageIndex, const GradientParams &g
       vkCmdPipelineBarrier(
          frame.commandBuffer,
          VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-         VK_PIPELINE_STAGE_TRANSFER_BIT,
+         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
          0,
          0,
          nullptr,
@@ -2910,6 +2999,10 @@ auto RecordCommandBuffer(u32 frameIndex, u32 imageIndex, const GradientParams &g
    params.gridIndexCount = Vulkan.gridIndexCount;
    params.padA = 0;
    params.padB = 0;
+   params.restirPass = 0;
+   params.padC = 0;
+   params.padD = 0;
+   params.padE = 0;
 
    vkCmdPushConstants(
       frame.commandBuffer,
@@ -2924,6 +3017,46 @@ auto RecordCommandBuffer(u32 frameIndex, u32 imageIndex, const GradientParams &g
    groupX = (groupX > 0) ? groupX : 1u;
    groupY = (groupY > 0) ? groupY : 1u;
    vkCmdDispatch(frame.commandBuffer, groupX, groupY, 1);
+
+   VkMemoryBarrier reservoirBarrier = {
+      .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+      .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+      .dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+   };
+
+   vkCmdPipelineBarrier(
+      frame.commandBuffer,
+      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+      0,
+      1,
+      &reservoirBarrier,
+      0,
+      nullptr,
+      0,
+      nullptr);
+
+   params.restirPass = 1;
+   vkCmdPushConstants(
+      frame.commandBuffer,
+      Vulkan.pathTracerPipelineLayout,
+      VK_SHADER_STAGE_COMPUTE_BIT,
+      0,
+      sizeof(PathParams),
+      &params);
+   vkCmdDispatch(frame.commandBuffer, groupX, groupY, 1);
+
+   vkCmdPipelineBarrier(
+      frame.commandBuffer,
+      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+      0,
+      1,
+      &reservoirBarrier,
+      0,
+      nullptr,
+      0,
+      nullptr);
 
    VkImageMemoryBarrier storageToSample = {
       .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
@@ -3138,11 +3271,6 @@ auto SubmitFrame(u32 frameIndex, u32 imageIndex) -> VkResult
    }
 
    Assert(presentResult == VK_SUCCESS, "Failed to present swapchain image");
-
-   if (Vulkan.frameSeed < (std::numeric_limits<u32>::max() - 1u))
-   {
-      Vulkan.frameSeed += 1u;
-   }
 
    Vulkan.currentFrame = (Vulkan.currentFrame + 1) % FrameOverlap;
    return VK_SUCCESS;

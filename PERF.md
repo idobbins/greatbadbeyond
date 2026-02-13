@@ -30,6 +30,12 @@ Real-time ray tracing on modern consumer GPUs (NVIDIA RTX and AMD RDNA) demands 
 - `PathParams` push constants include the grid resolution, cell/index counts, and the compute shader walks the grid with an Amanatides & Woo style 3D DDA, clamping traversal by the closest hit seen so far (including the ground plane) to terminate as soon as a nearer primitive is found.
 - Traversal therefore touches only a handful of cache-coherent `cells[]`/`cellIndices[]` entries per ray instead of looping over all spheres, which dramatically reduces divergence and memory bandwidth on dense scenes while keeping the structure static and cheap to rebuild on the CPU.
 
+## ReSTIR Spatial Reuse (No Temporal Accumulation)
+
+- The path tracer runs in two compute passes each frame: pass 0 seeds per-pixel ReSTIR reservoirs from fresh path samples, and pass 1 performs spatial reuse against neighboring reservoirs before writing weighted radiance into the storage image.
+- Reservoirs are double-buffered only within a frame (pass 0 writes A, pass 1 reads A and writes B), with no carry-over between frames.
+- Guiding and temporal reuse were removed so each frame is fully resolved from scratch and deterministic for a given camera state.
+
 Struct-of-Arrays vs Array-of-Structs (SoA vs AoS) memory layouts
 
 GPU-friendly BVH/TLAS acceleration structures (for efficient ray intersections)

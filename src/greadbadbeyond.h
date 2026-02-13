@@ -120,6 +120,10 @@ struct PathParams
     u32 gridIndexCount;
     u32 padA;
     u32 padB;
+    u32 restirPass;
+    u32 padC;
+    u32 padD;
+    u32 padE;
 };
 
 //------------------------------------------------------------------------------------

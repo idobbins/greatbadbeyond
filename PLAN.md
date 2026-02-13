@@ -1,38 +1,143 @@
-# Render Roadmap
+# Forward Renderer Roadmap
 
-Linear sequence of work items that graduates the app from the current code (GLFW window + Vulkan device + swapchain/resize handling already implemented) to a compute path tracer that blits to a fullscreen triangle.
+This plan aligns the renderer with a simple, principled, world-space forward raster pipeline.
+The current frame loop, swapchain lifecycle, and camera flow remain the backbone.
 
-0. **Current Baseline (Done)**
-   - GLFW context + window lifecycle, surface creation, and resize callbacks are wired.
-   - Vulkan instance, debug messenger, surface, physical device, logical device, queues, and swapchain/image-view management exist with `RecreateSwapchain()` handling VK out-of-date/suboptimal cases.
-   - Main loop currently only polls events; no command buffers, sync objects, or rendering work submit yet.
+## North Star
 
-1. **Frame Infrastructure (Done)**
-   - Implemented frame cache with two-frame overlap: per-frame command pool, buffer, fence, and image-available semaphore plus per-swapchain-image render-finished semaphores and ownership fences.
-   - Added `RecordCommandBuffer(frame, imageIndex, clearColor)` using dynamic rendering to clear the current swapchain image with the configured color.
-   - Main loop now runs acquire → record → submit → present every tick, recreating the swapchain on VK_ERROR_OUT_OF_DATE_KHR / VK_SUBOPTIMAL_KHR or resize callbacks.
+- CPU-driven forward renderer.
+- Data-oriented scene representation.
+- Minimal passes and explicit data flow.
+- Add complexity only when profiling proves it is needed.
 
-2. **Solid-Color Output (Done)**
-   - Added GLSL fullscreen-triangle vertex/fragment shaders plus a CMake-driven `glslc` pipeline that compiles them into `build/*/shaders/*.spv` whenever the sources change.
-   - The Vulkan backend now builds shader modules, a push-constant-only pipeline layout, and a dynamic-rendering graphics pipeline that re-creates itself alongside the swapchain.
-   - `RecordCommandBuffer()` binds the fullscreen pipeline, pushes the frame color, and draws the triangle so every submission now renders a constant tint instead of relying on attachment clears.
+## Immediate Scope Changes
 
-3. **UV Gradient Pass (Done)**
-   - Fullscreen vertex shader now emits per-vertex UVs scaled by live framebuffer resolution via the new `GradientParams` push constants, so attribute interpolation matches the visible surface even after swapchain recreation.
-   - Fragment shader consumes those UVs, normalizes them against the current resolution, and outputs `vec4(uv, wave, 1.0)` where `wave` is derived from the push-constant time parameter, giving a clear animated gradient.
-   - The Vulkan backend defines/pushes `GradientParams` every frame: `MainLoop()` fills resolution+time from `GetFramebufferSize()`/`glfwGetTime()`, `RecordCommandBuffer()` forwards them via `vkCmdPushConstants`, and the fullscreen pipeline layout now exposes the range to both shader stages.
+Remove and unwind:
 
-4. **Compute Storage Image Plumbing (Done)**
-   - Path tracer storage image (R16G16B16A16) is allocated alongside the swapchain, complete with device-local memory and a view that recreates on resize.
-   - Descriptor set layout/pool bind the storage image twice (storage + sampled with a shared sampler) so compute can write to it later while the fullscreen pass reads from the same descriptor.
-   - `RecordCommandBuffer()` now clears the storage image, inserts the proper barrier, binds the descriptor set, and the fullscreen shaders sample the texture instead of procedurally emitting colors—establishing the presentation blit path for the upcoming compute dispatch.
+- Path tracing storage image, sampler, and related descriptor layout/pool/set.
+- Compute pipelines and ReSTIR buffers.
+- Compute dispatches and compute-to-graphics synchronization barriers.
 
-5. **Minimal Compute Path Tracer**
-   - Implement a basic compute shader that writes a flat color or gradient into the storage image via descriptors.
-   - Sequence: dispatch compute → insert proper pipeline barriers → run fullscreen triangle to present the compute result.
-   - Establish CPU-side parameters (camera structs, time) and route them through push constants or uniform buffers.
+Keep:
 
-6. **Path Tracer Features**
-   - Expand the compute shader into an actual path tracer (ray generation, scene description, accumulation).
-   - Add accumulation buffers, random seed management, and camera controls (position/orientation, FOV) mapped to input events.
-   - Integrate flight controls from platform input to manipulate the camera each frame, document the workflow in `PERF.md`, and ensure hot-resize plus swapchain recreation keeps accumulation/state coherent.
+- `FrameOverlap` resources (command pool/buffer, semaphores, fences).
+- Dynamic rendering for swapchain images.
+- Camera module and input integration.
+
+## Engine Architecture Targets
+
+CPU-side data:
+
+- `MeshGpu`: vertex/index buffers and counts.
+- `MaterialGpu`: pipeline key and descriptor binding data.
+- `RenderObject`: `meshId`, `materialId`, world transform, optional bounds.
+- `FrameGlobals`: view/proj, camera position, time, exposure.
+- `Light`: directional plus a bounded array of point lights.
+- Scene containers: `std::vector<RenderObject>` persistent scene list, plus `std::vector<DrawItem>` rebuilt each frame or on scene changes.
+
+`DrawItem` baseline fields:
+
+- `pipelineKey`, `materialId`, `meshId`, `firstIndex`, `indexCount`, `instanceCount`, `firstInstance`.
+
+GPU-side data:
+
+- Per-frame globals UBO (set 0).
+- Light buffer (SSBO preferred; UBO acceptable for very small limits).
+- Per-object transform buffer (SSBO for scalable instancing).
+- No bindless or descriptor indexing in v1.
+
+## Rendering Passes
+
+Pass 0 (required): forward opaque to swapchain image.
+
+- Begin dynamic rendering with color attachment.
+- Include depth attachment from day 1.
+- Draw opaque items sorted by pipeline, then material, then mesh.
+
+Pass 1 (later): forward transparent.
+
+- Reuse forward pass setup.
+- Back-to-front sort by depth.
+- Blend-enabled pipeline state.
+
+## Vulkan Integration Plan
+
+Public API additions in `src/greadbadbeyond.h`:
+
+- `void CreateScene();`
+- `void DestroyScene();`
+- `void CreateForwardRenderer();`
+- `void DestroyForwardRenderer();`
+- `void DrawFrameForward(u32 frameIndex, u32 imageIndex);`
+
+`VulkanData` additions:
+
+- `VkPipelineLayout forwardPipelineLayout;`
+- `VkPipeline forwardPipeline;`
+- `VkDescriptorSetLayout frameSetLayout;`
+- `VkDescriptorPool frameDescriptorPool;`
+- `std::array<VkDescriptorSet, FrameOverlap> frameDescriptorSets;`
+- `std::array<VkBuffer, FrameOverlap> frameUniformBuffers;`
+- `std::array<VkDeviceMemory, FrameOverlap> frameUniformMemory;`
+
+Depth resources:
+
+- `VkImage depthImage;`
+- `VkDeviceMemory depthMemory;`
+- `VkImageView depthView;`
+- `VkFormat depthFormat;`
+
+Command recording shape:
+
+- Transition swapchain image to `VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL`.
+- Transition depth image to `VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL`.
+- Begin dynamic rendering with color + depth.
+- Bind forward pipeline and frame descriptor set.
+- Draw sorted `DrawItem` list.
+- End rendering.
+- Transition swapchain image to `VK_IMAGE_LAYOUT_PRESENT_SRC_KHR`.
+
+## Phased Execution
+
+0. Baseline confirmation (done)
+- Keep acquire-record-submit-present and resize recreation paths stable.
+
+1. Compute/path-tracing de-scope
+- Remove compute descriptors, pipelines, shader wiring, and dispatch logic.
+- Keep fullscreen/clear fallback only if needed for bring-up.
+
+2. Depth + first forward draw
+- Create/destroy depth image resources with swapchain lifecycle.
+- Add simple forward shader pair and draw one hardcoded triangle/mesh with depth test.
+
+3. Mesh pipeline
+- Add `Vertex` format, vertex/index buffer upload path, indexed draw call.
+- Render one mesh from scene data.
+
+4. Frame globals
+- Add per-frame globals UBO.
+- Feed camera view/projection + time every frame.
+
+5. Object transforms + instancing
+- Add transform SSBO.
+- Support instance draws for objects sharing mesh/material.
+
+6. Lighting v0
+- Implement directional + small point-light array in forward shader.
+- Keep shader small and explicit.
+
+7. CPU batching and sorting
+- Build `DrawItem` list from scene.
+- Stable sort by pipeline/material/mesh before issuing draws.
+
+8. Transparent path (optional)
+- Add separate transparent draw list and blending pipeline.
+
+9. Advanced lighting scale (only when profiling requires)
+- Add clustered forward light lists.
+- Gate this work on measured light-count bottlenecks.
+
+## Guardrails
+
+- Each extra pass must be justified by measured wins.
+- Avoid hidden systems; features should stay explainable with a few structs and a single clear draw loop.

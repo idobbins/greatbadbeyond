@@ -5,7 +5,7 @@ if(WIN32)
       CACHE FILEPATH "LLVM resource compiler" FORCE)
 endif()
 
-project(callandor LANGUAGES CXX)
+project(greadbadbeyond LANGUAGES CXX)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 23)
@@ -45,7 +45,7 @@ set(SHADER_OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/shaders)
 set(SHADER_SOURCES
     ${SHADER_SOURCE_DIR}/fullscreen_triangle.vert
     ${SHADER_SOURCE_DIR}/fullscreen_triangle.frag
-    ${SHADER_SOURCE_DIR}/pathtracer.comp
+    ${SHADER_SOURCE_DIR}/restir_pt.comp
 )
 
 set(SHADER_OUTPUTS "")
