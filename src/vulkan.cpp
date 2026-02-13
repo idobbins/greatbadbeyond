@@ -2355,15 +2355,15 @@ auto DrawFrameForward(u32 frameIndex, u32 imageIndex, const GradientParams &grad
 
    float view[16] = {};
    view[0] = camera.right.x;
-   view[1] = camera.right.y;
-   view[2] = camera.right.z;
+   view[1] = camera.up.x;
+   view[2] = -camera.forward.x;
    view[3] = 0.0f;
-   view[4] = camera.up.x;
+   view[4] = camera.right.y;
    view[5] = camera.up.y;
-   view[6] = camera.up.z;
+   view[6] = -camera.forward.y;
    view[7] = 0.0f;
-   view[8] = -camera.forward.x;
-   view[9] = -camera.forward.y;
+   view[8] = camera.right.z;
+   view[9] = camera.up.z;
    view[10] = -camera.forward.z;
    view[11] = 0.0f;
    view[12] = -dot3(camera.right, camera.position);
