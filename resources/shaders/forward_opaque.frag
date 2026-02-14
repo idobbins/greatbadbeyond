@@ -37,6 +37,22 @@ layout(std430, set = 0, binding = 3) readonly buffer TileIndexBuffer
     uint tileLightIndices[];
 };
 
+struct ShadowCascade
+{
+    mat4 worldToShadow;
+    vec4 atlasRect;
+    vec4 params;
+};
+
+layout(std140, set = 0, binding = 4) uniform ShadowGlobals
+{
+    ShadowCascade cascades[4];
+    vec4 cameraForward;
+    vec4 atlasTexelSize;
+} shadowData;
+
+layout(set = 0, binding = 5) uniform sampler2DShadow shadowAtlas;
+
 layout(location = 0) in vec3 fragNormal;
 layout(location = 1) in vec2 fragUV;
 layout(location = 2) in vec3 fragWorldPos;
@@ -52,6 +68,77 @@ vec3 EvaluateSky(vec3 viewDir, vec3 sunDir)
     sky += vec3(1.0, 0.88, 0.70) * pow(sunAmount, 192.0) * 4.0;
     sky += vec3(1.0, 0.93, 0.82) * pow(sunAmount, 48.0) * 0.18;
     return sky;
+}
+
+float SampleShadowCascade(uint cascadeIndex, vec3 worldPos, vec3 normal, vec3 sunDir)
+{
+    ShadowCascade cascade = shadowData.cascades[cascadeIndex];
+    vec3 offsetWorld = worldPos + normal*cascade.params.w;
+    vec4 shadowPos4 = cascade.worldToShadow*vec4(offsetWorld, 1.0);
+    vec3 shadowPos = shadowPos4.xyz/max(shadowPos4.w, 0.0001);
+    if (shadowPos.x <= 0.0 || shadowPos.x >= 1.0 || shadowPos.y <= 0.0 || shadowPos.y >= 1.0)
+    {
+        return 1.0;
+    }
+
+    vec2 atlasUv = cascade.atlasRect.xy + shadowPos.xy*cascade.atlasRect.zw;
+    float ndl = max(dot(normal, sunDir), 0.0);
+    float compareDepth = shadowPos.z - cascade.params.z*(1.0 - ndl);
+    vec2 texel = shadowData.atlasTexelSize.xy;
+
+    float visibility = 0.0;
+    for (int y = -1; y <= 1; ++y)
+    {
+        for (int x = -1; x <= 1; ++x)
+        {
+            visibility += texture(shadowAtlas, vec3(atlasUv + vec2(x, y)*texel, compareDepth));
+        }
+    }
+    return visibility/9.0;
+}
+
+float EvaluateSunShadow(vec3 worldPos, vec3 normal, vec3 sunDir)
+{
+    uint cascadeCount = uint(shadowData.atlasTexelSize.z + 0.5);
+    if (cascadeCount == 0u)
+    {
+        return 1.0;
+    }
+
+    vec3 cameraForward = normalize(shadowData.cameraForward.xyz);
+    float viewDepth = dot(worldPos - pc.cameraPosition.xyz, cameraForward);
+    if (viewDepth <= 0.0)
+    {
+        return 1.0;
+    }
+
+    uint cascadeIndex = cascadeCount - 1u;
+    for (uint i = 0u; i < cascadeCount; ++i)
+    {
+        if (viewDepth <= shadowData.cascades[i].params.x)
+        {
+            cascadeIndex = i;
+            break;
+        }
+    }
+
+    float shadowA = SampleShadowCascade(cascadeIndex, worldPos, normal, sunDir);
+    if ((cascadeIndex + 1u) >= cascadeCount)
+    {
+        return shadowA;
+    }
+
+    float blendStart = shadowData.cascades[cascadeIndex].params.y;
+    float splitEnd = shadowData.cascades[cascadeIndex].params.x;
+    if (viewDepth <= blendStart)
+    {
+        return shadowA;
+    }
+
+    float blendRange = max(splitEnd - blendStart, 0.0001);
+    float t = clamp((viewDepth - blendStart)/blendRange, 0.0, 1.0);
+    float shadowB = SampleShadowCascade(cascadeIndex + 1u, worldPos, normal, sunDir);
+    return mix(shadowA, shadowB, t);
 }
 
 void main()
@@ -80,7 +167,8 @@ void main()
     vec3 baseAlbedo = mix(meshColor, groundColor, isGround);
 
     float ndlSun = max(dot(N, sunDir), 0.0);
-    vec3 directSun = vec3(1.0, 0.94, 0.86) * (1.05 * ndlSun);
+    float sunShadow = EvaluateSunShadow(fragWorldPos, N, sunDir);
+    vec3 directSun = vec3(1.0, 0.94, 0.86) * (1.05 * ndlSun * sunShadow);
 
     float hemi = clamp(N.y*0.5 + 0.5, 0.0, 1.0);
     vec3 ambientSky = mix(vec3(0.05, 0.055, 0.06), vec3(0.18, 0.24, 0.34), hemi);

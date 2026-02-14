@@ -46,6 +46,7 @@ set(SHADER_OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/shaders)
 set(SHADER_SOURCES
     ${SHADER_SOURCE_DIR}/forward_opaque.vert
     ${SHADER_SOURCE_DIR}/forward_opaque.frag
+    ${SHADER_SOURCE_DIR}/shadow_depth.vert
 )
 
 set(SHADER_OUTPUTS "")

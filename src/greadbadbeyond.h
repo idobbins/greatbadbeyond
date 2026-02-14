@@ -280,6 +280,10 @@ auto FindMemoryType(u32 typeBits, VkMemoryPropertyFlags properties) -> u32;
 // Pipeline-related functions
 void CreateForwardPipeline();
 void DestroyForwardPipeline();
+void CreateShadowResources();
+void DestroyShadowResources();
+void CreateShadowPipeline();
+void DestroyShadowPipeline();
 void CreateForwardLightingResources();
 void DestroyForwardLightingResources();
 void CreateColorResources();
@@ -291,6 +295,8 @@ void DestroyScene();
 void CreateForwardRenderer();
 void DestroyForwardRenderer();
 void UpdateForwardLightingData(const CameraParams &camera, VkExtent2D extent, float timeSeconds);
+void UpdateShadowCascades(const CameraParams &camera, VkExtent2D extent);
+void RecordShadowPass(VkCommandBuffer commandBuffer);
 
 // Drawing-related functions
 void DrawFrame();

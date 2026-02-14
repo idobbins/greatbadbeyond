@@ -14,9 +14,12 @@ This document tracks performance decisions for the forward renderer direction.
 - Frame overlap + acquire/record/submit/present is stable.
 - Dynamic rendering draws indexed forward geometry (single centered scene mesh).
 - Forward opaque pass binds one sampled albedo texture (descriptor set 0, binding 0).
-- Scene includes a procedural ground plane with a 1-world-unit grid pattern in the fragment shader.
-- Scene includes a procedural skybox and sky/ground ambient GI term (no shadows).
+- Scene includes a procedural ground plane with a checker pattern aligned to world-space cells.
+- Scene includes a procedural skybox and sky/ground ambient GI term.
 - Forward+ tiled light culling is enabled with CPU-side binning into screen tiles.
+- Directional sun shadows use stable Cascaded Shadow Maps (4 cascades) with texel-snapped cascade centers.
+- CSM cascades are packed into one 4096x4096 depth atlas with non-uniform tile sizes to prioritize near-field resolution.
+- Cascade transitions overlap and blend to reduce seam popping.
 - Preferred 2x MSAA resolves directly into the swapchain when supported by the GPU.
 - Legacy compute rendering path has been removed from the active frame loop.
 
