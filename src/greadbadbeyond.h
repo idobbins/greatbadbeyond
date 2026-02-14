@@ -294,8 +294,8 @@ void CreateScene();
 void DestroyScene();
 void CreateForwardRenderer();
 void DestroyForwardRenderer();
-void UpdateForwardLightingData(const CameraParams &camera, VkExtent2D extent, float timeSeconds);
-void UpdateShadowCascades(const CameraParams &camera, VkExtent2D extent);
+void UpdateForwardLightingData(const CameraParams &camera, VkExtent2D extent, float timeSeconds, u32 frameIndex);
+void UpdateShadowCascades(const CameraParams &camera, VkExtent2D extent, u32 frameIndex);
 void RecordShadowPass(VkCommandBuffer commandBuffer);
 
 // Drawing-related functions

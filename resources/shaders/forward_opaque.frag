@@ -46,7 +46,7 @@ struct ShadowCascade
 
 layout(std140, set = 0, binding = 4) uniform ShadowGlobals
 {
-    ShadowCascade cascades[4];
+    ShadowCascade cascades[3];
     vec4 cameraForward;
     vec4 atlasTexelSize;
 } shadowData;
@@ -87,14 +87,11 @@ float SampleShadowCascade(uint cascadeIndex, vec3 worldPos, vec3 normal, vec3 su
     vec2 texel = shadowData.atlasTexelSize.xy;
 
     float visibility = 0.0;
-    for (int y = -1; y <= 1; ++y)
-    {
-        for (int x = -1; x <= 1; ++x)
-        {
-            visibility += texture(shadowAtlas, vec3(atlasUv + vec2(x, y)*texel, compareDepth));
-        }
-    }
-    return visibility/9.0;
+    visibility += texture(shadowAtlas, vec3(atlasUv + texel*vec2(-0.5, -0.5), compareDepth));
+    visibility += texture(shadowAtlas, vec3(atlasUv + texel*vec2(0.5, -0.5), compareDepth));
+    visibility += texture(shadowAtlas, vec3(atlasUv + texel*vec2(-0.5, 0.5), compareDepth));
+    visibility += texture(shadowAtlas, vec3(atlasUv + texel*vec2(0.5, 0.5), compareDepth));
+    return visibility*0.25;
 }
 
 float EvaluateSunShadow(vec3 worldPos, vec3 normal, vec3 sunDir)

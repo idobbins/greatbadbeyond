@@ -36,8 +36,8 @@ static constexpr float SceneGridSpacing = 1.15f;
 static constexpr u32 ForwardTileSizePixels = 16;
 static constexpr u32 ForwardMaxLights = 96;
 static constexpr u32 ForwardMaxLightsPerTile = 64;
-static constexpr u32 CsmCascadeCount = 4;
-static constexpr u32 CsmShadowAtlasSize = 4096;
+static constexpr u32 CsmCascadeCount = 3;
+static constexpr u32 CsmShadowAtlasSize = 2048;
 static constexpr float CsmSplitLambda = 0.62f;
 static constexpr float CsmOverlapRatio = 0.12f;
 static constexpr float CsmNearPlane = 0.05f;
@@ -90,10 +90,9 @@ struct ShadowPushConstants
 };
 
 static constexpr array<ShadowAtlasRect, CsmCascadeCount> CsmAtlasRects = {
-   ShadowAtlasRect{0u, 0u, 2048u, 2048u},
-   ShadowAtlasRect{2048u, 0u, 1024u, 1024u},
-   ShadowAtlasRect{3072u, 0u, 1024u, 1024u},
-   ShadowAtlasRect{2048u, 1024u, 1024u, 1024u},
+   ShadowAtlasRect{0u, 0u, 1024u, 1024u},
+   ShadowAtlasRect{1024u, 0u, 512u, 512u},
+   ShadowAtlasRect{1536u, 0u, 512u, 512u},
 };
 
 #ifndef VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME
@@ -139,27 +138,27 @@ static struct VulkanData
    VkPipeline forwardPipeline;
    VkDescriptorSetLayout forwardDescriptorSetLayout;
    VkDescriptorPool forwardDescriptorPool;
-   VkDescriptorSet forwardDescriptorSet;
+   array<VkDescriptorSet, FrameOverlap> forwardDescriptorSets;
    VkImage shadowAtlasImage;
    VkDeviceMemory shadowAtlasMemory;
    VkImageView shadowAtlasView;
    VkImageLayout shadowAtlasLayout;
    VkSampler shadowAtlasSampler;
    VkFormat shadowDepthFormat;
-   VkBuffer shadowGlobalsBuffer;
-   VkDeviceMemory shadowGlobalsMemory;
-   void *shadowGlobalsMapped;
+   array<VkBuffer, FrameOverlap> shadowGlobalsBuffers;
+   array<VkDeviceMemory, FrameOverlap> shadowGlobalsMemories;
+   array<void *, FrameOverlap> shadowGlobalsMapped;
    u32 shadowCascadeCount;
    array<ShadowCascadeRuntime, CsmCascadeCount> shadowCascadeRuntime;
-   VkBuffer forwardLightBuffer;
-   VkDeviceMemory forwardLightMemory;
-   void *forwardLightMapped;
-   VkBuffer forwardTileMetaBuffer;
-   VkDeviceMemory forwardTileMetaMemory;
-   void *forwardTileMetaMapped;
-   VkBuffer forwardTileIndexBuffer;
-   VkDeviceMemory forwardTileIndexMemory;
-   void *forwardTileIndexMapped;
+   array<VkBuffer, FrameOverlap> forwardLightBuffers;
+   array<VkDeviceMemory, FrameOverlap> forwardLightMemories;
+   array<void *, FrameOverlap> forwardLightMapped;
+   array<VkBuffer, FrameOverlap> forwardTileMetaBuffers;
+   array<VkDeviceMemory, FrameOverlap> forwardTileMetaMemories;
+   array<void *, FrameOverlap> forwardTileMetaMapped;
+   array<VkBuffer, FrameOverlap> forwardTileIndexBuffers;
+   array<VkDeviceMemory, FrameOverlap> forwardTileIndexMemories;
+   array<void *, FrameOverlap> forwardTileIndexMapped;
    u32 forwardTileCountX;
    u32 forwardTileCountY;
    u32 forwardLightCount;
@@ -498,31 +497,31 @@ void DestroyInstance()
    Vulkan.shadowPipeline = VK_NULL_HANDLE;
    Vulkan.forwardDescriptorSetLayout = VK_NULL_HANDLE;
    Vulkan.forwardDescriptorPool = VK_NULL_HANDLE;
-   Vulkan.forwardDescriptorSet = VK_NULL_HANDLE;
+   Vulkan.forwardDescriptorSets.fill(VK_NULL_HANDLE);
    Vulkan.shadowAtlasImage = VK_NULL_HANDLE;
    Vulkan.shadowAtlasMemory = VK_NULL_HANDLE;
    Vulkan.shadowAtlasView = VK_NULL_HANDLE;
    Vulkan.shadowAtlasLayout = VK_IMAGE_LAYOUT_UNDEFINED;
    Vulkan.shadowAtlasSampler = VK_NULL_HANDLE;
    Vulkan.shadowDepthFormat = VK_FORMAT_UNDEFINED;
-   Vulkan.shadowGlobalsBuffer = VK_NULL_HANDLE;
-   Vulkan.shadowGlobalsMemory = VK_NULL_HANDLE;
-   Vulkan.shadowGlobalsMapped = nullptr;
+   Vulkan.shadowGlobalsBuffers.fill(VK_NULL_HANDLE);
+   Vulkan.shadowGlobalsMemories.fill(VK_NULL_HANDLE);
+   Vulkan.shadowGlobalsMapped.fill(nullptr);
    Vulkan.shadowCascadeCount = 0;
    for (ShadowCascadeRuntime &cascade : Vulkan.shadowCascadeRuntime)
    {
       std::memset(cascade.lightViewProj, 0, sizeof(cascade.lightViewProj));
       cascade.atlasRectPixels = {};
    }
-   Vulkan.forwardLightBuffer = VK_NULL_HANDLE;
-   Vulkan.forwardLightMemory = VK_NULL_HANDLE;
-   Vulkan.forwardLightMapped = nullptr;
-   Vulkan.forwardTileMetaBuffer = VK_NULL_HANDLE;
-   Vulkan.forwardTileMetaMemory = VK_NULL_HANDLE;
-   Vulkan.forwardTileMetaMapped = nullptr;
-   Vulkan.forwardTileIndexBuffer = VK_NULL_HANDLE;
-   Vulkan.forwardTileIndexMemory = VK_NULL_HANDLE;
-   Vulkan.forwardTileIndexMapped = nullptr;
+   Vulkan.forwardLightBuffers.fill(VK_NULL_HANDLE);
+   Vulkan.forwardLightMemories.fill(VK_NULL_HANDLE);
+   Vulkan.forwardLightMapped.fill(nullptr);
+   Vulkan.forwardTileMetaBuffers.fill(VK_NULL_HANDLE);
+   Vulkan.forwardTileMetaMemories.fill(VK_NULL_HANDLE);
+   Vulkan.forwardTileMetaMapped.fill(nullptr);
+   Vulkan.forwardTileIndexBuffers.fill(VK_NULL_HANDLE);
+   Vulkan.forwardTileIndexMemories.fill(VK_NULL_HANDLE);
+   Vulkan.forwardTileIndexMapped.fill(nullptr);
    Vulkan.forwardTileCountX = 0;
    Vulkan.forwardTileCountY = 0;
    Vulkan.forwardLightCount = 0;
@@ -2536,30 +2535,33 @@ void CreateShadowResources()
       .usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
       .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
    };
-   VkResult globalsCreateResult = vkCreateBuffer(Vulkan.device, &globalsBufferInfo, nullptr, &Vulkan.shadowGlobalsBuffer);
-   Assert(globalsCreateResult == VK_SUCCESS, "Failed to create CSM globals buffer");
+   for (u32 frameIndex = 0; frameIndex < FrameOverlap; ++frameIndex)
+   {
+      VkResult globalsCreateResult = vkCreateBuffer(Vulkan.device, &globalsBufferInfo, nullptr, &Vulkan.shadowGlobalsBuffers[frameIndex]);
+      Assert(globalsCreateResult == VK_SUCCESS, "Failed to create CSM globals buffer");
 
-   VkMemoryRequirements globalsRequirements = {};
-   vkGetBufferMemoryRequirements(Vulkan.device, Vulkan.shadowGlobalsBuffer, &globalsRequirements);
-   VkMemoryAllocateInfo globalsAllocInfo = {
-      .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-      .allocationSize = globalsRequirements.size,
-      .memoryTypeIndex = FindMemoryType(
-         globalsRequirements.memoryTypeBits,
-         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT),
-   };
-   VkResult globalsAllocResult = vkAllocateMemory(Vulkan.device, &globalsAllocInfo, nullptr, &Vulkan.shadowGlobalsMemory);
-   Assert(globalsAllocResult == VK_SUCCESS, "Failed to allocate CSM globals memory");
+      VkMemoryRequirements globalsRequirements = {};
+      vkGetBufferMemoryRequirements(Vulkan.device, Vulkan.shadowGlobalsBuffers[frameIndex], &globalsRequirements);
+      VkMemoryAllocateInfo globalsAllocInfo = {
+         .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+         .allocationSize = globalsRequirements.size,
+         .memoryTypeIndex = FindMemoryType(
+            globalsRequirements.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT),
+      };
+      VkResult globalsAllocResult = vkAllocateMemory(Vulkan.device, &globalsAllocInfo, nullptr, &Vulkan.shadowGlobalsMemories[frameIndex]);
+      Assert(globalsAllocResult == VK_SUCCESS, "Failed to allocate CSM globals memory");
 
-   VkResult globalsBindResult = vkBindBufferMemory(Vulkan.device, Vulkan.shadowGlobalsBuffer, Vulkan.shadowGlobalsMemory, 0);
-   Assert(globalsBindResult == VK_SUCCESS, "Failed to bind CSM globals buffer memory");
+      VkResult globalsBindResult = vkBindBufferMemory(Vulkan.device, Vulkan.shadowGlobalsBuffers[frameIndex], Vulkan.shadowGlobalsMemories[frameIndex], 0);
+      Assert(globalsBindResult == VK_SUCCESS, "Failed to bind CSM globals buffer memory");
 
-   void *globalsMapped = nullptr;
-   VkResult globalsMapResult = vkMapMemory(Vulkan.device, Vulkan.shadowGlobalsMemory, 0, VK_WHOLE_SIZE, 0, &globalsMapped);
-   Assert(globalsMapResult == VK_SUCCESS, "Failed to map CSM globals buffer");
-   Assert(globalsMapped != nullptr, "CSM globals mapping returned null");
-   Vulkan.shadowGlobalsMapped = globalsMapped;
-   std::memset(Vulkan.shadowGlobalsMapped, 0, sizeof(ShadowGlobalsGpu));
+      void *globalsMapped = nullptr;
+      VkResult globalsMapResult = vkMapMemory(Vulkan.device, Vulkan.shadowGlobalsMemories[frameIndex], 0, VK_WHOLE_SIZE, 0, &globalsMapped);
+      Assert(globalsMapResult == VK_SUCCESS, "Failed to map CSM globals buffer");
+      Assert(globalsMapped != nullptr, "CSM globals mapping returned null");
+      Vulkan.shadowGlobalsMapped[frameIndex] = globalsMapped;
+      std::memset(Vulkan.shadowGlobalsMapped[frameIndex], 0, sizeof(ShadowGlobalsGpu));
+   }
 
    Vulkan.shadowCascadeCount = CsmCascadeCount;
    for (u32 index = 0; index < CsmCascadeCount; ++index)
@@ -2591,9 +2593,9 @@ void DestroyShadowResources()
       Vulkan.shadowAtlasLayout = VK_IMAGE_LAYOUT_UNDEFINED;
       Vulkan.shadowAtlasSampler = VK_NULL_HANDLE;
       Vulkan.shadowDepthFormat = VK_FORMAT_UNDEFINED;
-      Vulkan.shadowGlobalsBuffer = VK_NULL_HANDLE;
-      Vulkan.shadowGlobalsMemory = VK_NULL_HANDLE;
-      Vulkan.shadowGlobalsMapped = nullptr;
+      Vulkan.shadowGlobalsBuffers.fill(VK_NULL_HANDLE);
+      Vulkan.shadowGlobalsMemories.fill(VK_NULL_HANDLE);
+      Vulkan.shadowGlobalsMapped.fill(nullptr);
       Vulkan.shadowCascadeCount = 0;
       Vulkan.shadowResourcesReady = false;
       for (ShadowCascadeRuntime &runtime : Vulkan.shadowCascadeRuntime)
@@ -2604,21 +2606,23 @@ void DestroyShadowResources()
       return;
    }
 
-   if (Vulkan.shadowGlobalsMapped != nullptr)
+   for (u32 frameIndex = 0; frameIndex < FrameOverlap; ++frameIndex)
    {
-      vkUnmapMemory(Vulkan.device, Vulkan.shadowGlobalsMemory);
-      Vulkan.shadowGlobalsMapped = nullptr;
-   }
-
-   if (Vulkan.shadowGlobalsBuffer != VK_NULL_HANDLE)
-   {
-      vkDestroyBuffer(Vulkan.device, Vulkan.shadowGlobalsBuffer, nullptr);
-      Vulkan.shadowGlobalsBuffer = VK_NULL_HANDLE;
-   }
-   if (Vulkan.shadowGlobalsMemory != VK_NULL_HANDLE)
-   {
-      vkFreeMemory(Vulkan.device, Vulkan.shadowGlobalsMemory, nullptr);
-      Vulkan.shadowGlobalsMemory = VK_NULL_HANDLE;
+      if (Vulkan.shadowGlobalsMapped[frameIndex] != nullptr)
+      {
+         vkUnmapMemory(Vulkan.device, Vulkan.shadowGlobalsMemories[frameIndex]);
+         Vulkan.shadowGlobalsMapped[frameIndex] = nullptr;
+      }
+      if (Vulkan.shadowGlobalsBuffers[frameIndex] != VK_NULL_HANDLE)
+      {
+         vkDestroyBuffer(Vulkan.device, Vulkan.shadowGlobalsBuffers[frameIndex], nullptr);
+         Vulkan.shadowGlobalsBuffers[frameIndex] = VK_NULL_HANDLE;
+      }
+      if (Vulkan.shadowGlobalsMemories[frameIndex] != VK_NULL_HANDLE)
+      {
+         vkFreeMemory(Vulkan.device, Vulkan.shadowGlobalsMemories[frameIndex], nullptr);
+         Vulkan.shadowGlobalsMemories[frameIndex] = VK_NULL_HANDLE;
+      }
    }
 
    if (Vulkan.shadowAtlasSampler != VK_NULL_HANDLE)
@@ -2835,10 +2839,11 @@ void DestroyShadowPipeline()
    Vulkan.shadowPipelineReady = false;
 }
 
-void UpdateShadowCascades(const CameraParams &camera, VkExtent2D extent)
+void UpdateShadowCascades(const CameraParams &camera, VkExtent2D extent, u32 frameIndex)
 {
    Assert(Vulkan.shadowResourcesReady, "Shadow resources are not ready");
-   Assert(Vulkan.shadowGlobalsMapped != nullptr, "Shadow globals buffer is not mapped");
+   Assert(frameIndex < FrameOverlap, "Shadow update frame index is out of range");
+   Assert(Vulkan.shadowGlobalsMapped[frameIndex] != nullptr, "Shadow globals buffer is not mapped");
    Assert((extent.width > 0) && (extent.height > 0), "Shadow update requires non-zero extent");
 
    const auto dot3 = [](const Vec3 &a, const Vec3 &b) -> float
@@ -3124,7 +3129,7 @@ void UpdateShadowCascades(const CameraParams &camera, VkExtent2D extent)
       gpuCascade.params[3] = 0.006f + static_cast<float>(cascadeIndex) * 0.003f;
    }
 
-   std::memcpy(Vulkan.shadowGlobalsMapped, &globals, sizeof(globals));
+   std::memcpy(Vulkan.shadowGlobalsMapped[frameIndex], &globals, sizeof(globals));
 }
 
 void RecordShadowPass(VkCommandBuffer commandBuffer)
@@ -3319,9 +3324,24 @@ void CreateForwardLightingResources()
       Assert(mapped != nullptr, "Forward lighting storage mapping returned null");
    };
 
-   createHostVisibleStorageBuffer(lightBytes, Vulkan.forwardLightBuffer, Vulkan.forwardLightMemory, Vulkan.forwardLightMapped);
-   createHostVisibleStorageBuffer(tileMetaBytes, Vulkan.forwardTileMetaBuffer, Vulkan.forwardTileMetaMemory, Vulkan.forwardTileMetaMapped);
-   createHostVisibleStorageBuffer(tileIndexBytes, Vulkan.forwardTileIndexBuffer, Vulkan.forwardTileIndexMemory, Vulkan.forwardTileIndexMapped);
+   for (u32 frameIndex = 0; frameIndex < FrameOverlap; ++frameIndex)
+   {
+      createHostVisibleStorageBuffer(
+         lightBytes,
+         Vulkan.forwardLightBuffers[frameIndex],
+         Vulkan.forwardLightMemories[frameIndex],
+         Vulkan.forwardLightMapped[frameIndex]);
+      createHostVisibleStorageBuffer(
+         tileMetaBytes,
+         Vulkan.forwardTileMetaBuffers[frameIndex],
+         Vulkan.forwardTileMetaMemories[frameIndex],
+         Vulkan.forwardTileMetaMapped[frameIndex]);
+      createHostVisibleStorageBuffer(
+         tileIndexBytes,
+         Vulkan.forwardTileIndexBuffers[frameIndex],
+         Vulkan.forwardTileIndexMemories[frameIndex],
+         Vulkan.forwardTileIndexMapped[frameIndex]);
+   }
 
    Vulkan.forwardLightCount = 0;
    Vulkan.forwardTileMetaScratch.resize(tileCount);
@@ -3334,15 +3354,15 @@ void DestroyForwardLightingResources()
 {
    if (Vulkan.device == VK_NULL_HANDLE)
    {
-      Vulkan.forwardLightBuffer = VK_NULL_HANDLE;
-      Vulkan.forwardLightMemory = VK_NULL_HANDLE;
-      Vulkan.forwardLightMapped = nullptr;
-      Vulkan.forwardTileMetaBuffer = VK_NULL_HANDLE;
-      Vulkan.forwardTileMetaMemory = VK_NULL_HANDLE;
-      Vulkan.forwardTileMetaMapped = nullptr;
-      Vulkan.forwardTileIndexBuffer = VK_NULL_HANDLE;
-      Vulkan.forwardTileIndexMemory = VK_NULL_HANDLE;
-      Vulkan.forwardTileIndexMapped = nullptr;
+      Vulkan.forwardLightBuffers.fill(VK_NULL_HANDLE);
+      Vulkan.forwardLightMemories.fill(VK_NULL_HANDLE);
+      Vulkan.forwardLightMapped.fill(nullptr);
+      Vulkan.forwardTileMetaBuffers.fill(VK_NULL_HANDLE);
+      Vulkan.forwardTileMetaMemories.fill(VK_NULL_HANDLE);
+      Vulkan.forwardTileMetaMapped.fill(nullptr);
+      Vulkan.forwardTileIndexBuffers.fill(VK_NULL_HANDLE);
+      Vulkan.forwardTileIndexMemories.fill(VK_NULL_HANDLE);
+      Vulkan.forwardTileIndexMapped.fill(nullptr);
       Vulkan.forwardTileCountX = 0;
       Vulkan.forwardTileCountY = 0;
       Vulkan.forwardLightCount = 0;
@@ -3353,53 +3373,56 @@ void DestroyForwardLightingResources()
       return;
    }
 
-   if (Vulkan.forwardLightMapped != nullptr)
+   for (u32 frameIndex = 0; frameIndex < FrameOverlap; ++frameIndex)
    {
-      vkUnmapMemory(Vulkan.device, Vulkan.forwardLightMemory);
-      Vulkan.forwardLightMapped = nullptr;
-   }
-   if (Vulkan.forwardTileMetaMapped != nullptr)
-   {
-      vkUnmapMemory(Vulkan.device, Vulkan.forwardTileMetaMemory);
-      Vulkan.forwardTileMetaMapped = nullptr;
-   }
-   if (Vulkan.forwardTileIndexMapped != nullptr)
-   {
-      vkUnmapMemory(Vulkan.device, Vulkan.forwardTileIndexMemory);
-      Vulkan.forwardTileIndexMapped = nullptr;
-   }
+      if (Vulkan.forwardLightMapped[frameIndex] != nullptr)
+      {
+         vkUnmapMemory(Vulkan.device, Vulkan.forwardLightMemories[frameIndex]);
+         Vulkan.forwardLightMapped[frameIndex] = nullptr;
+      }
+      if (Vulkan.forwardTileMetaMapped[frameIndex] != nullptr)
+      {
+         vkUnmapMemory(Vulkan.device, Vulkan.forwardTileMetaMemories[frameIndex]);
+         Vulkan.forwardTileMetaMapped[frameIndex] = nullptr;
+      }
+      if (Vulkan.forwardTileIndexMapped[frameIndex] != nullptr)
+      {
+         vkUnmapMemory(Vulkan.device, Vulkan.forwardTileIndexMemories[frameIndex]);
+         Vulkan.forwardTileIndexMapped[frameIndex] = nullptr;
+      }
 
-   if (Vulkan.forwardLightBuffer != VK_NULL_HANDLE)
-   {
-      vkDestroyBuffer(Vulkan.device, Vulkan.forwardLightBuffer, nullptr);
-      Vulkan.forwardLightBuffer = VK_NULL_HANDLE;
-   }
-   if (Vulkan.forwardLightMemory != VK_NULL_HANDLE)
-   {
-      vkFreeMemory(Vulkan.device, Vulkan.forwardLightMemory, nullptr);
-      Vulkan.forwardLightMemory = VK_NULL_HANDLE;
-   }
+      if (Vulkan.forwardLightBuffers[frameIndex] != VK_NULL_HANDLE)
+      {
+         vkDestroyBuffer(Vulkan.device, Vulkan.forwardLightBuffers[frameIndex], nullptr);
+         Vulkan.forwardLightBuffers[frameIndex] = VK_NULL_HANDLE;
+      }
+      if (Vulkan.forwardLightMemories[frameIndex] != VK_NULL_HANDLE)
+      {
+         vkFreeMemory(Vulkan.device, Vulkan.forwardLightMemories[frameIndex], nullptr);
+         Vulkan.forwardLightMemories[frameIndex] = VK_NULL_HANDLE;
+      }
 
-   if (Vulkan.forwardTileMetaBuffer != VK_NULL_HANDLE)
-   {
-      vkDestroyBuffer(Vulkan.device, Vulkan.forwardTileMetaBuffer, nullptr);
-      Vulkan.forwardTileMetaBuffer = VK_NULL_HANDLE;
-   }
-   if (Vulkan.forwardTileMetaMemory != VK_NULL_HANDLE)
-   {
-      vkFreeMemory(Vulkan.device, Vulkan.forwardTileMetaMemory, nullptr);
-      Vulkan.forwardTileMetaMemory = VK_NULL_HANDLE;
-   }
+      if (Vulkan.forwardTileMetaBuffers[frameIndex] != VK_NULL_HANDLE)
+      {
+         vkDestroyBuffer(Vulkan.device, Vulkan.forwardTileMetaBuffers[frameIndex], nullptr);
+         Vulkan.forwardTileMetaBuffers[frameIndex] = VK_NULL_HANDLE;
+      }
+      if (Vulkan.forwardTileMetaMemories[frameIndex] != VK_NULL_HANDLE)
+      {
+         vkFreeMemory(Vulkan.device, Vulkan.forwardTileMetaMemories[frameIndex], nullptr);
+         Vulkan.forwardTileMetaMemories[frameIndex] = VK_NULL_HANDLE;
+      }
 
-   if (Vulkan.forwardTileIndexBuffer != VK_NULL_HANDLE)
-   {
-      vkDestroyBuffer(Vulkan.device, Vulkan.forwardTileIndexBuffer, nullptr);
-      Vulkan.forwardTileIndexBuffer = VK_NULL_HANDLE;
-   }
-   if (Vulkan.forwardTileIndexMemory != VK_NULL_HANDLE)
-   {
-      vkFreeMemory(Vulkan.device, Vulkan.forwardTileIndexMemory, nullptr);
-      Vulkan.forwardTileIndexMemory = VK_NULL_HANDLE;
+      if (Vulkan.forwardTileIndexBuffers[frameIndex] != VK_NULL_HANDLE)
+      {
+         vkDestroyBuffer(Vulkan.device, Vulkan.forwardTileIndexBuffers[frameIndex], nullptr);
+         Vulkan.forwardTileIndexBuffers[frameIndex] = VK_NULL_HANDLE;
+      }
+      if (Vulkan.forwardTileIndexMemories[frameIndex] != VK_NULL_HANDLE)
+      {
+         vkFreeMemory(Vulkan.device, Vulkan.forwardTileIndexMemories[frameIndex], nullptr);
+         Vulkan.forwardTileIndexMemories[frameIndex] = VK_NULL_HANDLE;
+      }
    }
 
    Vulkan.forwardTileCountX = 0;
@@ -3411,12 +3434,13 @@ void DestroyForwardLightingResources()
    Vulkan.forwardLightingReady = false;
 }
 
-void UpdateForwardLightingData(const CameraParams &camera, VkExtent2D extent, float timeSeconds)
+void UpdateForwardLightingData(const CameraParams &camera, VkExtent2D extent, float timeSeconds, u32 frameIndex)
 {
+   Assert(frameIndex < FrameOverlap, "Forward lighting frame index is out of range");
    Assert(Vulkan.forwardLightingReady, "Forward lighting resources are not ready");
-   Assert(Vulkan.forwardLightMapped != nullptr, "Forward light buffer is not mapped");
-   Assert(Vulkan.forwardTileMetaMapped != nullptr, "Forward tile metadata buffer is not mapped");
-   Assert(Vulkan.forwardTileIndexMapped != nullptr, "Forward tile index buffer is not mapped");
+   Assert(Vulkan.forwardLightMapped[frameIndex] != nullptr, "Forward light buffer is not mapped");
+   Assert(Vulkan.forwardTileMetaMapped[frameIndex] != nullptr, "Forward tile metadata buffer is not mapped");
+   Assert(Vulkan.forwardTileIndexMapped[frameIndex] != nullptr, "Forward tile index buffer is not mapped");
    Assert((extent.width > 0) && (extent.height > 0), "Forward lighting update requires non-zero extent");
    Assert(Vulkan.forwardTileCountX > 0, "Forward tile count X is zero");
    Assert(Vulkan.forwardTileCountY > 0, "Forward tile count Y is zero");
@@ -3625,17 +3649,17 @@ void UpdateForwardLightingData(const CameraParams &camera, VkExtent2D extent, fl
       }
    }
 
-   std::memset(Vulkan.forwardLightMapped, 0, static_cast<usize>(sizeof(ForwardGpuLight)) * static_cast<usize>(ForwardMaxLights));
+   std::memset(Vulkan.forwardLightMapped[frameIndex], 0, static_cast<usize>(sizeof(ForwardGpuLight)) * static_cast<usize>(ForwardMaxLights));
    std::memcpy(
-      Vulkan.forwardLightMapped,
+      Vulkan.forwardLightMapped[frameIndex],
       Vulkan.forwardLightScratch.data(),
       static_cast<usize>(sizeof(ForwardGpuLight)) * static_cast<usize>(generatedLights));
    std::memcpy(
-      Vulkan.forwardTileMetaMapped,
+      Vulkan.forwardTileMetaMapped[frameIndex],
       Vulkan.forwardTileMetaScratch.data(),
       static_cast<usize>(sizeof(ForwardTileMeta)) * static_cast<usize>(tileCount));
    std::memcpy(
-      Vulkan.forwardTileIndexMapped,
+      Vulkan.forwardTileIndexMapped[frameIndex],
       Vulkan.forwardTileIndexScratch.data(),
       static_cast<usize>(sizeof(u32)) * static_cast<usize>(tileCount) * static_cast<usize>(ForwardMaxLightsPerTile));
 
@@ -3692,11 +3716,17 @@ void CreateForwardPipeline()
    Assert(Vulkan.shadowResourcesReady, "Create shadow resources before forward pipeline");
    Assert(Vulkan.shadowAtlasView != VK_NULL_HANDLE, "Shadow atlas view is not initialized");
    Assert(Vulkan.shadowAtlasSampler != VK_NULL_HANDLE, "Shadow atlas sampler is not initialized");
-   Assert(Vulkan.shadowGlobalsBuffer != VK_NULL_HANDLE, "Shadow globals buffer is not initialized");
+   for (u32 frameIndex = 0; frameIndex < FrameOverlap; ++frameIndex)
+   {
+      Assert(Vulkan.shadowGlobalsBuffers[frameIndex] != VK_NULL_HANDLE, "Shadow globals buffer is not initialized");
+   }
    Assert(Vulkan.forwardLightingReady, "Create forward lighting resources before pipeline");
-   Assert(Vulkan.forwardLightBuffer != VK_NULL_HANDLE, "Forward light buffer is not initialized");
-   Assert(Vulkan.forwardTileMetaBuffer != VK_NULL_HANDLE, "Forward tile metadata buffer is not initialized");
-   Assert(Vulkan.forwardTileIndexBuffer != VK_NULL_HANDLE, "Forward tile index buffer is not initialized");
+   for (u32 frameIndex = 0; frameIndex < FrameOverlap; ++frameIndex)
+   {
+      Assert(Vulkan.forwardLightBuffers[frameIndex] != VK_NULL_HANDLE, "Forward light buffer is not initialized");
+      Assert(Vulkan.forwardTileMetaBuffers[frameIndex] != VK_NULL_HANDLE, "Forward tile metadata buffer is not initialized");
+      Assert(Vulkan.forwardTileIndexBuffers[frameIndex] != VK_NULL_HANDLE, "Forward tile index buffer is not initialized");
+   }
    if (Vulkan.msaaSamples != VK_SAMPLE_COUNT_1_BIT)
    {
       Assert(Vulkan.colorResourcesReady, "Create color resources before MSAA forward pipeline");
@@ -3779,139 +3809,144 @@ void CreateForwardPipeline()
    array<VkDescriptorPoolSize, 3> descriptorPoolSizes = {
       VkDescriptorPoolSize{
          .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-         .descriptorCount = 2,
+         .descriptorCount = 2 * FrameOverlap,
       },
       VkDescriptorPoolSize{
          .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-         .descriptorCount = 3,
+         .descriptorCount = 3 * FrameOverlap,
       },
       VkDescriptorPoolSize{
          .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-         .descriptorCount = 1,
+         .descriptorCount = FrameOverlap,
       },
    };
    VkDescriptorPoolCreateInfo descriptorPoolInfo = {
       .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-      .maxSets = 1,
+      .maxSets = FrameOverlap,
       .poolSizeCount = static_cast<u32>(descriptorPoolSizes.size()),
       .pPoolSizes = descriptorPoolSizes.data(),
    };
    VkResult descriptorPoolResult = vkCreateDescriptorPool(Vulkan.device, &descriptorPoolInfo, nullptr, &Vulkan.forwardDescriptorPool);
    Assert(descriptorPoolResult == VK_SUCCESS, "Failed to create forward descriptor pool");
 
+   array<VkDescriptorSetLayout, FrameOverlap> descriptorSetLayouts = {};
+   descriptorSetLayouts.fill(Vulkan.forwardDescriptorSetLayout);
    VkDescriptorSetAllocateInfo descriptorSetAllocInfo = {
       .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
       .descriptorPool = Vulkan.forwardDescriptorPool,
-      .descriptorSetCount = 1,
-      .pSetLayouts = &Vulkan.forwardDescriptorSetLayout,
+      .descriptorSetCount = FrameOverlap,
+      .pSetLayouts = descriptorSetLayouts.data(),
    };
-   VkResult descriptorSetResult = vkAllocateDescriptorSets(Vulkan.device, &descriptorSetAllocInfo, &Vulkan.forwardDescriptorSet);
+   VkResult descriptorSetResult = vkAllocateDescriptorSets(Vulkan.device, &descriptorSetAllocInfo, Vulkan.forwardDescriptorSets.data());
    Assert(descriptorSetResult == VK_SUCCESS, "Failed to allocate forward descriptor set");
 
-   VkDescriptorImageInfo textureDescriptorImage = {
-      .sampler = Vulkan.sceneTextureSampler,
-      .imageView = Vulkan.sceneTextureView,
-      .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-   };
-   VkWriteDescriptorSet textureDescriptorWrite = {
-      .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-      .dstSet = Vulkan.forwardDescriptorSet,
-      .dstBinding = 0,
-      .dstArrayElement = 0,
-      .descriptorCount = 1,
-      .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-      .pImageInfo = &textureDescriptorImage,
-   };
+   for (u32 frameIndex = 0; frameIndex < FrameOverlap; ++frameIndex)
+   {
+      VkDescriptorImageInfo textureDescriptorImage = {
+         .sampler = Vulkan.sceneTextureSampler,
+         .imageView = Vulkan.sceneTextureView,
+         .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+      };
+      VkWriteDescriptorSet textureDescriptorWrite = {
+         .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+         .dstSet = Vulkan.forwardDescriptorSets[frameIndex],
+         .dstBinding = 0,
+         .dstArrayElement = 0,
+         .descriptorCount = 1,
+         .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+         .pImageInfo = &textureDescriptorImage,
+      };
 
-   VkDescriptorBufferInfo lightBufferInfo = {
-      .buffer = Vulkan.forwardLightBuffer,
-      .offset = 0,
-      .range = VK_WHOLE_SIZE,
-   };
-   VkWriteDescriptorSet lightDescriptorWrite = {
-      .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-      .dstSet = Vulkan.forwardDescriptorSet,
-      .dstBinding = 1,
-      .dstArrayElement = 0,
-      .descriptorCount = 1,
-      .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-      .pBufferInfo = &lightBufferInfo,
-   };
+      VkDescriptorBufferInfo lightBufferInfo = {
+         .buffer = Vulkan.forwardLightBuffers[frameIndex],
+         .offset = 0,
+         .range = VK_WHOLE_SIZE,
+      };
+      VkWriteDescriptorSet lightDescriptorWrite = {
+         .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+         .dstSet = Vulkan.forwardDescriptorSets[frameIndex],
+         .dstBinding = 1,
+         .dstArrayElement = 0,
+         .descriptorCount = 1,
+         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+         .pBufferInfo = &lightBufferInfo,
+      };
 
-   VkDescriptorBufferInfo tileMetaBufferInfo = {
-      .buffer = Vulkan.forwardTileMetaBuffer,
-      .offset = 0,
-      .range = VK_WHOLE_SIZE,
-   };
-   VkWriteDescriptorSet tileMetaDescriptorWrite = {
-      .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-      .dstSet = Vulkan.forwardDescriptorSet,
-      .dstBinding = 2,
-      .dstArrayElement = 0,
-      .descriptorCount = 1,
-      .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-      .pBufferInfo = &tileMetaBufferInfo,
-   };
+      VkDescriptorBufferInfo tileMetaBufferInfo = {
+         .buffer = Vulkan.forwardTileMetaBuffers[frameIndex],
+         .offset = 0,
+         .range = VK_WHOLE_SIZE,
+      };
+      VkWriteDescriptorSet tileMetaDescriptorWrite = {
+         .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+         .dstSet = Vulkan.forwardDescriptorSets[frameIndex],
+         .dstBinding = 2,
+         .dstArrayElement = 0,
+         .descriptorCount = 1,
+         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+         .pBufferInfo = &tileMetaBufferInfo,
+      };
 
-   VkDescriptorBufferInfo tileIndexBufferInfo = {
-      .buffer = Vulkan.forwardTileIndexBuffer,
-      .offset = 0,
-      .range = VK_WHOLE_SIZE,
-   };
-   VkWriteDescriptorSet tileIndexDescriptorWrite = {
-      .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-      .dstSet = Vulkan.forwardDescriptorSet,
-      .dstBinding = 3,
-      .dstArrayElement = 0,
-      .descriptorCount = 1,
-      .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-      .pBufferInfo = &tileIndexBufferInfo,
-   };
+      VkDescriptorBufferInfo tileIndexBufferInfo = {
+         .buffer = Vulkan.forwardTileIndexBuffers[frameIndex],
+         .offset = 0,
+         .range = VK_WHOLE_SIZE,
+      };
+      VkWriteDescriptorSet tileIndexDescriptorWrite = {
+         .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+         .dstSet = Vulkan.forwardDescriptorSets[frameIndex],
+         .dstBinding = 3,
+         .dstArrayElement = 0,
+         .descriptorCount = 1,
+         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+         .pBufferInfo = &tileIndexBufferInfo,
+      };
 
-   VkDescriptorBufferInfo shadowGlobalsBufferInfo = {
-      .buffer = Vulkan.shadowGlobalsBuffer,
-      .offset = 0,
-      .range = sizeof(ShadowGlobalsGpu),
-   };
-   VkWriteDescriptorSet shadowGlobalsDescriptorWrite = {
-      .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-      .dstSet = Vulkan.forwardDescriptorSet,
-      .dstBinding = 4,
-      .dstArrayElement = 0,
-      .descriptorCount = 1,
-      .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-      .pBufferInfo = &shadowGlobalsBufferInfo,
-   };
+      VkDescriptorBufferInfo shadowGlobalsBufferInfo = {
+         .buffer = Vulkan.shadowGlobalsBuffers[frameIndex],
+         .offset = 0,
+         .range = sizeof(ShadowGlobalsGpu),
+      };
+      VkWriteDescriptorSet shadowGlobalsDescriptorWrite = {
+         .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+         .dstSet = Vulkan.forwardDescriptorSets[frameIndex],
+         .dstBinding = 4,
+         .dstArrayElement = 0,
+         .descriptorCount = 1,
+         .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+         .pBufferInfo = &shadowGlobalsBufferInfo,
+      };
 
-   VkDescriptorImageInfo shadowAtlasDescriptorImage = {
-      .sampler = Vulkan.shadowAtlasSampler,
-      .imageView = Vulkan.shadowAtlasView,
-      .imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
-   };
-   VkWriteDescriptorSet shadowAtlasDescriptorWrite = {
-      .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-      .dstSet = Vulkan.forwardDescriptorSet,
-      .dstBinding = 5,
-      .dstArrayElement = 0,
-      .descriptorCount = 1,
-      .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-      .pImageInfo = &shadowAtlasDescriptorImage,
-   };
+      VkDescriptorImageInfo shadowAtlasDescriptorImage = {
+         .sampler = Vulkan.shadowAtlasSampler,
+         .imageView = Vulkan.shadowAtlasView,
+         .imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+      };
+      VkWriteDescriptorSet shadowAtlasDescriptorWrite = {
+         .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+         .dstSet = Vulkan.forwardDescriptorSets[frameIndex],
+         .dstBinding = 5,
+         .dstArrayElement = 0,
+         .descriptorCount = 1,
+         .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+         .pImageInfo = &shadowAtlasDescriptorImage,
+      };
 
-   array<VkWriteDescriptorSet, 6> descriptorWrites = {
-      textureDescriptorWrite,
-      lightDescriptorWrite,
-      tileMetaDescriptorWrite,
-      tileIndexDescriptorWrite,
-      shadowGlobalsDescriptorWrite,
-      shadowAtlasDescriptorWrite,
-   };
-   vkUpdateDescriptorSets(
-      Vulkan.device,
-      static_cast<u32>(descriptorWrites.size()),
-      descriptorWrites.data(),
-      0,
-      nullptr);
+      array<VkWriteDescriptorSet, 6> descriptorWrites = {
+         textureDescriptorWrite,
+         lightDescriptorWrite,
+         tileMetaDescriptorWrite,
+         tileIndexDescriptorWrite,
+         shadowGlobalsDescriptorWrite,
+         shadowAtlasDescriptorWrite,
+      };
+      vkUpdateDescriptorSets(
+         Vulkan.device,
+         static_cast<u32>(descriptorWrites.size()),
+         descriptorWrites.data(),
+         0,
+         nullptr);
+   }
 
    VkPushConstantRange pushConstant = {
       .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -4091,7 +4126,6 @@ void DestroyForwardPipeline()
        (Vulkan.forwardPipelineLayout == VK_NULL_HANDLE) &&
        (Vulkan.forwardDescriptorSetLayout == VK_NULL_HANDLE) &&
        (Vulkan.forwardDescriptorPool == VK_NULL_HANDLE) &&
-       (Vulkan.forwardDescriptorSet == VK_NULL_HANDLE) &&
        (Vulkan.forwardVertexShader == VK_NULL_HANDLE) &&
        (Vulkan.forwardFragmentShader == VK_NULL_HANDLE))
    {
@@ -4116,7 +4150,7 @@ void DestroyForwardPipeline()
       vkDestroyDescriptorPool(Vulkan.device, Vulkan.forwardDescriptorPool, nullptr);
       Vulkan.forwardDescriptorPool = VK_NULL_HANDLE;
    }
-   Vulkan.forwardDescriptorSet = VK_NULL_HANDLE;
+   Vulkan.forwardDescriptorSets.fill(VK_NULL_HANDLE);
 
    if ((Vulkan.device != VK_NULL_HANDLE) && (Vulkan.forwardDescriptorSetLayout != VK_NULL_HANDLE))
    {
@@ -4395,8 +4429,8 @@ auto DrawFrameForward(u32 frameIndex, u32 imageIndex, const GradientParams &grad
    Assert((extent.width > 0) && (extent.height > 0), "Swapchain extent is invalid");
 
    CameraParams camera = GetCameraParams();
-   UpdateForwardLightingData(camera, extent, gradient.time);
-   UpdateShadowCascades(camera, extent);
+   UpdateForwardLightingData(camera, extent, gradient.time, frameIndex);
+   UpdateShadowCascades(camera, extent, frameIndex);
    RecordShadowPass(frame.commandBuffer);
 
    VkImage image = Vulkan.swapchainImages[imageIndex];
@@ -4571,14 +4605,14 @@ auto DrawFrameForward(u32 frameIndex, u32 imageIndex, const GradientParams &grad
    vkCmdSetScissor(frame.commandBuffer, 0, 1, &scissor);
 
    vkCmdBindPipeline(frame.commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, Vulkan.forwardPipeline);
-   Assert(Vulkan.forwardDescriptorSet != VK_NULL_HANDLE, "Forward descriptor set is not initialized");
+   Assert(Vulkan.forwardDescriptorSets[frameIndex] != VK_NULL_HANDLE, "Forward descriptor set is not initialized");
    vkCmdBindDescriptorSets(
       frame.commandBuffer,
       VK_PIPELINE_BIND_POINT_GRAPHICS,
       Vulkan.forwardPipelineLayout,
       0,
       1,
-      &Vulkan.forwardDescriptorSet,
+      &Vulkan.forwardDescriptorSets[frameIndex],
       0,
       nullptr);
    Assert(Vulkan.sceneVertexBuffer != VK_NULL_HANDLE, "Scene vertex buffer is not initialized");
