@@ -32,6 +32,21 @@ static constexpr const char *ForwardFragmentShaderName = "forward_opaque.frag.sp
 static constexpr u32 SceneGridWidth = 32;
 static constexpr u32 SceneGridDepth = 32;
 static constexpr float SceneGridSpacing = 1.15f;
+static constexpr u32 ForwardTileSizePixels = 16;
+static constexpr u32 ForwardMaxLights = 96;
+static constexpr u32 ForwardMaxLightsPerTile = 64;
+
+struct ForwardGpuLight
+{
+   float positionRadius[4];
+   float colorIntensity[4];
+};
+
+struct ForwardTileMeta
+{
+   u32 offset;
+   u32 count;
+};
 
 #ifndef VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME
 #define VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME "VK_KHR_portability_subset"
@@ -71,6 +86,24 @@ static struct VulkanData
    VkShaderModule forwardFragmentShader;
    VkPipelineLayout forwardPipelineLayout;
    VkPipeline forwardPipeline;
+   VkDescriptorSetLayout forwardDescriptorSetLayout;
+   VkDescriptorPool forwardDescriptorPool;
+   VkDescriptorSet forwardDescriptorSet;
+   VkBuffer forwardLightBuffer;
+   VkDeviceMemory forwardLightMemory;
+   void *forwardLightMapped;
+   VkBuffer forwardTileMetaBuffer;
+   VkDeviceMemory forwardTileMetaMemory;
+   void *forwardTileMetaMapped;
+   VkBuffer forwardTileIndexBuffer;
+   VkDeviceMemory forwardTileIndexMemory;
+   void *forwardTileIndexMapped;
+   u32 forwardTileCountX;
+   u32 forwardTileCountY;
+   u32 forwardLightCount;
+   vector<ForwardTileMeta> forwardTileMetaScratch;
+   vector<u32> forwardTileIndexScratch;
+   vector<ForwardGpuLight> forwardLightScratch;
    VkSampleCountFlagBits msaaSamples;
    VkImage colorImage;
    VkDeviceMemory colorMemory;
@@ -90,6 +123,11 @@ static struct VulkanData
    void *uploadStagingMapped;
    VkDeviceSize uploadStagingCapacity;
    u32 sceneIndexCount;
+   VkImage sceneTextureImage;
+   VkDeviceMemory sceneTextureMemory;
+   VkImageView sceneTextureView;
+   VkSampler sceneTextureSampler;
+   VkImageLayout sceneTextureLayout;
    u32 frameSeed;
    vector<byte> decodeScratch;
 
@@ -106,6 +144,7 @@ static struct VulkanData
    bool sceneReady;
    bool forwardRendererReady;
    bool forwardPipelineReady;
+   bool forwardLightingReady;
 
 } Vulkan;
 
@@ -388,6 +427,30 @@ void DestroyInstance()
    Vulkan.sceneReady = false;
    Vulkan.forwardRendererReady = false;
    Vulkan.forwardPipelineReady = false;
+   Vulkan.forwardDescriptorSetLayout = VK_NULL_HANDLE;
+   Vulkan.forwardDescriptorPool = VK_NULL_HANDLE;
+   Vulkan.forwardDescriptorSet = VK_NULL_HANDLE;
+   Vulkan.forwardLightBuffer = VK_NULL_HANDLE;
+   Vulkan.forwardLightMemory = VK_NULL_HANDLE;
+   Vulkan.forwardLightMapped = nullptr;
+   Vulkan.forwardTileMetaBuffer = VK_NULL_HANDLE;
+   Vulkan.forwardTileMetaMemory = VK_NULL_HANDLE;
+   Vulkan.forwardTileMetaMapped = nullptr;
+   Vulkan.forwardTileIndexBuffer = VK_NULL_HANDLE;
+   Vulkan.forwardTileIndexMemory = VK_NULL_HANDLE;
+   Vulkan.forwardTileIndexMapped = nullptr;
+   Vulkan.forwardTileCountX = 0;
+   Vulkan.forwardTileCountY = 0;
+   Vulkan.forwardLightCount = 0;
+   Vulkan.forwardTileMetaScratch.clear();
+   Vulkan.forwardTileIndexScratch.clear();
+   Vulkan.forwardLightScratch.clear();
+   Vulkan.sceneTextureImage = VK_NULL_HANDLE;
+   Vulkan.sceneTextureMemory = VK_NULL_HANDLE;
+   Vulkan.sceneTextureView = VK_NULL_HANDLE;
+   Vulkan.sceneTextureSampler = VK_NULL_HANDLE;
+   Vulkan.sceneTextureLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+   Vulkan.forwardLightingReady = false;
 
    for (VkImage &image : Vulkan.swapchainImages)
    {
@@ -1294,9 +1357,13 @@ void CreateScene()
    std::span<const std::byte> manifestBlob = GetManifestBlobBytes();
    Assert(!manifestBlob.empty(), "Manifest pack is empty");
 
-   manifest::ResolvedAsset sceneAsset = manifest::kenney::handles::n3d_assets::prototype_kit::models_obj_format_shape_triangular_prism_obj.Resolve(manifestBlob);
+   manifest::ResolvedAsset sceneAsset = manifest::kenney::handles::n3d_assets::car_kit::models_obj_format_police_obj.Resolve(manifestBlob);
    Assert(sceneAsset.valid, "Scene asset handle failed to resolve");
    Assert(sceneAsset.format == manifest::AssetFormat::MESH_PNUV_F32_U32, "Scene asset is not a packed mesh payload");
+
+   manifest::ResolvedAsset sceneTextureAsset = manifest::kenney::handles::n3d_assets::car_kit::models_obj_format_textures_colormap_png.Resolve(manifestBlob);
+   Assert(sceneTextureAsset.valid, "Scene texture asset handle failed to resolve");
+   Assert(sceneTextureAsset.format == manifest::AssetFormat::IMAGE_RGBA8_MIPS, "Scene texture asset is not a packed RGBA8 payload");
 
    std::span<const std::byte> payload = sceneAsset.payload;
    if (sceneAsset.compression == manifest::CompressionCodec::DEFLATE_ZLIB)
@@ -1344,22 +1411,104 @@ void CreateScene()
    std::memcpy(baseVertices.data(), payload.data(), expectedVertexBytes);
    std::memcpy(baseIndices.data(), payload.data() + indexOffset, expectedIndexBytes);
 
+   std::span<const std::byte> texturePayload = sceneTextureAsset.payload;
+   std::vector<std::byte> textureDecodeScratch;
+   if (sceneTextureAsset.compression == manifest::CompressionCodec::DEFLATE_ZLIB)
+   {
+      Assert(sceneTextureAsset.decodedSize > 0, "Compressed scene texture has zero decoded size");
+      Assert(sceneTextureAsset.decodedSize <= static_cast<u64>(numeric_limits<usize>::max()), "Decoded scene texture exceeds addressable memory");
+      Assert(sceneTextureAsset.payload.size() <= static_cast<usize>(numeric_limits<uLong>::max()), "Compressed scene texture payload exceeds zlib input limits");
+
+      usize decodedSize = static_cast<usize>(sceneTextureAsset.decodedSize);
+      textureDecodeScratch.resize(decodedSize);
+      uLongf inflateSize = static_cast<uLongf>(decodedSize);
+      int inflateResult = uncompress(
+         reinterpret_cast<Bytef *>(textureDecodeScratch.data()),
+         &inflateSize,
+         reinterpret_cast<const Bytef *>(sceneTextureAsset.payload.data()),
+         static_cast<uLong>(sceneTextureAsset.payload.size()));
+      Assert(inflateResult == Z_OK, "Failed to decompress scene texture payload");
+      Assert(inflateSize == decodedSize, "Scene texture decompressed size mismatch");
+      texturePayload = {textureDecodeScratch.data(), decodedSize};
+   }
+   else
+   {
+      Assert(sceneTextureAsset.compression == manifest::CompressionCodec::NONE, "Unsupported scene texture compression codec");
+   }
+
+   Assert(texturePayload.size() >= sizeof(u32), "Scene texture payload is missing mip header");
+   u32 mipCount = 0;
+   std::memcpy(&mipCount, texturePayload.data(), sizeof(u32));
+   Assert(mipCount > 0, "Scene texture payload has zero mip levels");
+
+   usize mipDirectoryBytes = sizeof(u32) + static_cast<usize>(mipCount) * (sizeof(u32) * 4);
+   Assert(texturePayload.size() >= mipDirectoryBytes, "Scene texture payload mip directory is truncated");
+
+   const std::byte *mipEntry = texturePayload.data() + sizeof(u32);
+   u32 textureWidth = 0;
+   u32 textureHeight = 0;
+   u32 textureOffset = 0;
+   u32 textureSize = 0;
+   std::memcpy(&textureWidth, mipEntry + sizeof(u32) * 0, sizeof(u32));
+   std::memcpy(&textureHeight, mipEntry + sizeof(u32) * 1, sizeof(u32));
+   std::memcpy(&textureOffset, mipEntry + sizeof(u32) * 2, sizeof(u32));
+   std::memcpy(&textureSize, mipEntry + sizeof(u32) * 3, sizeof(u32));
+
+   Assert(textureWidth > 0, "Scene texture width is zero");
+   Assert(textureHeight > 0, "Scene texture height is zero");
+   Assert(textureSize > 0, "Scene texture payload size is zero");
+   Assert(textureOffset >= mipDirectoryBytes, "Scene texture mip payload offset overlaps the mip directory");
+   Assert((static_cast<usize>(textureOffset) + static_cast<usize>(textureSize)) <= texturePayload.size(), "Scene texture mip payload is out of bounds");
+   Assert(sceneTextureAsset.meta0 == textureWidth, "Scene texture width metadata mismatch");
+   Assert(sceneTextureAsset.meta1 == textureHeight, "Scene texture height metadata mismatch");
+
+   usize expectedTextureBytes = static_cast<usize>(textureWidth) * static_cast<usize>(textureHeight) * 4;
+   Assert(static_cast<usize>(textureSize) == expectedTextureBytes, "Scene texture mip payload has unexpected byte count");
+   std::span<const std::byte> textureLevel0Bytes = {
+      texturePayload.data() + static_cast<usize>(textureOffset),
+      static_cast<usize>(textureSize),
+   };
+
    for (u32 index : baseIndices)
    {
       Assert(index < baseVertices.size(), "Packed scene mesh index references out-of-range vertex");
    }
 
-   // Center only on XZ so layout is world-ground aligned.
-   Vec3 minBounds = baseVertices[0].position;
-   Vec3 maxBounds = baseVertices[0].position;
-   for (const Vertex &vertex : baseVertices)
-   {
-      minBounds.x = std::min(minBounds.x, vertex.position.x);
-      minBounds.z = std::min(minBounds.z, vertex.position.z);
+   manifest::MeshBounds packedBounds = manifest::TryGetMeshBounds(sceneAsset);
+   bool usePackedBounds = packedBounds.valid;
 
-      maxBounds.x = std::max(maxBounds.x, vertex.position.x);
-      maxBounds.z = std::max(maxBounds.z, vertex.position.z);
+   // Center only on XZ so layout is world-ground aligned.
+   Vec3 minBounds = {};
+   Vec3 maxBounds = {};
+   if (usePackedBounds)
+   {
+      minBounds = {packedBounds.minX, packedBounds.minY, packedBounds.minZ};
+      maxBounds = {packedBounds.maxX, packedBounds.maxY, packedBounds.maxZ};
    }
+   else
+   {
+      minBounds = baseVertices[0].position;
+      maxBounds = baseVertices[0].position;
+      for (const Vertex &vertex : baseVertices)
+      {
+         minBounds.x = std::min(minBounds.x, vertex.position.x);
+         minBounds.y = std::min(minBounds.y, vertex.position.y);
+         minBounds.z = std::min(minBounds.z, vertex.position.z);
+
+         maxBounds.x = std::max(maxBounds.x, vertex.position.x);
+         maxBounds.y = std::max(maxBounds.y, vertex.position.y);
+         maxBounds.z = std::max(maxBounds.z, vertex.position.z);
+      }
+   }
+
+   float extentX = maxBounds.x - minBounds.x;
+   float extentZ = maxBounds.z - minBounds.z;
+   float maxFootprintExtent = std::max(extentX, extentZ);
+   if (maxFootprintExtent <= 0.000001f)
+   {
+      maxFootprintExtent = 1.0f;
+   }
+   float footprintScale = 1.0f / maxFootprintExtent;
 
    Vec3 centerXZ = {
       (minBounds.x + maxBounds.x) * 0.5f,
@@ -1367,21 +1516,13 @@ void CreateScene()
       (minBounds.z + maxBounds.z) * 0.5f,
    };
 
+   // Normalize mesh into a unit-cube XZ footprint and keep the base on y = 0.
+   float minY = minBounds.y;
    for (Vertex &vertex : baseVertices)
    {
-      vertex.position.x -= centerXZ.x;
-      vertex.position.z -= centerXZ.z;
-   }
-
-   // Put the cube base on the ground plane (y = 0) before grid expansion.
-   float minY = baseVertices[0].position.y;
-   for (const Vertex &vertex : baseVertices)
-   {
-      minY = std::min(minY, vertex.position.y);
-   }
-   for (Vertex &vertex : baseVertices)
-   {
-      vertex.position.y -= minY;
+      vertex.position.x = (vertex.position.x - centerXZ.x) * footprintScale;
+      vertex.position.y = (vertex.position.y - minY) * footprintScale;
+      vertex.position.z = (vertex.position.z - centerXZ.z) * footprintScale;
    }
 
    Assert(!baseVertices.empty(), "Base mesh vertices cannot be empty");
@@ -1390,19 +1531,19 @@ void CreateScene()
    usize gridInstanceCount = static_cast<usize>(SceneGridWidth) * static_cast<usize>(SceneGridDepth);
    std::vector<Vertex> vertices;
    std::vector<u32> indices;
-   vertices.reserve(baseVertices.size() * gridInstanceCount);
-   indices.reserve(baseIndices.size() * gridInstanceCount);
+   vertices.reserve(baseVertices.size() * gridInstanceCount + 12);
+   indices.reserve(baseIndices.size() * gridInstanceCount + 42);
 
-   float xOffsetStart = (static_cast<float>(SceneGridWidth) - 1.0f) * 0.5f;
-   float zOffsetStart = (static_cast<float>(SceneGridDepth) - 1.0f) * 0.5f;
+   float gridHalfWidth = static_cast<float>(SceneGridWidth) * 0.5f;
+   float gridHalfDepth = static_cast<float>(SceneGridDepth) * 0.5f;
 
    for (u32 z = 0; z < SceneGridDepth; ++z)
    {
       for (u32 x = 0; x < SceneGridWidth; ++x)
       {
-         float worldX = (static_cast<float>(x) - xOffsetStart) * SceneGridSpacing;
+         float worldX = ((static_cast<float>(x) + 0.5f) - gridHalfWidth) * SceneGridSpacing;
          float worldY = 0.0f;
-         float worldZ = (static_cast<float>(z) - zOffsetStart) * SceneGridSpacing;
+         float worldZ = ((static_cast<float>(z) + 0.5f) - gridHalfDepth) * SceneGridSpacing;
 
          u32 vertexOffset = static_cast<u32>(vertices.size());
          for (const Vertex &source : baseVertices)
@@ -1420,6 +1561,127 @@ void CreateScene()
          }
       }
    }
+
+   // Add one large ground quad under the instance field.
+   float halfExtentX = (gridHalfWidth * SceneGridSpacing) + (2.0f * SceneGridSpacing);
+   float halfExtentZ = (gridHalfDepth * SceneGridSpacing) + (2.0f * SceneGridSpacing);
+   float groundY = -0.02f;
+   u32 groundBaseIndex = static_cast<u32>(vertices.size());
+   vertices.push_back({
+      .position = {-halfExtentX, groundY, -halfExtentZ},
+      .normal = {0.0f, 1.0f, 0.0f},
+      .uv = {-halfExtentX, -halfExtentZ},
+   });
+   vertices.push_back({
+      .position = {halfExtentX, groundY, -halfExtentZ},
+      .normal = {0.0f, 1.0f, 0.0f},
+      .uv = {halfExtentX, -halfExtentZ},
+   });
+   vertices.push_back({
+      .position = {halfExtentX, groundY, halfExtentZ},
+      .normal = {0.0f, 1.0f, 0.0f},
+      .uv = {halfExtentX, halfExtentZ},
+   });
+   vertices.push_back({
+      .position = {-halfExtentX, groundY, halfExtentZ},
+      .normal = {0.0f, 1.0f, 0.0f},
+      .uv = {-halfExtentX, halfExtentZ},
+   });
+   indices.push_back(groundBaseIndex + 0);
+   indices.push_back(groundBaseIndex + 1);
+   indices.push_back(groundBaseIndex + 2);
+   indices.push_back(groundBaseIndex + 2);
+   indices.push_back(groundBaseIndex + 3);
+   indices.push_back(groundBaseIndex + 0);
+
+   // Add a large skybox cube around the scene; shader detects sky via sentinel UV.
+   float skyHalfExtent = 90.0f;
+   Vec2 skyUvSentinel = {-10000.0f, -10000.0f};
+   Vec3 skyNormalSentinel = {0.0f, 0.0f, 0.0f};
+   u32 skyBaseIndex = static_cast<u32>(vertices.size());
+   vertices.push_back({
+      .position = {-skyHalfExtent, -skyHalfExtent, -skyHalfExtent},
+      .normal = skyNormalSentinel,
+      .uv = skyUvSentinel,
+   });
+   vertices.push_back({
+      .position = {skyHalfExtent, -skyHalfExtent, -skyHalfExtent},
+      .normal = skyNormalSentinel,
+      .uv = skyUvSentinel,
+   });
+   vertices.push_back({
+      .position = {skyHalfExtent, skyHalfExtent, -skyHalfExtent},
+      .normal = skyNormalSentinel,
+      .uv = skyUvSentinel,
+   });
+   vertices.push_back({
+      .position = {-skyHalfExtent, skyHalfExtent, -skyHalfExtent},
+      .normal = skyNormalSentinel,
+      .uv = skyUvSentinel,
+   });
+   vertices.push_back({
+      .position = {-skyHalfExtent, -skyHalfExtent, skyHalfExtent},
+      .normal = skyNormalSentinel,
+      .uv = skyUvSentinel,
+   });
+   vertices.push_back({
+      .position = {skyHalfExtent, -skyHalfExtent, skyHalfExtent},
+      .normal = skyNormalSentinel,
+      .uv = skyUvSentinel,
+   });
+   vertices.push_back({
+      .position = {skyHalfExtent, skyHalfExtent, skyHalfExtent},
+      .normal = skyNormalSentinel,
+      .uv = skyUvSentinel,
+   });
+   vertices.push_back({
+      .position = {-skyHalfExtent, skyHalfExtent, skyHalfExtent},
+      .normal = skyNormalSentinel,
+      .uv = skyUvSentinel,
+   });
+
+   indices.push_back(skyBaseIndex + 4);
+   indices.push_back(skyBaseIndex + 5);
+   indices.push_back(skyBaseIndex + 6);
+   indices.push_back(skyBaseIndex + 6);
+   indices.push_back(skyBaseIndex + 7);
+   indices.push_back(skyBaseIndex + 4);
+
+   indices.push_back(skyBaseIndex + 1);
+   indices.push_back(skyBaseIndex + 0);
+   indices.push_back(skyBaseIndex + 3);
+   indices.push_back(skyBaseIndex + 3);
+   indices.push_back(skyBaseIndex + 2);
+   indices.push_back(skyBaseIndex + 1);
+
+   indices.push_back(skyBaseIndex + 0);
+   indices.push_back(skyBaseIndex + 4);
+   indices.push_back(skyBaseIndex + 7);
+   indices.push_back(skyBaseIndex + 7);
+   indices.push_back(skyBaseIndex + 3);
+   indices.push_back(skyBaseIndex + 0);
+
+   indices.push_back(skyBaseIndex + 5);
+   indices.push_back(skyBaseIndex + 1);
+   indices.push_back(skyBaseIndex + 2);
+   indices.push_back(skyBaseIndex + 2);
+   indices.push_back(skyBaseIndex + 6);
+   indices.push_back(skyBaseIndex + 5);
+
+   indices.push_back(skyBaseIndex + 3);
+   indices.push_back(skyBaseIndex + 7);
+   indices.push_back(skyBaseIndex + 6);
+   indices.push_back(skyBaseIndex + 6);
+   indices.push_back(skyBaseIndex + 2);
+   indices.push_back(skyBaseIndex + 3);
+
+   indices.push_back(skyBaseIndex + 0);
+   indices.push_back(skyBaseIndex + 1);
+   indices.push_back(skyBaseIndex + 5);
+   indices.push_back(skyBaseIndex + 5);
+   indices.push_back(skyBaseIndex + 4);
+   indices.push_back(skyBaseIndex + 0);
+
    Assert(!vertices.empty(), "Grid vertices cannot be empty");
    Assert(!indices.empty(), "Grid indices cannot be empty");
 
@@ -1450,6 +1712,73 @@ void CreateScene()
       VkResult bindResult = vkBindBufferMemory(Vulkan.device, buffer, memory, 0);
       Assert(bindResult == VK_SUCCESS, "Failed to bind scene buffer memory");
    };
+
+   VkImageCreateInfo textureImageInfo = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+      .imageType = VK_IMAGE_TYPE_2D,
+      .format = VK_FORMAT_R8G8B8A8_UNORM,
+      .extent = {textureWidth, textureHeight, 1},
+      .mipLevels = 1,
+      .arrayLayers = 1,
+      .samples = VK_SAMPLE_COUNT_1_BIT,
+      .tiling = VK_IMAGE_TILING_OPTIMAL,
+      .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+      .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+      .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+   };
+   VkResult textureImageResult = vkCreateImage(Vulkan.device, &textureImageInfo, nullptr, &Vulkan.sceneTextureImage);
+   Assert(textureImageResult == VK_SUCCESS, "Failed to create scene texture image");
+
+   VkMemoryRequirements textureRequirements = {};
+   vkGetImageMemoryRequirements(Vulkan.device, Vulkan.sceneTextureImage, &textureRequirements);
+   VkMemoryAllocateInfo textureAllocInfo = {
+      .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+      .allocationSize = textureRequirements.size,
+      .memoryTypeIndex = FindMemoryType(textureRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT),
+   };
+   VkResult textureAllocResult = vkAllocateMemory(Vulkan.device, &textureAllocInfo, nullptr, &Vulkan.sceneTextureMemory);
+   Assert(textureAllocResult == VK_SUCCESS, "Failed to allocate scene texture image memory");
+
+   VkResult textureBindResult = vkBindImageMemory(Vulkan.device, Vulkan.sceneTextureImage, Vulkan.sceneTextureMemory, 0);
+   Assert(textureBindResult == VK_SUCCESS, "Failed to bind scene texture image memory");
+
+   VkImageViewCreateInfo textureViewInfo = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+      .image = Vulkan.sceneTextureImage,
+      .viewType = VK_IMAGE_VIEW_TYPE_2D,
+      .format = VK_FORMAT_R8G8B8A8_UNORM,
+      .subresourceRange = {
+         .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+         .baseMipLevel = 0,
+         .levelCount = 1,
+         .baseArrayLayer = 0,
+         .layerCount = 1,
+      },
+   };
+   VkResult textureViewResult = vkCreateImageView(Vulkan.device, &textureViewInfo, nullptr, &Vulkan.sceneTextureView);
+   Assert(textureViewResult == VK_SUCCESS, "Failed to create scene texture image view");
+
+   VkSamplerCreateInfo textureSamplerInfo = {
+      .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+      .magFilter = VK_FILTER_LINEAR,
+      .minFilter = VK_FILTER_LINEAR,
+      .mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
+      .addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+      .addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+      .addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+      .mipLodBias = 0.0f,
+      .anisotropyEnable = VK_FALSE,
+      .maxAnisotropy = 1.0f,
+      .compareEnable = VK_FALSE,
+      .compareOp = VK_COMPARE_OP_ALWAYS,
+      .minLod = 0.0f,
+      .maxLod = 0.0f,
+      .borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK,
+      .unnormalizedCoordinates = VK_FALSE,
+   };
+   VkResult textureSamplerResult = vkCreateSampler(Vulkan.device, &textureSamplerInfo, nullptr, &Vulkan.sceneTextureSampler);
+   Assert(textureSamplerResult == VK_SUCCESS, "Failed to create scene texture sampler");
+   Vulkan.sceneTextureLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
    const auto createOrResizeStagingBuffer = [&](VkDeviceSize requiredSize)
    {
@@ -1513,7 +1842,9 @@ void CreateScene()
 
    VkDeviceSize vertexBytes = static_cast<VkDeviceSize>(vertices.size() * sizeof(Vertex));
    VkDeviceSize indexBytes = static_cast<VkDeviceSize>(indices.size() * sizeof(u32));
-   VkDeviceSize totalUploadBytes = vertexBytes + indexBytes;
+   VkDeviceSize textureBytes = static_cast<VkDeviceSize>(textureLevel0Bytes.size());
+   VkDeviceSize textureUploadOffset = vertexBytes + indexBytes;
+   VkDeviceSize totalUploadBytes = textureUploadOffset + textureBytes;
 
    createOrResizeStagingBuffer(totalUploadBytes);
    Assert(Vulkan.uploadStagingMapped != nullptr, "Staging buffer is not mapped");
@@ -1521,6 +1852,7 @@ void CreateScene()
    byte *stagingBytes = reinterpret_cast<byte *>(Vulkan.uploadStagingMapped);
    std::memcpy(stagingBytes, vertices.data(), static_cast<size_t>(vertexBytes));
    std::memcpy(stagingBytes + static_cast<usize>(vertexBytes), indices.data(), static_cast<size_t>(indexBytes));
+   std::memcpy(stagingBytes + static_cast<usize>(textureUploadOffset), textureLevel0Bytes.data(), static_cast<size_t>(textureBytes));
 
    createDeviceLocalBuffer(VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, vertexBytes, Vulkan.sceneVertexBuffer, Vulkan.sceneVertexMemory);
    createDeviceLocalBuffer(VK_BUFFER_USAGE_INDEX_BUFFER_BIT, indexBytes, Vulkan.sceneIndexBuffer, Vulkan.sceneIndexMemory);
@@ -1567,6 +1899,80 @@ void CreateScene()
    };
    vkCmdCopyBuffer(uploadCmd, Vulkan.uploadStagingBuffer, Vulkan.sceneIndexBuffer, 1, &indexCopy);
 
+   VkImageSubresourceRange textureSubresource = {
+      .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+      .baseMipLevel = 0,
+      .levelCount = 1,
+      .baseArrayLayer = 0,
+      .layerCount = 1,
+   };
+   VkImageMemoryBarrier textureToTransferBarrier = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+      .srcAccessMask = 0,
+      .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+      .oldLayout = Vulkan.sceneTextureLayout,
+      .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+      .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+      .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+      .image = Vulkan.sceneTextureImage,
+      .subresourceRange = textureSubresource,
+   };
+   vkCmdPipelineBarrier(
+      uploadCmd,
+      VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+      VK_PIPELINE_STAGE_TRANSFER_BIT,
+      0,
+      0,
+      nullptr,
+      0,
+      nullptr,
+      1,
+      &textureToTransferBarrier);
+
+   VkBufferImageCopy textureCopy = {
+      .bufferOffset = textureUploadOffset,
+      .bufferRowLength = 0,
+      .bufferImageHeight = 0,
+      .imageSubresource = {
+         .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+         .mipLevel = 0,
+         .baseArrayLayer = 0,
+         .layerCount = 1,
+      },
+      .imageOffset = {0, 0, 0},
+      .imageExtent = {textureWidth, textureHeight, 1},
+   };
+   vkCmdCopyBufferToImage(
+      uploadCmd,
+      Vulkan.uploadStagingBuffer,
+      Vulkan.sceneTextureImage,
+      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+      1,
+      &textureCopy);
+
+   VkImageMemoryBarrier textureToShaderReadBarrier = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+      .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+      .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+      .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+      .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+      .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+      .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+      .image = Vulkan.sceneTextureImage,
+      .subresourceRange = textureSubresource,
+   };
+   vkCmdPipelineBarrier(
+      uploadCmd,
+      VK_PIPELINE_STAGE_TRANSFER_BIT,
+      VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+      0,
+      0,
+      nullptr,
+      0,
+      nullptr,
+      1,
+      &textureToShaderReadBarrier);
+
    VkResult cmdEndResult = vkEndCommandBuffer(uploadCmd);
    Assert(cmdEndResult == VK_SUCCESS, "Failed to end upload command buffer");
 
@@ -1590,6 +1996,7 @@ void CreateScene()
    vkDestroyFence(Vulkan.device, uploadFence, nullptr);
    vkDestroyCommandPool(Vulkan.device, uploadPool, nullptr);
 
+   Vulkan.sceneTextureLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
    Vulkan.sceneIndexCount = static_cast<u32>(indices.size());
    Vulkan.sceneReady = true;
 }
@@ -1607,6 +2014,11 @@ void DestroyScene()
       Vulkan.sceneVertexMemory = VK_NULL_HANDLE;
       Vulkan.sceneIndexBuffer = VK_NULL_HANDLE;
       Vulkan.sceneIndexMemory = VK_NULL_HANDLE;
+      Vulkan.sceneTextureImage = VK_NULL_HANDLE;
+      Vulkan.sceneTextureMemory = VK_NULL_HANDLE;
+      Vulkan.sceneTextureView = VK_NULL_HANDLE;
+      Vulkan.sceneTextureSampler = VK_NULL_HANDLE;
+      Vulkan.sceneTextureLayout = VK_IMAGE_LAYOUT_UNDEFINED;
       Vulkan.uploadStagingBuffer = VK_NULL_HANDLE;
       Vulkan.uploadStagingMemory = VK_NULL_HANDLE;
       Vulkan.uploadStagingMapped = nullptr;
@@ -1638,6 +2050,28 @@ void DestroyScene()
       vkFreeMemory(Vulkan.device, Vulkan.sceneIndexMemory, nullptr);
       Vulkan.sceneIndexMemory = VK_NULL_HANDLE;
    }
+
+   if (Vulkan.sceneTextureSampler != VK_NULL_HANDLE)
+   {
+      vkDestroySampler(Vulkan.device, Vulkan.sceneTextureSampler, nullptr);
+      Vulkan.sceneTextureSampler = VK_NULL_HANDLE;
+   }
+   if (Vulkan.sceneTextureView != VK_NULL_HANDLE)
+   {
+      vkDestroyImageView(Vulkan.device, Vulkan.sceneTextureView, nullptr);
+      Vulkan.sceneTextureView = VK_NULL_HANDLE;
+   }
+   if (Vulkan.sceneTextureImage != VK_NULL_HANDLE)
+   {
+      vkDestroyImage(Vulkan.device, Vulkan.sceneTextureImage, nullptr);
+      Vulkan.sceneTextureImage = VK_NULL_HANDLE;
+   }
+   if (Vulkan.sceneTextureMemory != VK_NULL_HANDLE)
+   {
+      vkFreeMemory(Vulkan.device, Vulkan.sceneTextureMemory, nullptr);
+      Vulkan.sceneTextureMemory = VK_NULL_HANDLE;
+   }
+   Vulkan.sceneTextureLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
    if (Vulkan.uploadStagingMapped != nullptr)
    {
@@ -1906,6 +2340,386 @@ void DestroyDepthResources()
    Vulkan.depthLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 }
 
+void CreateForwardLightingResources()
+{
+   if (Vulkan.forwardLightingReady)
+   {
+      return;
+   }
+
+   Assert(Vulkan.deviceReady, "Create Vulkan device before forward lighting resources");
+   Assert(Vulkan.swapchainReady, "Create Vulkan swapchain before forward lighting resources");
+
+   VkExtent2D extent = Vulkan.swapchainExtent;
+   Assert((extent.width > 0) && (extent.height > 0), "Swapchain extent is invalid for forward lighting resources");
+
+   Vulkan.forwardTileCountX = (extent.width + ForwardTileSizePixels - 1) / ForwardTileSizePixels;
+   Vulkan.forwardTileCountY = (extent.height + ForwardTileSizePixels - 1) / ForwardTileSizePixels;
+   Assert(Vulkan.forwardTileCountX > 0, "Forward lighting tile count X is zero");
+   Assert(Vulkan.forwardTileCountY > 0, "Forward lighting tile count Y is zero");
+
+   u32 tileCount = Vulkan.forwardTileCountX * Vulkan.forwardTileCountY;
+   Assert(tileCount > 0, "Forward lighting tile count is zero");
+
+   VkDeviceSize lightBytes = static_cast<VkDeviceSize>(sizeof(ForwardGpuLight)) * static_cast<VkDeviceSize>(ForwardMaxLights);
+   VkDeviceSize tileMetaBytes = static_cast<VkDeviceSize>(sizeof(ForwardTileMeta)) * static_cast<VkDeviceSize>(tileCount);
+   VkDeviceSize tileIndexBytes = static_cast<VkDeviceSize>(sizeof(u32)) * static_cast<VkDeviceSize>(tileCount) * static_cast<VkDeviceSize>(ForwardMaxLightsPerTile);
+
+   const auto createHostVisibleStorageBuffer = [&](VkDeviceSize size, VkBuffer &buffer, VkDeviceMemory &memory, void *&mapped)
+   {
+      VkBufferCreateInfo bufferInfo = {
+         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+         .size = size,
+         .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+      };
+      VkResult createResult = vkCreateBuffer(Vulkan.device, &bufferInfo, nullptr, &buffer);
+      Assert(createResult == VK_SUCCESS, "Failed to create forward lighting storage buffer");
+
+      VkMemoryRequirements requirements = {};
+      vkGetBufferMemoryRequirements(Vulkan.device, buffer, &requirements);
+      VkMemoryAllocateInfo allocInfo = {
+         .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+         .allocationSize = requirements.size,
+         .memoryTypeIndex = FindMemoryType(
+            requirements.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT),
+      };
+      VkResult allocResult = vkAllocateMemory(Vulkan.device, &allocInfo, nullptr, &memory);
+      Assert(allocResult == VK_SUCCESS, "Failed to allocate forward lighting storage memory");
+
+      VkResult bindResult = vkBindBufferMemory(Vulkan.device, buffer, memory, 0);
+      Assert(bindResult == VK_SUCCESS, "Failed to bind forward lighting storage memory");
+
+      mapped = nullptr;
+      VkResult mapResult = vkMapMemory(Vulkan.device, memory, 0, size, 0, &mapped);
+      Assert(mapResult == VK_SUCCESS, "Failed to map forward lighting storage memory");
+      Assert(mapped != nullptr, "Forward lighting storage mapping returned null");
+   };
+
+   createHostVisibleStorageBuffer(lightBytes, Vulkan.forwardLightBuffer, Vulkan.forwardLightMemory, Vulkan.forwardLightMapped);
+   createHostVisibleStorageBuffer(tileMetaBytes, Vulkan.forwardTileMetaBuffer, Vulkan.forwardTileMetaMemory, Vulkan.forwardTileMetaMapped);
+   createHostVisibleStorageBuffer(tileIndexBytes, Vulkan.forwardTileIndexBuffer, Vulkan.forwardTileIndexMemory, Vulkan.forwardTileIndexMapped);
+
+   Vulkan.forwardLightCount = 0;
+   Vulkan.forwardTileMetaScratch.resize(tileCount);
+   Vulkan.forwardTileIndexScratch.resize(static_cast<usize>(tileCount) * static_cast<usize>(ForwardMaxLightsPerTile));
+   Vulkan.forwardLightScratch.resize(ForwardMaxLights);
+   Vulkan.forwardLightingReady = true;
+}
+
+void DestroyForwardLightingResources()
+{
+   if (Vulkan.device == VK_NULL_HANDLE)
+   {
+      Vulkan.forwardLightBuffer = VK_NULL_HANDLE;
+      Vulkan.forwardLightMemory = VK_NULL_HANDLE;
+      Vulkan.forwardLightMapped = nullptr;
+      Vulkan.forwardTileMetaBuffer = VK_NULL_HANDLE;
+      Vulkan.forwardTileMetaMemory = VK_NULL_HANDLE;
+      Vulkan.forwardTileMetaMapped = nullptr;
+      Vulkan.forwardTileIndexBuffer = VK_NULL_HANDLE;
+      Vulkan.forwardTileIndexMemory = VK_NULL_HANDLE;
+      Vulkan.forwardTileIndexMapped = nullptr;
+      Vulkan.forwardTileCountX = 0;
+      Vulkan.forwardTileCountY = 0;
+      Vulkan.forwardLightCount = 0;
+      Vulkan.forwardTileMetaScratch.clear();
+      Vulkan.forwardTileIndexScratch.clear();
+      Vulkan.forwardLightScratch.clear();
+      Vulkan.forwardLightingReady = false;
+      return;
+   }
+
+   if (Vulkan.forwardLightMapped != nullptr)
+   {
+      vkUnmapMemory(Vulkan.device, Vulkan.forwardLightMemory);
+      Vulkan.forwardLightMapped = nullptr;
+   }
+   if (Vulkan.forwardTileMetaMapped != nullptr)
+   {
+      vkUnmapMemory(Vulkan.device, Vulkan.forwardTileMetaMemory);
+      Vulkan.forwardTileMetaMapped = nullptr;
+   }
+   if (Vulkan.forwardTileIndexMapped != nullptr)
+   {
+      vkUnmapMemory(Vulkan.device, Vulkan.forwardTileIndexMemory);
+      Vulkan.forwardTileIndexMapped = nullptr;
+   }
+
+   if (Vulkan.forwardLightBuffer != VK_NULL_HANDLE)
+   {
+      vkDestroyBuffer(Vulkan.device, Vulkan.forwardLightBuffer, nullptr);
+      Vulkan.forwardLightBuffer = VK_NULL_HANDLE;
+   }
+   if (Vulkan.forwardLightMemory != VK_NULL_HANDLE)
+   {
+      vkFreeMemory(Vulkan.device, Vulkan.forwardLightMemory, nullptr);
+      Vulkan.forwardLightMemory = VK_NULL_HANDLE;
+   }
+
+   if (Vulkan.forwardTileMetaBuffer != VK_NULL_HANDLE)
+   {
+      vkDestroyBuffer(Vulkan.device, Vulkan.forwardTileMetaBuffer, nullptr);
+      Vulkan.forwardTileMetaBuffer = VK_NULL_HANDLE;
+   }
+   if (Vulkan.forwardTileMetaMemory != VK_NULL_HANDLE)
+   {
+      vkFreeMemory(Vulkan.device, Vulkan.forwardTileMetaMemory, nullptr);
+      Vulkan.forwardTileMetaMemory = VK_NULL_HANDLE;
+   }
+
+   if (Vulkan.forwardTileIndexBuffer != VK_NULL_HANDLE)
+   {
+      vkDestroyBuffer(Vulkan.device, Vulkan.forwardTileIndexBuffer, nullptr);
+      Vulkan.forwardTileIndexBuffer = VK_NULL_HANDLE;
+   }
+   if (Vulkan.forwardTileIndexMemory != VK_NULL_HANDLE)
+   {
+      vkFreeMemory(Vulkan.device, Vulkan.forwardTileIndexMemory, nullptr);
+      Vulkan.forwardTileIndexMemory = VK_NULL_HANDLE;
+   }
+
+   Vulkan.forwardTileCountX = 0;
+   Vulkan.forwardTileCountY = 0;
+   Vulkan.forwardLightCount = 0;
+   Vulkan.forwardTileMetaScratch.clear();
+   Vulkan.forwardTileIndexScratch.clear();
+   Vulkan.forwardLightScratch.clear();
+   Vulkan.forwardLightingReady = false;
+}
+
+void UpdateForwardLightingData(const CameraParams &camera, VkExtent2D extent, float timeSeconds)
+{
+   Assert(Vulkan.forwardLightingReady, "Forward lighting resources are not ready");
+   Assert(Vulkan.forwardLightMapped != nullptr, "Forward light buffer is not mapped");
+   Assert(Vulkan.forwardTileMetaMapped != nullptr, "Forward tile metadata buffer is not mapped");
+   Assert(Vulkan.forwardTileIndexMapped != nullptr, "Forward tile index buffer is not mapped");
+   Assert((extent.width > 0) && (extent.height > 0), "Forward lighting update requires non-zero extent");
+   Assert(Vulkan.forwardTileCountX > 0, "Forward tile count X is zero");
+   Assert(Vulkan.forwardTileCountY > 0, "Forward tile count Y is zero");
+
+   u32 tileCount = Vulkan.forwardTileCountX * Vulkan.forwardTileCountY;
+   Assert(tileCount > 0, "Forward tile count is zero");
+
+   if (Vulkan.forwardTileMetaScratch.size() != static_cast<usize>(tileCount))
+   {
+      Vulkan.forwardTileMetaScratch.resize(tileCount);
+   }
+   usize tileIndexCount = static_cast<usize>(tileCount) * static_cast<usize>(ForwardMaxLightsPerTile);
+   if (Vulkan.forwardTileIndexScratch.size() != tileIndexCount)
+   {
+      Vulkan.forwardTileIndexScratch.resize(tileIndexCount);
+   }
+   if (Vulkan.forwardLightScratch.size() != static_cast<usize>(ForwardMaxLights))
+   {
+      Vulkan.forwardLightScratch.resize(ForwardMaxLights);
+   }
+
+   u32 generatedLights = 0;
+   for (i32 z = -4; z <= 4 && generatedLights < ForwardMaxLights; ++z)
+   {
+      for (i32 x = -4; x <= 4 && generatedLights < ForwardMaxLights; ++x)
+      {
+         float phase = static_cast<float>(generatedLights) * 0.37f;
+         float pulse = 0.5f + 0.5f * std::sin((timeSeconds * 0.85f) + phase);
+         float lightX = static_cast<float>(x) * 3.25f;
+         float lightZ = static_cast<float>(z) * 3.25f;
+         float lightY = 1.2f + (0.9f * pulse);
+         float radius = 3.0f + (1.4f * pulse);
+         float intensity = 2.2f + (0.8f * pulse);
+         float colorR = 0.35f + (0.65f * (0.5f + 0.5f * std::sin(phase * 1.31f + 0.4f)));
+         float colorG = 0.35f + (0.65f * (0.5f + 0.5f * std::sin(phase * 1.79f + 1.1f)));
+         float colorB = 0.35f + (0.65f * (0.5f + 0.5f * std::sin(phase * 2.17f + 2.2f)));
+
+         ForwardGpuLight light = {};
+         light.positionRadius[0] = lightX;
+         light.positionRadius[1] = lightY;
+         light.positionRadius[2] = lightZ;
+         light.positionRadius[3] = radius;
+         light.colorIntensity[0] = colorR;
+         light.colorIntensity[1] = colorG;
+         light.colorIntensity[2] = colorB;
+         light.colorIntensity[3] = intensity;
+         Vulkan.forwardLightScratch[generatedLights] = light;
+         generatedLights += 1;
+      }
+   }
+
+   const auto dot3 = [](const Vec3 &a, const Vec3 &b) -> float
+   {
+      return a.x*b.x + a.y*b.y + a.z*b.z;
+   };
+   const auto multiplyMat4 = [](const float *a, const float *b, float *result)
+   {
+      float temp[16] = {};
+      for (int column = 0; column < 4; ++column)
+      {
+         for (int row = 0; row < 4; ++row)
+         {
+            float sum = 0.0f;
+            for (int k = 0; k < 4; ++k)
+            {
+               sum += a[k*4 + row] * b[column*4 + k];
+            }
+            temp[column*4 + row] = sum;
+         }
+      }
+      std::memcpy(result, temp, sizeof(temp));
+   };
+
+   float nearPlane = 0.05f;
+   float farPlane = 200.0f;
+   float aspect = static_cast<float>(extent.width) / static_cast<float>(extent.height);
+   if (aspect <= 0.0f)
+   {
+      aspect = 1.0f;
+   }
+
+   float view[16] = {};
+   view[0] = camera.right.x;
+   view[1] = camera.up.x;
+   view[2] = -camera.forward.x;
+   view[3] = 0.0f;
+   view[4] = camera.right.y;
+   view[5] = camera.up.y;
+   view[6] = -camera.forward.y;
+   view[7] = 0.0f;
+   view[8] = camera.right.z;
+   view[9] = camera.up.z;
+   view[10] = -camera.forward.z;
+   view[11] = 0.0f;
+   view[12] = -dot3(camera.right, camera.position);
+   view[13] = -dot3(camera.up, camera.position);
+   view[14] = dot3(camera.forward, camera.position);
+   view[15] = 1.0f;
+
+   float proj[16] = {};
+   float tanHalfFov = std::tan(camera.verticalFovRadians * 0.5f);
+   if (tanHalfFov <= 0.0f)
+   {
+      tanHalfFov = 0.001f;
+   }
+   float focal = 1.0f / tanHalfFov;
+   proj[0] = focal / aspect;
+   proj[5] = -focal;
+   proj[10] = farPlane / (nearPlane - farPlane);
+   proj[11] = -1.0f;
+   proj[14] = (nearPlane * farPlane) / (nearPlane - farPlane);
+
+   float viewProj[16] = {};
+   multiplyMat4(proj, view, viewProj);
+
+   auto projectToScreen = [&](const Vec3 &world, float &x, float &y) -> bool
+   {
+      float clipX = (viewProj[0] * world.x) + (viewProj[4] * world.y) + (viewProj[8] * world.z) + viewProj[12];
+      float clipY = (viewProj[1] * world.x) + (viewProj[5] * world.y) + (viewProj[9] * world.z) + viewProj[13];
+      float clipW = (viewProj[3] * world.x) + (viewProj[7] * world.y) + (viewProj[11] * world.z) + viewProj[15];
+      if (clipW <= 0.0001f)
+      {
+         return false;
+      }
+      float invW = 1.0f / clipW;
+      float ndcX = clipX * invW;
+      float ndcY = clipY * invW;
+      x = (ndcX * 0.5f + 0.5f) * static_cast<float>(extent.width);
+      y = (ndcY * 0.5f + 0.5f) * static_cast<float>(extent.height);
+      return true;
+   };
+
+   for (u32 tileIndex = 0; tileIndex < tileCount; ++tileIndex)
+   {
+      Vulkan.forwardTileMetaScratch[tileIndex].offset = tileIndex * ForwardMaxLightsPerTile;
+      Vulkan.forwardTileMetaScratch[tileIndex].count = 0;
+   }
+   std::fill(Vulkan.forwardTileIndexScratch.begin(), Vulkan.forwardTileIndexScratch.end(), 0u);
+
+   for (u32 lightIndex = 0; lightIndex < generatedLights; ++lightIndex)
+   {
+      const ForwardGpuLight &light = Vulkan.forwardLightScratch[lightIndex];
+      Vec3 center = {light.positionRadius[0], light.positionRadius[1], light.positionRadius[2]};
+      float radius = light.positionRadius[3];
+
+      float centerX = 0.0f;
+      float centerY = 0.0f;
+      if (!projectToScreen(center, centerX, centerY))
+      {
+         continue;
+      }
+
+      Vec3 rightPoint = {
+         center.x + camera.right.x * radius,
+         center.y + camera.right.y * radius,
+         center.z + camera.right.z * radius,
+      };
+      Vec3 upPoint = {
+         center.x + camera.up.x * radius,
+         center.y + camera.up.y * radius,
+         center.z + camera.up.z * radius,
+      };
+
+      float radiusPixels = 2.0f;
+      float edgeX = 0.0f;
+      float edgeY = 0.0f;
+      if (projectToScreen(rightPoint, edgeX, edgeY))
+      {
+         radiusPixels = std::max(radiusPixels, std::fabs(edgeX - centerX));
+         radiusPixels = std::max(radiusPixels, std::fabs(edgeY - centerY));
+      }
+      if (projectToScreen(upPoint, edgeX, edgeY))
+      {
+         radiusPixels = std::max(radiusPixels, std::fabs(edgeX - centerX));
+         radiusPixels = std::max(radiusPixels, std::fabs(edgeY - centerY));
+      }
+
+      i32 minTileX = static_cast<i32>(std::floor((centerX - radiusPixels) / static_cast<float>(ForwardTileSizePixels)));
+      i32 maxTileX = static_cast<i32>(std::floor((centerX + radiusPixels) / static_cast<float>(ForwardTileSizePixels)));
+      i32 minTileY = static_cast<i32>(std::floor((centerY - radiusPixels) / static_cast<float>(ForwardTileSizePixels)));
+      i32 maxTileY = static_cast<i32>(std::floor((centerY + radiusPixels) / static_cast<float>(ForwardTileSizePixels)));
+
+      minTileX = std::max(minTileX, 0);
+      minTileY = std::max(minTileY, 0);
+      maxTileX = std::min(maxTileX, static_cast<i32>(Vulkan.forwardTileCountX) - 1);
+      maxTileY = std::min(maxTileY, static_cast<i32>(Vulkan.forwardTileCountY) - 1);
+      if (minTileX > maxTileX || minTileY > maxTileY)
+      {
+         continue;
+      }
+
+      for (i32 tileY = minTileY; tileY <= maxTileY; ++tileY)
+      {
+         for (i32 tileX = minTileX; tileX <= maxTileX; ++tileX)
+         {
+            u32 tileIndex = static_cast<u32>(tileY) * Vulkan.forwardTileCountX + static_cast<u32>(tileX);
+            ForwardTileMeta &meta = Vulkan.forwardTileMetaScratch[tileIndex];
+            if (meta.count >= ForwardMaxLightsPerTile)
+            {
+               continue;
+            }
+            usize listOffset = static_cast<usize>(meta.offset + meta.count);
+            Vulkan.forwardTileIndexScratch[listOffset] = lightIndex;
+            meta.count += 1;
+         }
+      }
+   }
+
+   std::memset(Vulkan.forwardLightMapped, 0, static_cast<usize>(sizeof(ForwardGpuLight)) * static_cast<usize>(ForwardMaxLights));
+   std::memcpy(
+      Vulkan.forwardLightMapped,
+      Vulkan.forwardLightScratch.data(),
+      static_cast<usize>(sizeof(ForwardGpuLight)) * static_cast<usize>(generatedLights));
+   std::memcpy(
+      Vulkan.forwardTileMetaMapped,
+      Vulkan.forwardTileMetaScratch.data(),
+      static_cast<usize>(sizeof(ForwardTileMeta)) * static_cast<usize>(tileCount));
+   std::memcpy(
+      Vulkan.forwardTileIndexMapped,
+      Vulkan.forwardTileIndexScratch.data(),
+      static_cast<usize>(sizeof(u32)) * static_cast<usize>(tileCount) * static_cast<usize>(ForwardMaxLightsPerTile));
+
+   Vulkan.forwardLightCount = generatedLights;
+}
+
 void CreateForwardRenderer()
 {
    if (Vulkan.forwardRendererReady)
@@ -1916,6 +2730,7 @@ void CreateForwardRenderer()
    Assert(Vulkan.sceneReady, "Create scene before creating forward renderer");
    CreateColorResources();
    CreateDepthResources();
+   CreateForwardLightingResources();
    CreateForwardPipeline();
    Vulkan.forwardRendererReady = true;
 }
@@ -1928,6 +2743,7 @@ void DestroyForwardRenderer()
    }
 
    DestroyForwardPipeline();
+   DestroyForwardLightingResources();
    DestroyDepthResources();
    DestroyColorResources();
    Vulkan.forwardRendererReady = false;
@@ -1944,6 +2760,13 @@ void CreateForwardPipeline()
    Assert(Vulkan.swapchainReady, "Create the Vulkan swapchain before pipelines");
    Assert(Vulkan.msaaSamples != static_cast<VkSampleCountFlagBits>(0), "MSAA sample count is not initialized");
    Assert(Vulkan.depthResourcesReady, "Create depth resources before pipelines");
+   Assert(Vulkan.sceneTextureView != VK_NULL_HANDLE, "Scene texture view is not initialized");
+   Assert(Vulkan.sceneTextureSampler != VK_NULL_HANDLE, "Scene texture sampler is not initialized");
+   Assert(Vulkan.sceneTextureLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, "Scene texture layout is not shader-read optimal");
+   Assert(Vulkan.forwardLightingReady, "Create forward lighting resources before pipeline");
+   Assert(Vulkan.forwardLightBuffer != VK_NULL_HANDLE, "Forward light buffer is not initialized");
+   Assert(Vulkan.forwardTileMetaBuffer != VK_NULL_HANDLE, "Forward tile metadata buffer is not initialized");
+   Assert(Vulkan.forwardTileIndexBuffer != VK_NULL_HANDLE, "Forward tile index buffer is not initialized");
    if (Vulkan.msaaSamples != VK_SAMPLE_COUNT_1_BIT)
    {
       Assert(Vulkan.colorResourcesReady, "Create color resources before MSAA forward pipeline");
@@ -1965,6 +2788,149 @@ void CreateForwardPipeline()
    Vulkan.forwardVertexShader = CreateShader(vertexPath.data());
    Vulkan.forwardFragmentShader = CreateShader(fragmentPath.data());
 
+   VkDescriptorSetLayoutBinding textureBinding = {
+      .binding = 0,
+      .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+      .descriptorCount = 1,
+      .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+      .pImmutableSamplers = nullptr,
+   };
+   VkDescriptorSetLayoutBinding lightBinding = {
+      .binding = 1,
+      .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+      .descriptorCount = 1,
+      .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+      .pImmutableSamplers = nullptr,
+   };
+   VkDescriptorSetLayoutBinding tileMetaBinding = {
+      .binding = 2,
+      .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+      .descriptorCount = 1,
+      .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+      .pImmutableSamplers = nullptr,
+   };
+   VkDescriptorSetLayoutBinding tileIndexBinding = {
+      .binding = 3,
+      .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+      .descriptorCount = 1,
+      .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+      .pImmutableSamplers = nullptr,
+   };
+   array<VkDescriptorSetLayoutBinding, 4> descriptorBindings = {
+      textureBinding,
+      lightBinding,
+      tileMetaBinding,
+      tileIndexBinding,
+   };
+   VkDescriptorSetLayoutCreateInfo descriptorLayoutInfo = {
+      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+      .bindingCount = static_cast<u32>(descriptorBindings.size()),
+      .pBindings = descriptorBindings.data(),
+   };
+   VkResult descriptorLayoutResult = vkCreateDescriptorSetLayout(Vulkan.device, &descriptorLayoutInfo, nullptr, &Vulkan.forwardDescriptorSetLayout);
+   Assert(descriptorLayoutResult == VK_SUCCESS, "Failed to create forward descriptor set layout");
+
+   array<VkDescriptorPoolSize, 2> descriptorPoolSizes = {
+      VkDescriptorPoolSize{
+         .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+         .descriptorCount = 1,
+      },
+      VkDescriptorPoolSize{
+         .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+         .descriptorCount = 3,
+      },
+   };
+   VkDescriptorPoolCreateInfo descriptorPoolInfo = {
+      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+      .maxSets = 1,
+      .poolSizeCount = static_cast<u32>(descriptorPoolSizes.size()),
+      .pPoolSizes = descriptorPoolSizes.data(),
+   };
+   VkResult descriptorPoolResult = vkCreateDescriptorPool(Vulkan.device, &descriptorPoolInfo, nullptr, &Vulkan.forwardDescriptorPool);
+   Assert(descriptorPoolResult == VK_SUCCESS, "Failed to create forward descriptor pool");
+
+   VkDescriptorSetAllocateInfo descriptorSetAllocInfo = {
+      .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+      .descriptorPool = Vulkan.forwardDescriptorPool,
+      .descriptorSetCount = 1,
+      .pSetLayouts = &Vulkan.forwardDescriptorSetLayout,
+   };
+   VkResult descriptorSetResult = vkAllocateDescriptorSets(Vulkan.device, &descriptorSetAllocInfo, &Vulkan.forwardDescriptorSet);
+   Assert(descriptorSetResult == VK_SUCCESS, "Failed to allocate forward descriptor set");
+
+   VkDescriptorImageInfo textureDescriptorImage = {
+      .sampler = Vulkan.sceneTextureSampler,
+      .imageView = Vulkan.sceneTextureView,
+      .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+   };
+   VkWriteDescriptorSet textureDescriptorWrite = {
+      .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+      .dstSet = Vulkan.forwardDescriptorSet,
+      .dstBinding = 0,
+      .dstArrayElement = 0,
+      .descriptorCount = 1,
+      .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+      .pImageInfo = &textureDescriptorImage,
+   };
+
+   VkDescriptorBufferInfo lightBufferInfo = {
+      .buffer = Vulkan.forwardLightBuffer,
+      .offset = 0,
+      .range = VK_WHOLE_SIZE,
+   };
+   VkWriteDescriptorSet lightDescriptorWrite = {
+      .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+      .dstSet = Vulkan.forwardDescriptorSet,
+      .dstBinding = 1,
+      .dstArrayElement = 0,
+      .descriptorCount = 1,
+      .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+      .pBufferInfo = &lightBufferInfo,
+   };
+
+   VkDescriptorBufferInfo tileMetaBufferInfo = {
+      .buffer = Vulkan.forwardTileMetaBuffer,
+      .offset = 0,
+      .range = VK_WHOLE_SIZE,
+   };
+   VkWriteDescriptorSet tileMetaDescriptorWrite = {
+      .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+      .dstSet = Vulkan.forwardDescriptorSet,
+      .dstBinding = 2,
+      .dstArrayElement = 0,
+      .descriptorCount = 1,
+      .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+      .pBufferInfo = &tileMetaBufferInfo,
+   };
+
+   VkDescriptorBufferInfo tileIndexBufferInfo = {
+      .buffer = Vulkan.forwardTileIndexBuffer,
+      .offset = 0,
+      .range = VK_WHOLE_SIZE,
+   };
+   VkWriteDescriptorSet tileIndexDescriptorWrite = {
+      .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+      .dstSet = Vulkan.forwardDescriptorSet,
+      .dstBinding = 3,
+      .dstArrayElement = 0,
+      .descriptorCount = 1,
+      .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+      .pBufferInfo = &tileIndexBufferInfo,
+   };
+
+   array<VkWriteDescriptorSet, 4> descriptorWrites = {
+      textureDescriptorWrite,
+      lightDescriptorWrite,
+      tileMetaDescriptorWrite,
+      tileIndexDescriptorWrite,
+   };
+   vkUpdateDescriptorSets(
+      Vulkan.device,
+      static_cast<u32>(descriptorWrites.size()),
+      descriptorWrites.data(),
+      0,
+      nullptr);
+
    VkPushConstantRange pushConstant = {
       .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
       .offset = 0,
@@ -1973,8 +2939,8 @@ void CreateForwardPipeline()
 
    VkPipelineLayoutCreateInfo layoutInfo = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-      .setLayoutCount = 0,
-      .pSetLayouts = nullptr,
+      .setLayoutCount = 1,
+      .pSetLayouts = &Vulkan.forwardDescriptorSetLayout,
       .pushConstantRangeCount = 1,
       .pPushConstantRanges = &pushConstant,
    };
@@ -2141,6 +3107,9 @@ void DestroyForwardPipeline()
 {
    if ((Vulkan.forwardPipeline == VK_NULL_HANDLE) &&
        (Vulkan.forwardPipelineLayout == VK_NULL_HANDLE) &&
+       (Vulkan.forwardDescriptorSetLayout == VK_NULL_HANDLE) &&
+       (Vulkan.forwardDescriptorPool == VK_NULL_HANDLE) &&
+       (Vulkan.forwardDescriptorSet == VK_NULL_HANDLE) &&
        (Vulkan.forwardVertexShader == VK_NULL_HANDLE) &&
        (Vulkan.forwardFragmentShader == VK_NULL_HANDLE))
    {
@@ -2158,6 +3127,19 @@ void DestroyForwardPipeline()
    {
       vkDestroyPipelineLayout(Vulkan.device, Vulkan.forwardPipelineLayout, nullptr);
       Vulkan.forwardPipelineLayout = VK_NULL_HANDLE;
+   }
+
+   if ((Vulkan.device != VK_NULL_HANDLE) && (Vulkan.forwardDescriptorPool != VK_NULL_HANDLE))
+   {
+      vkDestroyDescriptorPool(Vulkan.device, Vulkan.forwardDescriptorPool, nullptr);
+      Vulkan.forwardDescriptorPool = VK_NULL_HANDLE;
+   }
+   Vulkan.forwardDescriptorSet = VK_NULL_HANDLE;
+
+   if ((Vulkan.device != VK_NULL_HANDLE) && (Vulkan.forwardDescriptorSetLayout != VK_NULL_HANDLE))
+   {
+      vkDestroyDescriptorSetLayout(Vulkan.device, Vulkan.forwardDescriptorSetLayout, nullptr);
+      Vulkan.forwardDescriptorSetLayout = VK_NULL_HANDLE;
    }
 
    DestroyShader(Vulkan.forwardVertexShader);
@@ -2394,6 +3376,7 @@ auto DrawFrameForward(u32 frameIndex, u32 imageIndex, const GradientParams &grad
    Assert(Vulkan.sceneReady, "Create the scene before drawing");
    Assert(Vulkan.forwardRendererReady, "Create the forward renderer before drawing");
    Assert(Vulkan.forwardPipelineReady, "Forward pipeline must be ready before recording commands");
+   Assert(Vulkan.forwardLightingReady, "Forward lighting resources must be ready before recording commands");
    Assert(Vulkan.msaaSamples != static_cast<VkSampleCountFlagBits>(0), "MSAA sample count is not initialized");
    Assert(Vulkan.depthResourcesReady, "Depth resources must be ready before recording commands");
    Assert(Vulkan.depthView != VK_NULL_HANDLE, "Depth view is not initialized");
@@ -2599,6 +3582,16 @@ auto DrawFrameForward(u32 frameIndex, u32 imageIndex, const GradientParams &grad
    vkCmdSetScissor(frame.commandBuffer, 0, 1, &scissor);
 
    vkCmdBindPipeline(frame.commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, Vulkan.forwardPipeline);
+   Assert(Vulkan.forwardDescriptorSet != VK_NULL_HANDLE, "Forward descriptor set is not initialized");
+   vkCmdBindDescriptorSets(
+      frame.commandBuffer,
+      VK_PIPELINE_BIND_POINT_GRAPHICS,
+      Vulkan.forwardPipelineLayout,
+      0,
+      1,
+      &Vulkan.forwardDescriptorSet,
+      0,
+      nullptr);
    Assert(Vulkan.sceneVertexBuffer != VK_NULL_HANDLE, "Scene vertex buffer is not initialized");
    Assert(Vulkan.sceneIndexBuffer != VK_NULL_HANDLE, "Scene index buffer is not initialized");
    Assert(Vulkan.sceneIndexCount > 0, "Scene index count is zero");
@@ -2608,6 +3601,7 @@ auto DrawFrameForward(u32 frameIndex, u32 imageIndex, const GradientParams &grad
    vkCmdBindIndexBuffer(frame.commandBuffer, Vulkan.sceneIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
 
    CameraParams camera = GetCameraParams();
+   UpdateForwardLightingData(camera, extent, gradient.time);
    float nearPlane = 0.05f;
    float farPlane = 200.0f;
    float aspect = (extent.height > 0) ? (static_cast<float>(extent.width) / static_cast<float>(extent.height)) : 1.0f;
@@ -2690,6 +3684,14 @@ auto DrawFrameForward(u32 frameIndex, u32 imageIndex, const GradientParams &grad
    constants.tint[1] = pulse;
    constants.tint[2] = pulse;
    constants.tint[3] = 1.0f;
+   constants.cameraPosition[0] = camera.position.x;
+   constants.cameraPosition[1] = camera.position.y;
+   constants.cameraPosition[2] = camera.position.z;
+   constants.cameraPosition[3] = 0.0f;
+   constants.lightGrid[0] = Vulkan.forwardLightCount;
+   constants.lightGrid[1] = Vulkan.forwardTileCountX;
+   constants.lightGrid[2] = Vulkan.forwardTileCountY;
+   constants.lightGrid[3] = ForwardTileSizePixels;
 
    vkCmdPushConstants(
       frame.commandBuffer,

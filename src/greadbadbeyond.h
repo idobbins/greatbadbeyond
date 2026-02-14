@@ -108,6 +108,8 @@ struct ForwardPushConstants
 {
     float mvp[16];
     float tint[4];
+    float cameraPosition[4];
+    u32 lightGrid[4];
 };
 
 //------------------------------------------------------------------------------------
@@ -278,6 +280,8 @@ auto FindMemoryType(u32 typeBits, VkMemoryPropertyFlags properties) -> u32;
 // Pipeline-related functions
 void CreateForwardPipeline();
 void DestroyForwardPipeline();
+void CreateForwardLightingResources();
+void DestroyForwardLightingResources();
 void CreateColorResources();
 void DestroyColorResources();
 void CreateDepthResources();
@@ -286,6 +290,7 @@ void CreateScene();
 void DestroyScene();
 void CreateForwardRenderer();
 void DestroyForwardRenderer();
+void UpdateForwardLightingData(const CameraParams &camera, VkExtent2D extent, float timeSeconds);
 
 // Drawing-related functions
 void DrawFrame();

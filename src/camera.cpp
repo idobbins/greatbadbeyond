@@ -14,6 +14,7 @@ static constexpr float DefaultAperture = 0.0f;
 static constexpr float DefaultFocusDistance = 1.0f;
 static constexpr float DefaultDistanceFromOrigin = 10.0f;
 static constexpr float DefaultTiltRadians = Pi * 0.25f; // 45 degrees down.
+static constexpr float DefaultAzimuthRadians = Pi * 0.25f; // 45 degrees around Y.
 static constexpr float MoveSpeed = 10.0f;
 static constexpr float ZoomStep = 1.0f;
 static constexpr float MaxDeltaSeconds = 0.05f;
@@ -51,8 +52,10 @@ void CreateCamera()
 
     const float sinTilt = sinf(DefaultTiltRadians);
     const float cosTilt = cosf(DefaultTiltRadians);
+    const float sinAzimuth = sinf(DefaultAzimuthRadians);
+    const float cosAzimuth = cosf(DefaultAzimuthRadians);
 
-    Camera.forward = {0.0f, -sinTilt, -cosTilt};
+    Camera.forward = {sinAzimuth * cosTilt, -sinTilt, -cosAzimuth * cosTilt};
     Camera.position = {
         -Camera.forward.x * DefaultDistanceFromOrigin,
         -Camera.forward.y * DefaultDistanceFromOrigin,

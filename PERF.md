@@ -13,6 +13,10 @@ This document tracks performance decisions for the forward renderer direction.
 - Vulkan instance/device/swapchain lifecycle is stable.
 - Frame overlap + acquire/record/submit/present is stable.
 - Dynamic rendering draws indexed forward geometry (single centered scene mesh).
+- Forward opaque pass binds one sampled albedo texture (descriptor set 0, binding 0).
+- Scene includes a procedural ground plane with a 1-world-unit grid pattern in the fragment shader.
+- Scene includes a procedural skybox and sky/ground ambient GI term (no shadows).
+- Forward+ tiled light culling is enabled with CPU-side binning into screen tiles.
 - Preferred 2x MSAA resolves directly into the swapchain when supported by the GPU.
 - Legacy compute rendering path has been removed from the active frame loop.
 
@@ -48,9 +52,10 @@ This minimizes pipeline and descriptor churn before adding more systems.
 
 ## Asset Bring-Up (Kenney)
 
-For first scene bring-up, use one OBJ from:
+For first textured scene bring-up, use one OBJ + colormap from:
 
-- `resources/external/Kenney/3D assets/Prototype Kit/Models/OBJ format/shape-cube.obj`
+- `resources/external/Kenney/3D assets/Car Kit/Models/OBJ format/police.obj`
+- `resources/external/Kenney/3D assets/Car Kit/Models/OBJ format/Textures/colormap.png`
 
 Target behavior:
 
@@ -64,7 +69,8 @@ Pack status (February 13, 2026):
 - `alias count = 8,353`
 - `mesh/image/audio/raw = 5,009 / 54,216 / 1,342 / 23,903`
 - `compressed records = 74,369`
-- `pack bytes = 1,314,807,875`
+- `mesh records with bounds metadata = 5,009`
+- `pack bytes = 1,317,510,915`
 - Pack is memory-mapped at runtime; assets decompress into reusable scratch then upload via reusable staging buffer.
 
 ## Profiling Gates
