@@ -5,7 +5,10 @@
 #include <GLFW/glfw3.h>
 
 #include <array>
+#include <algorithm>
+#include <cmath>
 #include <iostream>
+#include <limits>
 #include <string_view>
 
 using namespace std;
@@ -37,12 +40,13 @@ static struct PlatformData
         double accumulatedMs;
         u32 samples;
         float deltaSeconds;
+        array<float, frameTimingHistoryCapacity> historyMs;
+        u32 historyCount;
+        u32 historyHead;
         bool ready;
 
     } FrameTiming;
 } Platform;
-
-static constexpr double FrameTimingLogIntervalSeconds = 1.0;
 
 void GlfwErrorCallback(int code, const char *description)
 {
@@ -130,6 +134,9 @@ void CreateWindow()
     Platform.FrameTiming.accumulatedMs = 0.0;
     Platform.FrameTiming.samples = 0;
     Platform.FrameTiming.deltaSeconds = 0.0f;
+    Platform.FrameTiming.historyMs.fill(0.0f);
+    Platform.FrameTiming.historyCount = 0;
+    Platform.FrameTiming.historyHead = 0;
     Platform.FrameTiming.ready = true;
 }
 
@@ -153,6 +160,9 @@ void DestroyWindow()
     Platform.FrameTiming.accumulatedMs = 0.0;
     Platform.FrameTiming.lastTime = 0.0;
     Platform.FrameTiming.lastLogTime = 0.0;
+    Platform.FrameTiming.historyMs.fill(0.0f);
+    Platform.FrameTiming.historyCount = 0;
+    Platform.FrameTiming.historyHead = 0;
 }
 
 auto WindowShouldClose() -> bool
@@ -265,6 +275,9 @@ void MainLoop()
         Platform.FrameTiming.accumulatedMs = 0.0;
         Platform.FrameTiming.samples = 0;
         Platform.FrameTiming.deltaSeconds = 0.0f;
+        Platform.FrameTiming.historyMs.fill(0.0f);
+        Platform.FrameTiming.historyCount = 0;
+        Platform.FrameTiming.historyHead = 0;
         Platform.FrameTiming.ready = true;
     }
 
@@ -282,17 +295,85 @@ void MainLoop()
         Platform.FrameTiming.accumulatedMs += deltaSeconds * 1000.0;
         Platform.FrameTiming.samples += 1;
 
-        if ((now - Platform.FrameTiming.lastLogTime) >= FrameTimingLogIntervalSeconds)
+        float deltaMs = static_cast<float>(deltaSeconds * 1000.0);
+        if (!std::isfinite(deltaMs) || (deltaMs < 0.0f))
+        {
+            deltaMs = 0.0f;
+        }
+        Platform.FrameTiming.historyMs[Platform.FrameTiming.historyHead] = deltaMs;
+        Platform.FrameTiming.historyHead = (Platform.FrameTiming.historyHead + 1) % frameTimingHistoryCapacity;
+        if (Platform.FrameTiming.historyCount < frameTimingHistoryCapacity)
+        {
+            Platform.FrameTiming.historyCount += 1;
+        }
+
+        if ((now - Platform.FrameTiming.lastLogTime) >= frameTimingLogIntervalSeconds)
         {
             u32 frameSamples = Platform.FrameTiming.samples;
-            if (frameSamples > 0)
+            u32 historySamples = Platform.FrameTiming.historyCount;
+            if ((frameSamples > 0) && (historySamples > 0))
             {
-                double averageMs = Platform.FrameTiming.accumulatedMs / static_cast<double>(frameSamples);
-                double fps = (averageMs > 0.0) ? (1000.0 / averageMs) : 0.0;
-                LogInfo("[frame] avg %.3f ms (%.1f fps) over %u frames",
+                array<float, frameTimingHistoryCapacity> sortedMs = {};
+                double rollingSumMs = 0.0;
+                float minMs = std::numeric_limits<float>::max();
+                float maxMs = 0.0f;
+
+                for (u32 index = 0; index < historySamples; ++index)
+                {
+                    float sampleMs = Platform.FrameTiming.historyMs[index];
+                    sortedMs[index] = sampleMs;
+                    rollingSumMs += static_cast<double>(sampleMs);
+                    minMs = std::min(minMs, sampleMs);
+                    maxMs = std::max(maxMs, sampleMs);
+                }
+
+                std::sort(sortedMs.begin(), sortedMs.begin() + historySamples);
+
+                const auto percentileMs = [&](double percentile) -> double
+                {
+                    double p = std::clamp(percentile, 0.0, 1.0);
+                    double rank = std::ceil(p * static_cast<double>(historySamples));
+                    u32 rankIndex = (rank <= 1.0) ? 0u : static_cast<u32>(rank - 1.0);
+                    if (rankIndex >= historySamples)
+                    {
+                        rankIndex = historySamples - 1;
+                    }
+                    return static_cast<double>(sortedMs[rankIndex]);
+                };
+
+                u32 tailSampleCount = std::max<u32>(1u, historySamples/100u);
+                double bestTailMs = 0.0;
+                double worstTailMs = 0.0;
+                for (u32 index = 0; index < tailSampleCount; ++index)
+                {
+                    bestTailMs += static_cast<double>(sortedMs[index]);
+                    worstTailMs += static_cast<double>(sortedMs[(historySamples - 1u) - index]);
+                }
+                bestTailMs /= static_cast<double>(tailSampleCount);
+                worstTailMs /= static_cast<double>(tailSampleCount);
+
+                double averageMs = rollingSumMs / static_cast<double>(historySamples);
+                double averageFps = (averageMs > 0.0) ? (1000.0 / averageMs) : 0.0;
+                double onePercentLowFps = (worstTailMs > 0.0) ? (1000.0 / worstTailMs) : 0.0;
+                double ninetyNinePercentHighFps = (bestTailMs > 0.0) ? (1000.0 / bestTailMs) : 0.0;
+                double minFps = (maxMs > 0.0f) ? (1000.0 / static_cast<double>(maxMs)) : 0.0;
+                double maxFps = (minMs > 0.0f) ? (1000.0 / static_cast<double>(minMs)) : 0.0;
+                double p50Ms = percentileMs(0.50);
+                double p95Ms = percentileMs(0.95);
+                double p99Ms = percentileMs(0.99);
+
+                LogInfo("[frame] avg %.1f fps (%.3f ms) | 1%% low %.1f | 99%% high %.1f | p50 %.3f ms p95 %.3f ms p99 %.3f ms | min %.1f fps max %.1f fps | samples=%u window=%u",
+                    averageFps,
                     averageMs,
-                    fps,
-                    static_cast<unsigned>(frameSamples));
+                    onePercentLowFps,
+                    ninetyNinePercentHighFps,
+                    p50Ms,
+                    p95Ms,
+                    p99Ms,
+                    minFps,
+                    maxFps,
+                    static_cast<unsigned>(frameSamples),
+                    static_cast<unsigned>(historySamples));
             }
 
             Platform.FrameTiming.lastLogTime = now;
