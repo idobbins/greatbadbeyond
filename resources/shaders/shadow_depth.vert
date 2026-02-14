@@ -6,8 +6,9 @@ layout(push_constant) uniform ShadowPushConstants
 } pc;
 
 layout(location = 0) in vec3 inPosition;
+layout(location = 1) in vec4 inInstanceTranslation;
 
 void main()
 {
-    gl_Position = pc.mvp*vec4(inPosition, 1.0);
+    gl_Position = pc.mvp*vec4(inPosition + inInstanceTranslation.xyz, 1.0);
 }

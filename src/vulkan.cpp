@@ -30,6 +30,8 @@ static constexpr const char *ShaderCacheDirectory = SHADER_CACHE_DIRECTORY;
 static constexpr const char *ForwardVertexShaderName = "forward_opaque.vert.spv";
 static constexpr const char *ForwardFragmentShaderName = "forward_opaque.frag.spv";
 static constexpr const char *ShadowVertexShaderName = "shadow_depth.vert.spv";
+static constexpr const char *SkyVertexShaderName = "sky.vert.spv";
+static constexpr const char *SkyFragmentShaderName = "sky.frag.spv";
 static constexpr u32 SceneGridWidth = 32;
 static constexpr u32 SceneGridDepth = 32;
 static constexpr float SceneGridSpacing = 1.15f;
@@ -54,6 +56,20 @@ struct ForwardTileMeta
 {
    u32 offset;
    u32 count;
+};
+
+struct InstanceData
+{
+   float translation[4];
+};
+
+struct alignas(16) FrameGlobalsGpu
+{
+   float viewProj[16];
+   float cameraPosition[4];
+   float sunDirection[4];
+   u32 lightGrid[4];
+   float frameParams[4];
 };
 
 struct ShadowAtlasRect
@@ -131,14 +147,20 @@ static struct VulkanData
 
    VkShaderModule forwardVertexShader;
    VkShaderModule forwardFragmentShader;
+   VkShaderModule skyVertexShader;
+   VkShaderModule skyFragmentShader;
    VkShaderModule shadowVertexShader;
    VkPipelineLayout shadowPipelineLayout;
    VkPipeline shadowPipeline;
    VkPipelineLayout forwardPipelineLayout;
    VkPipeline forwardPipeline;
+   VkPipeline skyPipeline;
    VkDescriptorSetLayout forwardDescriptorSetLayout;
    VkDescriptorPool forwardDescriptorPool;
    array<VkDescriptorSet, FrameOverlap> forwardDescriptorSets;
+   array<VkBuffer, FrameOverlap> frameGlobalsBuffers;
+   array<VkDeviceMemory, FrameOverlap> frameGlobalsMemories;
+   array<void *, FrameOverlap> frameGlobalsMapped;
    VkImage shadowAtlasImage;
    VkDeviceMemory shadowAtlasMemory;
    VkImageView shadowAtlasView;
@@ -179,11 +201,23 @@ static struct VulkanData
    VkDeviceMemory sceneVertexMemory;
    VkBuffer sceneIndexBuffer;
    VkDeviceMemory sceneIndexMemory;
+   VkBuffer sceneInstanceBuffer;
+   VkDeviceMemory sceneInstanceMemory;
+   u32 sceneInstanceCount;
+   u32 sceneCarInstanceCount;
+   u32 sceneGroundInstanceIndex;
+   u32 sceneCarIndexCount;
+   u32 sceneGroundFirstIndex;
+   u32 sceneGroundIndexCount;
+   VkBuffer skyVertexBuffer;
+   VkDeviceMemory skyVertexMemory;
+   VkBuffer skyIndexBuffer;
+   VkDeviceMemory skyIndexMemory;
+   u32 skyIndexCount;
    VkBuffer uploadStagingBuffer;
    VkDeviceMemory uploadStagingMemory;
    void *uploadStagingMapped;
    VkDeviceSize uploadStagingCapacity;
-   u32 sceneIndexCount;
    VkImage sceneTextureImage;
    VkDeviceMemory sceneTextureMemory;
    VkImageView sceneTextureView;
@@ -204,6 +238,7 @@ static struct VulkanData
    bool depthResourcesReady;
    bool sceneReady;
    bool forwardRendererReady;
+   bool frameGlobalsReady;
    bool shadowResourcesReady;
    bool shadowPipelineReady;
    bool forwardPipelineReady;
@@ -479,11 +514,23 @@ void DestroyInstance()
    Vulkan.sceneVertexMemory = VK_NULL_HANDLE;
    Vulkan.sceneIndexBuffer = VK_NULL_HANDLE;
    Vulkan.sceneIndexMemory = VK_NULL_HANDLE;
+   Vulkan.sceneInstanceBuffer = VK_NULL_HANDLE;
+   Vulkan.sceneInstanceMemory = VK_NULL_HANDLE;
+   Vulkan.sceneInstanceCount = 0;
+   Vulkan.sceneCarInstanceCount = 0;
+   Vulkan.sceneGroundInstanceIndex = 0;
+   Vulkan.sceneCarIndexCount = 0;
+   Vulkan.sceneGroundFirstIndex = 0;
+   Vulkan.sceneGroundIndexCount = 0;
+   Vulkan.skyVertexBuffer = VK_NULL_HANDLE;
+   Vulkan.skyVertexMemory = VK_NULL_HANDLE;
+   Vulkan.skyIndexBuffer = VK_NULL_HANDLE;
+   Vulkan.skyIndexMemory = VK_NULL_HANDLE;
+   Vulkan.skyIndexCount = 0;
    Vulkan.uploadStagingBuffer = VK_NULL_HANDLE;
    Vulkan.uploadStagingMemory = VK_NULL_HANDLE;
    Vulkan.uploadStagingMapped = nullptr;
    Vulkan.uploadStagingCapacity = 0;
-   Vulkan.sceneIndexCount = 0;
    Vulkan.decodeScratch.clear();
    Vulkan.colorResourcesReady = false;
    Vulkan.depthResourcesReady = false;
@@ -492,12 +539,18 @@ void DestroyInstance()
    Vulkan.shadowResourcesReady = false;
    Vulkan.shadowPipelineReady = false;
    Vulkan.forwardPipelineReady = false;
+   Vulkan.skyVertexShader = VK_NULL_HANDLE;
+   Vulkan.skyFragmentShader = VK_NULL_HANDLE;
    Vulkan.shadowVertexShader = VK_NULL_HANDLE;
    Vulkan.shadowPipelineLayout = VK_NULL_HANDLE;
    Vulkan.shadowPipeline = VK_NULL_HANDLE;
+   Vulkan.skyPipeline = VK_NULL_HANDLE;
    Vulkan.forwardDescriptorSetLayout = VK_NULL_HANDLE;
    Vulkan.forwardDescriptorPool = VK_NULL_HANDLE;
    Vulkan.forwardDescriptorSets.fill(VK_NULL_HANDLE);
+   Vulkan.frameGlobalsBuffers.fill(VK_NULL_HANDLE);
+   Vulkan.frameGlobalsMemories.fill(VK_NULL_HANDLE);
+   Vulkan.frameGlobalsMapped.fill(nullptr);
    Vulkan.shadowAtlasImage = VK_NULL_HANDLE;
    Vulkan.shadowAtlasMemory = VK_NULL_HANDLE;
    Vulkan.shadowAtlasView = VK_NULL_HANDLE;
@@ -533,6 +586,7 @@ void DestroyInstance()
    Vulkan.sceneTextureView = VK_NULL_HANDLE;
    Vulkan.sceneTextureSampler = VK_NULL_HANDLE;
    Vulkan.sceneTextureLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+   Vulkan.frameGlobalsReady = false;
    Vulkan.forwardLightingReady = false;
 
    for (VkImage &image : Vulkan.swapchainImages)
@@ -1612,161 +1666,94 @@ void CreateScene()
    Assert(!baseIndices.empty(), "Base mesh indices cannot be empty");
 
    usize gridInstanceCount = static_cast<usize>(SceneGridWidth) * static_cast<usize>(SceneGridDepth);
-   std::vector<Vertex> vertices;
-   std::vector<u32> indices;
-   vertices.reserve(baseVertices.size() * gridInstanceCount + 12);
-   indices.reserve(baseIndices.size() * gridInstanceCount + 42);
+   std::vector<InstanceData> sceneInstances;
+   sceneInstances.reserve(gridInstanceCount + 1);
 
    float gridHalfWidth = static_cast<float>(SceneGridWidth) * 0.5f;
    float gridHalfDepth = static_cast<float>(SceneGridDepth) * 0.5f;
-
    for (u32 z = 0; z < SceneGridDepth; ++z)
    {
       for (u32 x = 0; x < SceneGridWidth; ++x)
       {
          float worldX = ((static_cast<float>(x) + 0.5f) - gridHalfWidth) * SceneGridSpacing;
-         float worldY = 0.0f;
          float worldZ = ((static_cast<float>(z) + 0.5f) - gridHalfDepth) * SceneGridSpacing;
-
-         u32 vertexOffset = static_cast<u32>(vertices.size());
-         for (const Vertex &source : baseVertices)
-         {
-            Vertex expanded = source;
-            expanded.position.x += worldX;
-            expanded.position.y += worldY;
-            expanded.position.z += worldZ;
-            vertices.push_back(expanded);
-         }
-
-         for (u32 sourceIndex : baseIndices)
-         {
-            indices.push_back(vertexOffset + sourceIndex);
-         }
+         sceneInstances.push_back({
+            .translation = {worldX, 0.0f, worldZ, 0.0f},
+         });
       }
    }
 
-   // Add one large ground quad under the instance field.
+   std::vector<Vertex> sceneVertices = baseVertices;
+   std::vector<u32> sceneIndices = baseIndices;
+   Vulkan.sceneCarIndexCount = static_cast<u32>(baseIndices.size());
+
+   // Append one large ground quad to the scene mesh.
    float halfExtentX = (gridHalfWidth * SceneGridSpacing) + (2.0f * SceneGridSpacing);
    float halfExtentZ = (gridHalfDepth * SceneGridSpacing) + (2.0f * SceneGridSpacing);
    float groundY = -0.02f;
-   u32 groundBaseIndex = static_cast<u32>(vertices.size());
-   vertices.push_back({
+   u32 groundBaseIndex = static_cast<u32>(sceneVertices.size());
+   sceneVertices.push_back({
       .position = {-halfExtentX, groundY, -halfExtentZ},
       .normal = {0.0f, 1.0f, 0.0f},
       .uv = {-halfExtentX, -halfExtentZ},
    });
-   vertices.push_back({
+   sceneVertices.push_back({
       .position = {halfExtentX, groundY, -halfExtentZ},
       .normal = {0.0f, 1.0f, 0.0f},
       .uv = {halfExtentX, -halfExtentZ},
    });
-   vertices.push_back({
+   sceneVertices.push_back({
       .position = {halfExtentX, groundY, halfExtentZ},
       .normal = {0.0f, 1.0f, 0.0f},
       .uv = {halfExtentX, halfExtentZ},
    });
-   vertices.push_back({
+   sceneVertices.push_back({
       .position = {-halfExtentX, groundY, halfExtentZ},
       .normal = {0.0f, 1.0f, 0.0f},
       .uv = {-halfExtentX, halfExtentZ},
    });
-   indices.push_back(groundBaseIndex + 0);
-   indices.push_back(groundBaseIndex + 1);
-   indices.push_back(groundBaseIndex + 2);
-   indices.push_back(groundBaseIndex + 2);
-   indices.push_back(groundBaseIndex + 3);
-   indices.push_back(groundBaseIndex + 0);
+   Vulkan.sceneGroundFirstIndex = static_cast<u32>(sceneIndices.size());
+   sceneIndices.push_back(groundBaseIndex + 0);
+   sceneIndices.push_back(groundBaseIndex + 1);
+   sceneIndices.push_back(groundBaseIndex + 2);
+   sceneIndices.push_back(groundBaseIndex + 2);
+   sceneIndices.push_back(groundBaseIndex + 3);
+   sceneIndices.push_back(groundBaseIndex + 0);
+   Vulkan.sceneGroundIndexCount = static_cast<u32>(sceneIndices.size()) - Vulkan.sceneGroundFirstIndex;
 
-   // Add a large skybox cube around the scene; shader detects sky via sentinel UV.
-   float skyHalfExtent = 90.0f;
-   Vec2 skyUvSentinel = {-10000.0f, -10000.0f};
-   Vec3 skyNormalSentinel = {0.0f, 0.0f, 0.0f};
-   u32 skyBaseIndex = static_cast<u32>(vertices.size());
-   vertices.push_back({
-      .position = {-skyHalfExtent, -skyHalfExtent, -skyHalfExtent},
-      .normal = skyNormalSentinel,
-      .uv = skyUvSentinel,
+   Vulkan.sceneCarInstanceCount = static_cast<u32>(gridInstanceCount);
+   Vulkan.sceneGroundInstanceIndex = static_cast<u32>(sceneInstances.size());
+   sceneInstances.push_back({
+      .translation = {0.0f, 0.0f, 0.0f, 0.0f},
    });
-   vertices.push_back({
-      .position = {skyHalfExtent, -skyHalfExtent, -skyHalfExtent},
-      .normal = skyNormalSentinel,
-      .uv = skyUvSentinel,
-   });
-   vertices.push_back({
-      .position = {skyHalfExtent, skyHalfExtent, -skyHalfExtent},
-      .normal = skyNormalSentinel,
-      .uv = skyUvSentinel,
-   });
-   vertices.push_back({
-      .position = {-skyHalfExtent, skyHalfExtent, -skyHalfExtent},
-      .normal = skyNormalSentinel,
-      .uv = skyUvSentinel,
-   });
-   vertices.push_back({
-      .position = {-skyHalfExtent, -skyHalfExtent, skyHalfExtent},
-      .normal = skyNormalSentinel,
-      .uv = skyUvSentinel,
-   });
-   vertices.push_back({
-      .position = {skyHalfExtent, -skyHalfExtent, skyHalfExtent},
-      .normal = skyNormalSentinel,
-      .uv = skyUvSentinel,
-   });
-   vertices.push_back({
-      .position = {skyHalfExtent, skyHalfExtent, skyHalfExtent},
-      .normal = skyNormalSentinel,
-      .uv = skyUvSentinel,
-   });
-   vertices.push_back({
-      .position = {-skyHalfExtent, skyHalfExtent, skyHalfExtent},
-      .normal = skyNormalSentinel,
-      .uv = skyUvSentinel,
-   });
+   Vulkan.sceneInstanceCount = static_cast<u32>(sceneInstances.size());
 
-   indices.push_back(skyBaseIndex + 4);
-   indices.push_back(skyBaseIndex + 5);
-   indices.push_back(skyBaseIndex + 6);
-   indices.push_back(skyBaseIndex + 6);
-   indices.push_back(skyBaseIndex + 7);
-   indices.push_back(skyBaseIndex + 4);
+   Assert(!sceneVertices.empty(), "Scene vertices cannot be empty");
+   Assert(!sceneIndices.empty(), "Scene indices cannot be empty");
+   Assert(!sceneInstances.empty(), "Scene instances cannot be empty");
 
-   indices.push_back(skyBaseIndex + 1);
-   indices.push_back(skyBaseIndex + 0);
-   indices.push_back(skyBaseIndex + 3);
-   indices.push_back(skyBaseIndex + 3);
-   indices.push_back(skyBaseIndex + 2);
-   indices.push_back(skyBaseIndex + 1);
-
-   indices.push_back(skyBaseIndex + 0);
-   indices.push_back(skyBaseIndex + 4);
-   indices.push_back(skyBaseIndex + 7);
-   indices.push_back(skyBaseIndex + 7);
-   indices.push_back(skyBaseIndex + 3);
-   indices.push_back(skyBaseIndex + 0);
-
-   indices.push_back(skyBaseIndex + 5);
-   indices.push_back(skyBaseIndex + 1);
-   indices.push_back(skyBaseIndex + 2);
-   indices.push_back(skyBaseIndex + 2);
-   indices.push_back(skyBaseIndex + 6);
-   indices.push_back(skyBaseIndex + 5);
-
-   indices.push_back(skyBaseIndex + 3);
-   indices.push_back(skyBaseIndex + 7);
-   indices.push_back(skyBaseIndex + 6);
-   indices.push_back(skyBaseIndex + 6);
-   indices.push_back(skyBaseIndex + 2);
-   indices.push_back(skyBaseIndex + 3);
-
-   indices.push_back(skyBaseIndex + 0);
-   indices.push_back(skyBaseIndex + 1);
-   indices.push_back(skyBaseIndex + 5);
-   indices.push_back(skyBaseIndex + 5);
-   indices.push_back(skyBaseIndex + 4);
-   indices.push_back(skyBaseIndex + 0);
-
-   Assert(!vertices.empty(), "Grid vertices cannot be empty");
-   Assert(!indices.empty(), "Grid indices cannot be empty");
+   // Sky is uploaded as a separate mesh and rendered by a separate pipeline.
+   std::vector<Vertex> skyVertices = {
+      {{-1.0f, -1.0f, -1.0f}, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f}},
+      {{1.0f, -1.0f, -1.0f}, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f}},
+      {{1.0f, 1.0f, -1.0f}, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f}},
+      {{-1.0f, 1.0f, -1.0f}, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f}},
+      {{-1.0f, -1.0f, 1.0f}, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f}},
+      {{1.0f, -1.0f, 1.0f}, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f}},
+      {{1.0f, 1.0f, 1.0f}, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f}},
+      {{-1.0f, 1.0f, 1.0f}, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f}},
+   };
+   std::vector<u32> skyIndices = {
+      4, 5, 6, 6, 7, 4,
+      1, 0, 3, 3, 2, 1,
+      0, 4, 7, 7, 3, 0,
+      5, 1, 2, 2, 6, 5,
+      3, 7, 6, 6, 2, 3,
+      0, 1, 5, 5, 4, 0,
+   };
+   Vulkan.skyIndexCount = static_cast<u32>(skyIndices.size());
+   Assert(!skyVertices.empty(), "Sky vertices cannot be empty");
+   Assert(!skyIndices.empty(), "Sky indices cannot be empty");
 
    const auto createDeviceLocalBuffer = [&](VkBufferUsageFlags usage, VkDeviceSize size, VkBuffer &buffer, VkDeviceMemory &memory)
    {
@@ -1923,22 +1910,35 @@ void CreateScene()
       Vulkan.uploadStagingCapacity = requiredSize;
    };
 
-   VkDeviceSize vertexBytes = static_cast<VkDeviceSize>(vertices.size() * sizeof(Vertex));
-   VkDeviceSize indexBytes = static_cast<VkDeviceSize>(indices.size() * sizeof(u32));
+   VkDeviceSize sceneVertexBytes = static_cast<VkDeviceSize>(sceneVertices.size() * sizeof(Vertex));
+   VkDeviceSize sceneIndexBytes = static_cast<VkDeviceSize>(sceneIndices.size() * sizeof(u32));
+   VkDeviceSize sceneInstanceBytes = static_cast<VkDeviceSize>(sceneInstances.size() * sizeof(InstanceData));
+   VkDeviceSize skyVertexBytes = static_cast<VkDeviceSize>(skyVertices.size() * sizeof(Vertex));
+   VkDeviceSize skyIndexBytes = static_cast<VkDeviceSize>(skyIndices.size() * sizeof(u32));
    VkDeviceSize textureBytes = static_cast<VkDeviceSize>(textureLevel0Bytes.size());
-   VkDeviceSize textureUploadOffset = vertexBytes + indexBytes;
+   VkDeviceSize sceneIndexUploadOffset = sceneVertexBytes;
+   VkDeviceSize sceneInstanceUploadOffset = sceneIndexUploadOffset + sceneIndexBytes;
+   VkDeviceSize skyVertexUploadOffset = sceneInstanceUploadOffset + sceneInstanceBytes;
+   VkDeviceSize skyIndexUploadOffset = skyVertexUploadOffset + skyVertexBytes;
+   VkDeviceSize textureUploadOffset = skyIndexUploadOffset + skyIndexBytes;
    VkDeviceSize totalUploadBytes = textureUploadOffset + textureBytes;
 
    createOrResizeStagingBuffer(totalUploadBytes);
    Assert(Vulkan.uploadStagingMapped != nullptr, "Staging buffer is not mapped");
 
    byte *stagingBytes = reinterpret_cast<byte *>(Vulkan.uploadStagingMapped);
-   std::memcpy(stagingBytes, vertices.data(), static_cast<size_t>(vertexBytes));
-   std::memcpy(stagingBytes + static_cast<usize>(vertexBytes), indices.data(), static_cast<size_t>(indexBytes));
+   std::memcpy(stagingBytes, sceneVertices.data(), static_cast<size_t>(sceneVertexBytes));
+   std::memcpy(stagingBytes + static_cast<usize>(sceneIndexUploadOffset), sceneIndices.data(), static_cast<size_t>(sceneIndexBytes));
+   std::memcpy(stagingBytes + static_cast<usize>(sceneInstanceUploadOffset), sceneInstances.data(), static_cast<size_t>(sceneInstanceBytes));
+   std::memcpy(stagingBytes + static_cast<usize>(skyVertexUploadOffset), skyVertices.data(), static_cast<size_t>(skyVertexBytes));
+   std::memcpy(stagingBytes + static_cast<usize>(skyIndexUploadOffset), skyIndices.data(), static_cast<size_t>(skyIndexBytes));
    std::memcpy(stagingBytes + static_cast<usize>(textureUploadOffset), textureLevel0Bytes.data(), static_cast<size_t>(textureBytes));
 
-   createDeviceLocalBuffer(VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, vertexBytes, Vulkan.sceneVertexBuffer, Vulkan.sceneVertexMemory);
-   createDeviceLocalBuffer(VK_BUFFER_USAGE_INDEX_BUFFER_BIT, indexBytes, Vulkan.sceneIndexBuffer, Vulkan.sceneIndexMemory);
+   createDeviceLocalBuffer(VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, sceneVertexBytes, Vulkan.sceneVertexBuffer, Vulkan.sceneVertexMemory);
+   createDeviceLocalBuffer(VK_BUFFER_USAGE_INDEX_BUFFER_BIT, sceneIndexBytes, Vulkan.sceneIndexBuffer, Vulkan.sceneIndexMemory);
+   createDeviceLocalBuffer(VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, sceneInstanceBytes, Vulkan.sceneInstanceBuffer, Vulkan.sceneInstanceMemory);
+   createDeviceLocalBuffer(VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, skyVertexBytes, Vulkan.skyVertexBuffer, Vulkan.skyVertexMemory);
+   createDeviceLocalBuffer(VK_BUFFER_USAGE_INDEX_BUFFER_BIT, skyIndexBytes, Vulkan.skyIndexBuffer, Vulkan.skyIndexMemory);
 
    VkCommandPool uploadPool = VK_NULL_HANDLE;
    VkCommandBuffer uploadCmd = VK_NULL_HANDLE;
@@ -1971,16 +1971,37 @@ void CreateScene()
    VkBufferCopy vertexCopy = {
       .srcOffset = 0,
       .dstOffset = 0,
-      .size = vertexBytes,
+      .size = sceneVertexBytes,
    };
    vkCmdCopyBuffer(uploadCmd, Vulkan.uploadStagingBuffer, Vulkan.sceneVertexBuffer, 1, &vertexCopy);
 
    VkBufferCopy indexCopy = {
-      .srcOffset = vertexBytes,
+      .srcOffset = sceneIndexUploadOffset,
       .dstOffset = 0,
-      .size = indexBytes,
+      .size = sceneIndexBytes,
    };
    vkCmdCopyBuffer(uploadCmd, Vulkan.uploadStagingBuffer, Vulkan.sceneIndexBuffer, 1, &indexCopy);
+
+   VkBufferCopy instanceCopy = {
+      .srcOffset = sceneInstanceUploadOffset,
+      .dstOffset = 0,
+      .size = sceneInstanceBytes,
+   };
+   vkCmdCopyBuffer(uploadCmd, Vulkan.uploadStagingBuffer, Vulkan.sceneInstanceBuffer, 1, &instanceCopy);
+
+   VkBufferCopy skyVertexCopy = {
+      .srcOffset = skyVertexUploadOffset,
+      .dstOffset = 0,
+      .size = skyVertexBytes,
+   };
+   vkCmdCopyBuffer(uploadCmd, Vulkan.uploadStagingBuffer, Vulkan.skyVertexBuffer, 1, &skyVertexCopy);
+
+   VkBufferCopy skyIndexCopy = {
+      .srcOffset = skyIndexUploadOffset,
+      .dstOffset = 0,
+      .size = skyIndexBytes,
+   };
+   vkCmdCopyBuffer(uploadCmd, Vulkan.uploadStagingBuffer, Vulkan.skyIndexBuffer, 1, &skyIndexCopy);
 
    VkImageSubresourceRange textureSubresource = {
       .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
@@ -2080,7 +2101,11 @@ void CreateScene()
    vkDestroyCommandPool(Vulkan.device, uploadPool, nullptr);
 
    Vulkan.sceneTextureLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-   Vulkan.sceneIndexCount = static_cast<u32>(indices.size());
+   Assert(Vulkan.sceneCarIndexCount > 0, "Scene car index count is zero");
+   Assert(Vulkan.sceneGroundIndexCount > 0, "Scene ground index count is zero");
+   Assert(Vulkan.sceneCarInstanceCount > 0, "Scene car instance count is zero");
+   Assert(Vulkan.sceneInstanceCount > 0, "Scene instance count is zero");
+   Assert(Vulkan.skyIndexCount > 0, "Sky index count is zero");
    Vulkan.sceneReady = true;
 }
 
@@ -2097,6 +2122,19 @@ void DestroyScene()
       Vulkan.sceneVertexMemory = VK_NULL_HANDLE;
       Vulkan.sceneIndexBuffer = VK_NULL_HANDLE;
       Vulkan.sceneIndexMemory = VK_NULL_HANDLE;
+      Vulkan.sceneInstanceBuffer = VK_NULL_HANDLE;
+      Vulkan.sceneInstanceMemory = VK_NULL_HANDLE;
+      Vulkan.sceneInstanceCount = 0;
+      Vulkan.sceneCarInstanceCount = 0;
+      Vulkan.sceneGroundInstanceIndex = 0;
+      Vulkan.sceneCarIndexCount = 0;
+      Vulkan.sceneGroundFirstIndex = 0;
+      Vulkan.sceneGroundIndexCount = 0;
+      Vulkan.skyVertexBuffer = VK_NULL_HANDLE;
+      Vulkan.skyVertexMemory = VK_NULL_HANDLE;
+      Vulkan.skyIndexBuffer = VK_NULL_HANDLE;
+      Vulkan.skyIndexMemory = VK_NULL_HANDLE;
+      Vulkan.skyIndexCount = 0;
       Vulkan.sceneTextureImage = VK_NULL_HANDLE;
       Vulkan.sceneTextureMemory = VK_NULL_HANDLE;
       Vulkan.sceneTextureView = VK_NULL_HANDLE;
@@ -2106,7 +2144,6 @@ void DestroyScene()
       Vulkan.uploadStagingMemory = VK_NULL_HANDLE;
       Vulkan.uploadStagingMapped = nullptr;
       Vulkan.uploadStagingCapacity = 0;
-      Vulkan.sceneIndexCount = 0;
       Vulkan.decodeScratch.clear();
       Vulkan.sceneReady = false;
       return;
@@ -2132,6 +2169,36 @@ void DestroyScene()
    {
       vkFreeMemory(Vulkan.device, Vulkan.sceneIndexMemory, nullptr);
       Vulkan.sceneIndexMemory = VK_NULL_HANDLE;
+   }
+   if (Vulkan.sceneInstanceBuffer != VK_NULL_HANDLE)
+   {
+      vkDestroyBuffer(Vulkan.device, Vulkan.sceneInstanceBuffer, nullptr);
+      Vulkan.sceneInstanceBuffer = VK_NULL_HANDLE;
+   }
+   if (Vulkan.sceneInstanceMemory != VK_NULL_HANDLE)
+   {
+      vkFreeMemory(Vulkan.device, Vulkan.sceneInstanceMemory, nullptr);
+      Vulkan.sceneInstanceMemory = VK_NULL_HANDLE;
+   }
+   if (Vulkan.skyVertexBuffer != VK_NULL_HANDLE)
+   {
+      vkDestroyBuffer(Vulkan.device, Vulkan.skyVertexBuffer, nullptr);
+      Vulkan.skyVertexBuffer = VK_NULL_HANDLE;
+   }
+   if (Vulkan.skyVertexMemory != VK_NULL_HANDLE)
+   {
+      vkFreeMemory(Vulkan.device, Vulkan.skyVertexMemory, nullptr);
+      Vulkan.skyVertexMemory = VK_NULL_HANDLE;
+   }
+   if (Vulkan.skyIndexBuffer != VK_NULL_HANDLE)
+   {
+      vkDestroyBuffer(Vulkan.device, Vulkan.skyIndexBuffer, nullptr);
+      Vulkan.skyIndexBuffer = VK_NULL_HANDLE;
+   }
+   if (Vulkan.skyIndexMemory != VK_NULL_HANDLE)
+   {
+      vkFreeMemory(Vulkan.device, Vulkan.skyIndexMemory, nullptr);
+      Vulkan.skyIndexMemory = VK_NULL_HANDLE;
    }
 
    if (Vulkan.sceneTextureSampler != VK_NULL_HANDLE)
@@ -2174,7 +2241,13 @@ void DestroyScene()
    Vulkan.uploadStagingCapacity = 0;
    Vulkan.decodeScratch.clear();
 
-   Vulkan.sceneIndexCount = 0;
+   Vulkan.sceneInstanceCount = 0;
+   Vulkan.sceneCarInstanceCount = 0;
+   Vulkan.sceneGroundInstanceIndex = 0;
+   Vulkan.sceneCarIndexCount = 0;
+   Vulkan.sceneGroundFirstIndex = 0;
+   Vulkan.sceneGroundIndexCount = 0;
+   Vulkan.skyIndexCount = 0;
    Vulkan.sceneReady = false;
 }
 
@@ -2421,6 +2494,175 @@ void DestroyDepthResources()
    Vulkan.depthResourcesReady = false;
    Vulkan.depthFormat = VK_FORMAT_UNDEFINED;
    Vulkan.depthLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+}
+
+void CreateFrameGlobalsResources()
+{
+   if (Vulkan.frameGlobalsReady)
+   {
+      return;
+   }
+
+   Assert(Vulkan.deviceReady, "Create Vulkan device before frame globals resources");
+   Assert(Vulkan.swapchainReady, "Create Vulkan swapchain before frame globals resources");
+
+   VkBufferCreateInfo bufferInfo = {
+      .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+      .size = sizeof(FrameGlobalsGpu),
+      .usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+      .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+   };
+
+   for (u32 frameIndex = 0; frameIndex < FrameOverlap; ++frameIndex)
+   {
+      VkResult createResult = vkCreateBuffer(Vulkan.device, &bufferInfo, nullptr, &Vulkan.frameGlobalsBuffers[frameIndex]);
+      Assert(createResult == VK_SUCCESS, "Failed to create frame globals buffer");
+
+      VkMemoryRequirements requirements = {};
+      vkGetBufferMemoryRequirements(Vulkan.device, Vulkan.frameGlobalsBuffers[frameIndex], &requirements);
+      VkMemoryAllocateInfo allocInfo = {
+         .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+         .allocationSize = requirements.size,
+         .memoryTypeIndex = FindMemoryType(
+            requirements.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT),
+      };
+      VkResult allocResult = vkAllocateMemory(Vulkan.device, &allocInfo, nullptr, &Vulkan.frameGlobalsMemories[frameIndex]);
+      Assert(allocResult == VK_SUCCESS, "Failed to allocate frame globals memory");
+
+      VkResult bindResult = vkBindBufferMemory(Vulkan.device, Vulkan.frameGlobalsBuffers[frameIndex], Vulkan.frameGlobalsMemories[frameIndex], 0);
+      Assert(bindResult == VK_SUCCESS, "Failed to bind frame globals memory");
+
+      void *mapped = nullptr;
+      VkResult mapResult = vkMapMemory(Vulkan.device, Vulkan.frameGlobalsMemories[frameIndex], 0, VK_WHOLE_SIZE, 0, &mapped);
+      Assert(mapResult == VK_SUCCESS, "Failed to map frame globals memory");
+      Assert(mapped != nullptr, "Frame globals mapping returned null");
+      Vulkan.frameGlobalsMapped[frameIndex] = mapped;
+      std::memset(Vulkan.frameGlobalsMapped[frameIndex], 0, sizeof(FrameGlobalsGpu));
+   }
+
+   Vulkan.frameGlobalsReady = true;
+}
+
+void DestroyFrameGlobalsResources()
+{
+   if (Vulkan.device == VK_NULL_HANDLE)
+   {
+      Vulkan.frameGlobalsBuffers.fill(VK_NULL_HANDLE);
+      Vulkan.frameGlobalsMemories.fill(VK_NULL_HANDLE);
+      Vulkan.frameGlobalsMapped.fill(nullptr);
+      Vulkan.frameGlobalsReady = false;
+      return;
+   }
+
+   for (u32 frameIndex = 0; frameIndex < FrameOverlap; ++frameIndex)
+   {
+      if (Vulkan.frameGlobalsMapped[frameIndex] != nullptr)
+      {
+         vkUnmapMemory(Vulkan.device, Vulkan.frameGlobalsMemories[frameIndex]);
+         Vulkan.frameGlobalsMapped[frameIndex] = nullptr;
+      }
+      if (Vulkan.frameGlobalsBuffers[frameIndex] != VK_NULL_HANDLE)
+      {
+         vkDestroyBuffer(Vulkan.device, Vulkan.frameGlobalsBuffers[frameIndex], nullptr);
+         Vulkan.frameGlobalsBuffers[frameIndex] = VK_NULL_HANDLE;
+      }
+      if (Vulkan.frameGlobalsMemories[frameIndex] != VK_NULL_HANDLE)
+      {
+         vkFreeMemory(Vulkan.device, Vulkan.frameGlobalsMemories[frameIndex], nullptr);
+         Vulkan.frameGlobalsMemories[frameIndex] = VK_NULL_HANDLE;
+      }
+   }
+
+   Vulkan.frameGlobalsReady = false;
+}
+
+void UpdateFrameGlobals(const CameraParams &camera, VkExtent2D extent, float timeSeconds, u32 frameIndex)
+{
+   Assert(frameIndex < FrameOverlap, "Frame globals frame index is out of range");
+   Assert(Vulkan.frameGlobalsReady, "Frame globals resources are not ready");
+   Assert(Vulkan.frameGlobalsMapped[frameIndex] != nullptr, "Frame globals buffer is not mapped");
+   Assert((extent.width > 0) && (extent.height > 0), "Frame globals update requires non-zero extent");
+
+   const auto dot3 = [](const Vec3 &a, const Vec3 &b) -> float
+   {
+      return a.x*b.x + a.y*b.y + a.z*b.z;
+   };
+   const auto multiplyMat4 = [](const float *a, const float *b, float *result)
+   {
+      float temp[16] = {};
+      for (int column = 0; column < 4; ++column)
+      {
+         for (int row = 0; row < 4; ++row)
+         {
+            float sum = 0.0f;
+            for (int k = 0; k < 4; ++k)
+            {
+               sum += a[k*4 + row] * b[column*4 + k];
+            }
+            temp[column*4 + row] = sum;
+         }
+      }
+      std::memcpy(result, temp, sizeof(temp));
+   };
+
+   float aspect = static_cast<float>(extent.width) / static_cast<float>(extent.height);
+   if (aspect <= 0.0f)
+   {
+      aspect = 1.0f;
+   }
+
+   float view[16] = {};
+   view[0] = camera.right.x;
+   view[1] = camera.up.x;
+   view[2] = -camera.forward.x;
+   view[3] = 0.0f;
+   view[4] = camera.right.y;
+   view[5] = camera.up.y;
+   view[6] = -camera.forward.y;
+   view[7] = 0.0f;
+   view[8] = camera.right.z;
+   view[9] = camera.up.z;
+   view[10] = -camera.forward.z;
+   view[11] = 0.0f;
+   view[12] = -dot3(camera.right, camera.position);
+   view[13] = -dot3(camera.up, camera.position);
+   view[14] = dot3(camera.forward, camera.position);
+   view[15] = 1.0f;
+
+   float proj[16] = {};
+   float tanHalfFov = std::tan(camera.verticalFovRadians * 0.5f);
+   if (tanHalfFov <= 0.0f)
+   {
+      tanHalfFov = 0.001f;
+   }
+   float focal = 1.0f / tanHalfFov;
+   proj[0] = focal / aspect;
+   proj[5] = -focal;
+   proj[10] = CsmFarPlane / (CsmNearPlane - CsmFarPlane);
+   proj[11] = -1.0f;
+   proj[14] = (CsmNearPlane * CsmFarPlane) / (CsmNearPlane - CsmFarPlane);
+
+   FrameGlobalsGpu globals = {};
+   multiplyMat4(proj, view, globals.viewProj);
+   globals.cameraPosition[0] = camera.position.x;
+   globals.cameraPosition[1] = camera.position.y;
+   globals.cameraPosition[2] = camera.position.z;
+   globals.cameraPosition[3] = 0.0f;
+   globals.sunDirection[0] = SunDirection.x;
+   globals.sunDirection[1] = SunDirection.y;
+   globals.sunDirection[2] = SunDirection.z;
+   globals.sunDirection[3] = 0.0f;
+   globals.lightGrid[0] = Vulkan.forwardLightCount;
+   globals.lightGrid[1] = Vulkan.forwardTileCountX;
+   globals.lightGrid[2] = Vulkan.forwardTileCountY;
+   globals.lightGrid[3] = ForwardTileSizePixels;
+   globals.frameParams[0] = timeSeconds;
+   globals.frameParams[1] = static_cast<float>(extent.width);
+   globals.frameParams[2] = static_cast<float>(extent.height);
+   globals.frameParams[3] = 0.0f;
+
+   std::memcpy(Vulkan.frameGlobalsMapped[frameIndex], &globals, sizeof(globals));
 }
 
 void CreateShadowResources()
@@ -2699,23 +2941,38 @@ void CreateShadowPipeline()
       .pName = "main",
    };
 
-   VkVertexInputBindingDescription vertexBinding = {
-      .binding = 0,
-      .stride = static_cast<u32>(sizeof(Vertex)),
-      .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+   std::array<VkVertexInputBindingDescription, 2> vertexBindings = {
+      VkVertexInputBindingDescription{
+         .binding = 0,
+         .stride = static_cast<u32>(sizeof(Vertex)),
+         .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+      },
+      VkVertexInputBindingDescription{
+         .binding = 1,
+         .stride = static_cast<u32>(sizeof(InstanceData)),
+         .inputRate = VK_VERTEX_INPUT_RATE_INSTANCE,
+      },
    };
-   VkVertexInputAttributeDescription positionAttribute = {
-      .location = 0,
-      .binding = 0,
-      .format = VK_FORMAT_R32G32B32_SFLOAT,
-      .offset = static_cast<u32>(offsetof(Vertex, position)),
+   std::array<VkVertexInputAttributeDescription, 2> vertexAttributes = {
+      VkVertexInputAttributeDescription{
+         .location = 0,
+         .binding = 0,
+         .format = VK_FORMAT_R32G32B32_SFLOAT,
+         .offset = static_cast<u32>(offsetof(Vertex, position)),
+      },
+      VkVertexInputAttributeDescription{
+         .location = 1,
+         .binding = 1,
+         .format = VK_FORMAT_R32G32B32A32_SFLOAT,
+         .offset = static_cast<u32>(offsetof(InstanceData, translation)),
+      },
    };
    VkPipelineVertexInputStateCreateInfo vertexInput = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-      .vertexBindingDescriptionCount = 1,
-      .pVertexBindingDescriptions = &vertexBinding,
-      .vertexAttributeDescriptionCount = 1,
-      .pVertexAttributeDescriptions = &positionAttribute,
+      .vertexBindingDescriptionCount = static_cast<u32>(vertexBindings.size()),
+      .pVertexBindingDescriptions = vertexBindings.data(),
+      .vertexAttributeDescriptionCount = static_cast<u32>(vertexAttributes.size()),
+      .pVertexAttributeDescriptions = vertexAttributes.data(),
    };
 
    VkPipelineInputAssemblyStateCreateInfo inputAssembly = {
@@ -3140,7 +3397,11 @@ void RecordShadowPass(VkCommandBuffer commandBuffer)
    Assert(Vulkan.sceneReady, "Scene must be ready before recording shadows");
    Assert(Vulkan.sceneVertexBuffer != VK_NULL_HANDLE, "Scene vertex buffer is not initialized");
    Assert(Vulkan.sceneIndexBuffer != VK_NULL_HANDLE, "Scene index buffer is not initialized");
-   Assert(Vulkan.sceneIndexCount > 0, "Scene index count is zero");
+   Assert(Vulkan.sceneInstanceBuffer != VK_NULL_HANDLE, "Scene instance buffer is not initialized");
+   Assert(Vulkan.sceneCarIndexCount > 0, "Scene car index count is zero");
+   Assert(Vulkan.sceneGroundIndexCount > 0, "Scene ground index count is zero");
+   Assert(Vulkan.sceneCarInstanceCount > 0, "Scene car instance count is zero");
+   Assert(Vulkan.sceneInstanceCount > Vulkan.sceneGroundInstanceIndex, "Scene ground instance index is out of range");
 
    bool hasStencil = Vulkan.shadowDepthFormat == VK_FORMAT_D24_UNORM_S8_UINT;
    VkImageAspectFlags depthAspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
@@ -3181,8 +3442,9 @@ void RecordShadowPass(VkCommandBuffer commandBuffer)
       &toDepthAttachment);
 
    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, Vulkan.shadowPipeline);
-   VkDeviceSize vertexOffset = 0;
-   vkCmdBindVertexBuffers(commandBuffer, 0, 1, &Vulkan.sceneVertexBuffer, &vertexOffset);
+   std::array<VkBuffer, 2> vertexBuffers = {Vulkan.sceneVertexBuffer, Vulkan.sceneInstanceBuffer};
+   std::array<VkDeviceSize, 2> vertexOffsets = {0, 0};
+   vkCmdBindVertexBuffers(commandBuffer, 0, static_cast<u32>(vertexBuffers.size()), vertexBuffers.data(), vertexOffsets.data());
    vkCmdBindIndexBuffer(commandBuffer, Vulkan.sceneIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
 
    for (u32 cascadeIndex = 0; cascadeIndex < Vulkan.shadowCascadeCount; ++cascadeIndex)
@@ -3237,7 +3499,8 @@ void RecordShadowPass(VkCommandBuffer commandBuffer)
          sizeof(ShadowPushConstants),
          &push);
 
-      vkCmdDrawIndexed(commandBuffer, Vulkan.sceneIndexCount, 1, 0, 0, 0);
+      vkCmdDrawIndexed(commandBuffer, Vulkan.sceneCarIndexCount, Vulkan.sceneCarInstanceCount, 0, 0, 0);
+      vkCmdDrawIndexed(commandBuffer, Vulkan.sceneGroundIndexCount, 1, Vulkan.sceneGroundFirstIndex, 0, Vulkan.sceneGroundInstanceIndex);
       vkCmdEndRendering(commandBuffer);
    }
 
@@ -3676,6 +3939,7 @@ void CreateForwardRenderer()
    Assert(Vulkan.sceneReady, "Create scene before creating forward renderer");
    CreateColorResources();
    CreateDepthResources();
+   CreateFrameGlobalsResources();
    CreateShadowResources();
    CreateShadowPipeline();
    CreateForwardLightingResources();
@@ -3694,6 +3958,7 @@ void DestroyForwardRenderer()
    DestroyForwardLightingResources();
    DestroyShadowPipeline();
    DestroyShadowResources();
+   DestroyFrameGlobalsResources();
    DestroyDepthResources();
    DestroyColorResources();
    Vulkan.forwardRendererReady = false;
@@ -3713,6 +3978,11 @@ void CreateForwardPipeline()
    Assert(Vulkan.sceneTextureView != VK_NULL_HANDLE, "Scene texture view is not initialized");
    Assert(Vulkan.sceneTextureSampler != VK_NULL_HANDLE, "Scene texture sampler is not initialized");
    Assert(Vulkan.sceneTextureLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, "Scene texture layout is not shader-read optimal");
+   Assert(Vulkan.frameGlobalsReady, "Create frame globals resources before forward pipeline");
+   for (u32 frameIndex = 0; frameIndex < FrameOverlap; ++frameIndex)
+   {
+      Assert(Vulkan.frameGlobalsBuffers[frameIndex] != VK_NULL_HANDLE, "Frame globals buffer is not initialized");
+   }
    Assert(Vulkan.shadowResourcesReady, "Create shadow resources before forward pipeline");
    Assert(Vulkan.shadowAtlasView != VK_NULL_HANDLE, "Shadow atlas view is not initialized");
    Assert(Vulkan.shadowAtlasSampler != VK_NULL_HANDLE, "Shadow atlas sampler is not initialized");
@@ -3735,6 +4005,8 @@ void CreateForwardPipeline()
 
    array<char, 512> vertexPath {};
    array<char, 512> fragmentPath {};
+   array<char, 512> skyVertexPath {};
+   array<char, 512> skyFragmentPath {};
 
    const auto buildPath = [](const char *directory, const char *fileName, array<char, 512> &buffer)
    {
@@ -3744,53 +4016,65 @@ void CreateForwardPipeline()
 
    buildPath(ShaderCacheDirectory, ForwardVertexShaderName, vertexPath);
    buildPath(ShaderCacheDirectory, ForwardFragmentShaderName, fragmentPath);
+   buildPath(ShaderCacheDirectory, SkyVertexShaderName, skyVertexPath);
+   buildPath(ShaderCacheDirectory, SkyFragmentShaderName, skyFragmentPath);
 
    Vulkan.forwardVertexShader = CreateShader(vertexPath.data());
    Vulkan.forwardFragmentShader = CreateShader(fragmentPath.data());
+   Vulkan.skyVertexShader = CreateShader(skyVertexPath.data());
+   Vulkan.skyFragmentShader = CreateShader(skyFragmentPath.data());
 
-   VkDescriptorSetLayoutBinding textureBinding = {
+   VkDescriptorSetLayoutBinding frameGlobalsBinding = {
       .binding = 0,
+      .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+      .descriptorCount = 1,
+      .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+      .pImmutableSamplers = nullptr,
+   };
+   VkDescriptorSetLayoutBinding textureBinding = {
+      .binding = 1,
       .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
       .descriptorCount = 1,
       .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
       .pImmutableSamplers = nullptr,
    };
    VkDescriptorSetLayoutBinding lightBinding = {
-      .binding = 1,
-      .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-      .descriptorCount = 1,
-      .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
-      .pImmutableSamplers = nullptr,
-   };
-   VkDescriptorSetLayoutBinding tileMetaBinding = {
       .binding = 2,
       .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
       .descriptorCount = 1,
       .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
       .pImmutableSamplers = nullptr,
    };
-   VkDescriptorSetLayoutBinding tileIndexBinding = {
+   VkDescriptorSetLayoutBinding tileMetaBinding = {
       .binding = 3,
       .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
       .descriptorCount = 1,
       .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
       .pImmutableSamplers = nullptr,
    };
-   VkDescriptorSetLayoutBinding shadowGlobalsBinding = {
+   VkDescriptorSetLayoutBinding tileIndexBinding = {
       .binding = 4,
+      .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+      .descriptorCount = 1,
+      .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+      .pImmutableSamplers = nullptr,
+   };
+   VkDescriptorSetLayoutBinding shadowGlobalsBinding = {
+      .binding = 5,
       .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
       .descriptorCount = 1,
       .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
       .pImmutableSamplers = nullptr,
    };
    VkDescriptorSetLayoutBinding shadowAtlasBinding = {
-      .binding = 5,
+      .binding = 6,
       .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
       .descriptorCount = 1,
       .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
       .pImmutableSamplers = nullptr,
    };
-   array<VkDescriptorSetLayoutBinding, 6> descriptorBindings = {
+   array<VkDescriptorSetLayoutBinding, 7> descriptorBindings = {
+      frameGlobalsBinding,
       textureBinding,
       lightBinding,
       tileMetaBinding,
@@ -3817,7 +4101,7 @@ void CreateForwardPipeline()
       },
       VkDescriptorPoolSize{
          .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-         .descriptorCount = FrameOverlap,
+         .descriptorCount = 2 * FrameOverlap,
       },
    };
    VkDescriptorPoolCreateInfo descriptorPoolInfo = {
@@ -3842,6 +4126,21 @@ void CreateForwardPipeline()
 
    for (u32 frameIndex = 0; frameIndex < FrameOverlap; ++frameIndex)
    {
+      VkDescriptorBufferInfo frameGlobalsBufferInfo = {
+         .buffer = Vulkan.frameGlobalsBuffers[frameIndex],
+         .offset = 0,
+         .range = sizeof(FrameGlobalsGpu),
+      };
+      VkWriteDescriptorSet frameGlobalsDescriptorWrite = {
+         .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+         .dstSet = Vulkan.forwardDescriptorSets[frameIndex],
+         .dstBinding = 0,
+         .dstArrayElement = 0,
+         .descriptorCount = 1,
+         .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+         .pBufferInfo = &frameGlobalsBufferInfo,
+      };
+
       VkDescriptorImageInfo textureDescriptorImage = {
          .sampler = Vulkan.sceneTextureSampler,
          .imageView = Vulkan.sceneTextureView,
@@ -3850,7 +4149,7 @@ void CreateForwardPipeline()
       VkWriteDescriptorSet textureDescriptorWrite = {
          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
          .dstSet = Vulkan.forwardDescriptorSets[frameIndex],
-         .dstBinding = 0,
+         .dstBinding = 1,
          .dstArrayElement = 0,
          .descriptorCount = 1,
          .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
@@ -3865,7 +4164,7 @@ void CreateForwardPipeline()
       VkWriteDescriptorSet lightDescriptorWrite = {
          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
          .dstSet = Vulkan.forwardDescriptorSets[frameIndex],
-         .dstBinding = 1,
+         .dstBinding = 2,
          .dstArrayElement = 0,
          .descriptorCount = 1,
          .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
@@ -3880,7 +4179,7 @@ void CreateForwardPipeline()
       VkWriteDescriptorSet tileMetaDescriptorWrite = {
          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
          .dstSet = Vulkan.forwardDescriptorSets[frameIndex],
-         .dstBinding = 2,
+         .dstBinding = 3,
          .dstArrayElement = 0,
          .descriptorCount = 1,
          .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
@@ -3895,7 +4194,7 @@ void CreateForwardPipeline()
       VkWriteDescriptorSet tileIndexDescriptorWrite = {
          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
          .dstSet = Vulkan.forwardDescriptorSets[frameIndex],
-         .dstBinding = 3,
+         .dstBinding = 4,
          .dstArrayElement = 0,
          .descriptorCount = 1,
          .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
@@ -3910,7 +4209,7 @@ void CreateForwardPipeline()
       VkWriteDescriptorSet shadowGlobalsDescriptorWrite = {
          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
          .dstSet = Vulkan.forwardDescriptorSets[frameIndex],
-         .dstBinding = 4,
+         .dstBinding = 5,
          .dstArrayElement = 0,
          .descriptorCount = 1,
          .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
@@ -3925,14 +4224,15 @@ void CreateForwardPipeline()
       VkWriteDescriptorSet shadowAtlasDescriptorWrite = {
          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
          .dstSet = Vulkan.forwardDescriptorSets[frameIndex],
-         .dstBinding = 5,
+         .dstBinding = 6,
          .dstArrayElement = 0,
          .descriptorCount = 1,
          .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
          .pImageInfo = &shadowAtlasDescriptorImage,
       };
 
-      array<VkWriteDescriptorSet, 6> descriptorWrites = {
+      array<VkWriteDescriptorSet, 7> descriptorWrites = {
+         frameGlobalsDescriptorWrite,
          textureDescriptorWrite,
          lightDescriptorWrite,
          tileMetaDescriptorWrite,
@@ -3980,13 +4280,20 @@ void CreateForwardPipeline()
       },
    };
 
-   VkVertexInputBindingDescription vertexBinding = {
-      .binding = 0,
-      .stride = static_cast<u32>(sizeof(Vertex)),
-      .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+   std::array<VkVertexInputBindingDescription, 2> vertexBindings = {
+      VkVertexInputBindingDescription{
+         .binding = 0,
+         .stride = static_cast<u32>(sizeof(Vertex)),
+         .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+      },
+      VkVertexInputBindingDescription{
+         .binding = 1,
+         .stride = static_cast<u32>(sizeof(InstanceData)),
+         .inputRate = VK_VERTEX_INPUT_RATE_INSTANCE,
+      },
    };
 
-   std::array<VkVertexInputAttributeDescription, 3> vertexAttributes = {
+   std::array<VkVertexInputAttributeDescription, 4> vertexAttributes = {
       VkVertexInputAttributeDescription{
          .location = 0,
          .binding = 0,
@@ -4005,12 +4312,18 @@ void CreateForwardPipeline()
          .format = VK_FORMAT_R32G32_SFLOAT,
          .offset = static_cast<u32>(offsetof(Vertex, uv)),
       },
+      VkVertexInputAttributeDescription{
+         .location = 3,
+         .binding = 1,
+         .format = VK_FORMAT_R32G32B32A32_SFLOAT,
+         .offset = static_cast<u32>(offsetof(InstanceData, translation)),
+      },
    };
 
    VkPipelineVertexInputStateCreateInfo vertexInput = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-      .vertexBindingDescriptionCount = 1,
-      .pVertexBindingDescriptions = &vertexBinding,
+      .vertexBindingDescriptionCount = static_cast<u32>(vertexBindings.size()),
+      .pVertexBindingDescriptions = vertexBindings.data(),
       .vertexAttributeDescriptionCount = static_cast<u32>(vertexAttributes.size()),
       .pVertexAttributeDescriptions = vertexAttributes.data(),
    };
@@ -4117,20 +4430,101 @@ void CreateForwardPipeline()
       &Vulkan.forwardPipeline);
    Assert(pipelineResult == VK_SUCCESS, "Failed to create forward graphics pipeline");
 
+   VkPipelineShaderStageCreateInfo skyShaderStages[2] = {
+      {
+         .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+         .stage = VK_SHADER_STAGE_VERTEX_BIT,
+         .module = Vulkan.skyVertexShader,
+         .pName = "main",
+      },
+      {
+         .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+         .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+         .module = Vulkan.skyFragmentShader,
+         .pName = "main",
+      },
+   };
+
+   VkVertexInputBindingDescription skyBinding = {
+      .binding = 0,
+      .stride = static_cast<u32>(sizeof(Vertex)),
+      .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+   };
+   VkVertexInputAttributeDescription skyPositionAttribute = {
+      .location = 0,
+      .binding = 0,
+      .format = VK_FORMAT_R32G32B32_SFLOAT,
+      .offset = static_cast<u32>(offsetof(Vertex, position)),
+   };
+   VkPipelineVertexInputStateCreateInfo skyVertexInput = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+      .vertexBindingDescriptionCount = 1,
+      .pVertexBindingDescriptions = &skyBinding,
+      .vertexAttributeDescriptionCount = 1,
+      .pVertexAttributeDescriptions = &skyPositionAttribute,
+   };
+
+   VkPipelineDepthStencilStateCreateInfo skyDepthStencil = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+      .depthTestEnable = VK_FALSE,
+      .depthWriteEnable = VK_FALSE,
+      .depthCompareOp = VK_COMPARE_OP_ALWAYS,
+      .depthBoundsTestEnable = VK_FALSE,
+      .stencilTestEnable = VK_FALSE,
+      .minDepthBounds = 0.0f,
+      .maxDepthBounds = 1.0f,
+   };
+
+   VkGraphicsPipelineCreateInfo skyPipelineInfo = {
+      .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+      .pNext = &renderingInfo,
+      .stageCount = 2,
+      .pStages = skyShaderStages,
+      .pVertexInputState = &skyVertexInput,
+      .pInputAssemblyState = &inputAssembly,
+      .pViewportState = &viewportState,
+      .pRasterizationState = &rasterizer,
+      .pMultisampleState = &multisampling,
+      .pDepthStencilState = &skyDepthStencil,
+      .pColorBlendState = &colorBlending,
+      .pDynamicState = &dynamicState,
+      .layout = Vulkan.forwardPipelineLayout,
+      .renderPass = VK_NULL_HANDLE,
+      .subpass = 0,
+   };
+
+   VkResult skyPipelineResult = vkCreateGraphicsPipelines(
+      Vulkan.device,
+      VK_NULL_HANDLE,
+      1,
+      &skyPipelineInfo,
+      nullptr,
+      &Vulkan.skyPipeline);
+   Assert(skyPipelineResult == VK_SUCCESS, "Failed to create sky graphics pipeline");
+
    Vulkan.forwardPipelineReady = true;
 }
 
 void DestroyForwardPipeline()
 {
    if ((Vulkan.forwardPipeline == VK_NULL_HANDLE) &&
+       (Vulkan.skyPipeline == VK_NULL_HANDLE) &&
        (Vulkan.forwardPipelineLayout == VK_NULL_HANDLE) &&
        (Vulkan.forwardDescriptorSetLayout == VK_NULL_HANDLE) &&
        (Vulkan.forwardDescriptorPool == VK_NULL_HANDLE) &&
        (Vulkan.forwardVertexShader == VK_NULL_HANDLE) &&
-       (Vulkan.forwardFragmentShader == VK_NULL_HANDLE))
+       (Vulkan.forwardFragmentShader == VK_NULL_HANDLE) &&
+       (Vulkan.skyVertexShader == VK_NULL_HANDLE) &&
+       (Vulkan.skyFragmentShader == VK_NULL_HANDLE))
    {
       Vulkan.forwardPipelineReady = false;
       return;
+   }
+
+   if ((Vulkan.device != VK_NULL_HANDLE) && (Vulkan.skyPipeline != VK_NULL_HANDLE))
+   {
+      vkDestroyPipeline(Vulkan.device, Vulkan.skyPipeline, nullptr);
+      Vulkan.skyPipeline = VK_NULL_HANDLE;
    }
 
    if ((Vulkan.device != VK_NULL_HANDLE) && (Vulkan.forwardPipeline != VK_NULL_HANDLE))
@@ -4160,6 +4554,8 @@ void DestroyForwardPipeline()
 
    DestroyShader(Vulkan.forwardVertexShader);
    DestroyShader(Vulkan.forwardFragmentShader);
+   DestroyShader(Vulkan.skyVertexShader);
+   DestroyShader(Vulkan.skyFragmentShader);
 
    Vulkan.forwardPipelineReady = false;
 }
@@ -4393,6 +4789,7 @@ auto DrawFrameForward(u32 frameIndex, u32 imageIndex, const GradientParams &grad
    Assert(Vulkan.forwardRendererReady, "Create the forward renderer before drawing");
    Assert(Vulkan.forwardPipelineReady, "Forward pipeline must be ready before recording commands");
    Assert(Vulkan.forwardLightingReady, "Forward lighting resources must be ready before recording commands");
+   Assert(Vulkan.frameGlobalsReady, "Frame globals resources must be ready before recording commands");
    Assert(Vulkan.shadowResourcesReady, "Shadow resources must be ready before recording commands");
    Assert(Vulkan.shadowPipelineReady, "Shadow pipeline must be ready before recording commands");
    Assert(Vulkan.msaaSamples != static_cast<VkSampleCountFlagBits>(0), "MSAA sample count is not initialized");
@@ -4430,6 +4827,7 @@ auto DrawFrameForward(u32 frameIndex, u32 imageIndex, const GradientParams &grad
 
    CameraParams camera = GetCameraParams();
    UpdateForwardLightingData(camera, extent, gradient.time, frameIndex);
+   UpdateFrameGlobals(camera, extent, gradient.time, frameIndex);
    UpdateShadowCascades(camera, extent, frameIndex);
    RecordShadowPass(frame.commandBuffer);
 
@@ -4604,8 +5002,19 @@ auto DrawFrameForward(u32 frameIndex, u32 imageIndex, const GradientParams &grad
    };
    vkCmdSetScissor(frame.commandBuffer, 0, 1, &scissor);
 
-   vkCmdBindPipeline(frame.commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, Vulkan.forwardPipeline);
    Assert(Vulkan.forwardDescriptorSets[frameIndex] != VK_NULL_HANDLE, "Forward descriptor set is not initialized");
+   Assert(Vulkan.skyPipeline != VK_NULL_HANDLE, "Sky pipeline is not initialized");
+   Assert(Vulkan.sceneVertexBuffer != VK_NULL_HANDLE, "Scene vertex buffer is not initialized");
+   Assert(Vulkan.sceneIndexBuffer != VK_NULL_HANDLE, "Scene index buffer is not initialized");
+   Assert(Vulkan.sceneInstanceBuffer != VK_NULL_HANDLE, "Scene instance buffer is not initialized");
+   Assert(Vulkan.skyVertexBuffer != VK_NULL_HANDLE, "Sky vertex buffer is not initialized");
+   Assert(Vulkan.skyIndexBuffer != VK_NULL_HANDLE, "Sky index buffer is not initialized");
+   Assert(Vulkan.sceneCarIndexCount > 0, "Scene car index count is zero");
+   Assert(Vulkan.sceneGroundIndexCount > 0, "Scene ground index count is zero");
+   Assert(Vulkan.sceneCarInstanceCount > 0, "Scene car instance count is zero");
+   Assert(Vulkan.sceneInstanceCount > Vulkan.sceneGroundInstanceIndex, "Scene ground instance index is out of range");
+   Assert(Vulkan.skyIndexCount > 0, "Sky index count is zero");
+
    vkCmdBindDescriptorSets(
       frame.commandBuffer,
       VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -4615,105 +5024,22 @@ auto DrawFrameForward(u32 frameIndex, u32 imageIndex, const GradientParams &grad
       &Vulkan.forwardDescriptorSets[frameIndex],
       0,
       nullptr);
-   Assert(Vulkan.sceneVertexBuffer != VK_NULL_HANDLE, "Scene vertex buffer is not initialized");
-   Assert(Vulkan.sceneIndexBuffer != VK_NULL_HANDLE, "Scene index buffer is not initialized");
-   Assert(Vulkan.sceneIndexCount > 0, "Scene index count is zero");
-
-   VkDeviceSize vertexOffset = 0;
-   vkCmdBindVertexBuffers(frame.commandBuffer, 0, 1, &Vulkan.sceneVertexBuffer, &vertexOffset);
-   vkCmdBindIndexBuffer(frame.commandBuffer, Vulkan.sceneIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
-
-   float nearPlane = 0.05f;
-   float farPlane = 200.0f;
-   float aspect = (extent.height > 0) ? (static_cast<float>(extent.width) / static_cast<float>(extent.height)) : 1.0f;
-   if (aspect <= 0.0f)
-   {
-      aspect = 1.0f;
-   }
-
-   auto dot3 = [](const Vec3 &a, const Vec3 &b) -> float
-   {
-      return a.x*b.x + a.y*b.y + a.z*b.z;
-   };
-   auto setIdentity = [](float *matrix)
-   {
-      std::memset(matrix, 0, sizeof(float) * 16);
-      matrix[0] = 1.0f;
-      matrix[5] = 1.0f;
-      matrix[10] = 1.0f;
-      matrix[15] = 1.0f;
-   };
-   auto multiplyMat4 = [](const float *a, const float *b, float *result)
-   {
-      float temp[16] = {};
-      for (int column = 0; column < 4; ++column)
-      {
-         for (int row = 0; row < 4; ++row)
-         {
-            float sum = 0.0f;
-            for (int k = 0; k < 4; ++k)
-            {
-               sum += a[k*4 + row] * b[column*4 + k];
-            }
-            temp[column*4 + row] = sum;
-         }
-      }
-      std::memcpy(result, temp, sizeof(temp));
-   };
-
-   float model[16] = {};
-   setIdentity(model);
-
-   float view[16] = {};
-   view[0] = camera.right.x;
-   view[1] = camera.up.x;
-   view[2] = -camera.forward.x;
-   view[3] = 0.0f;
-   view[4] = camera.right.y;
-   view[5] = camera.up.y;
-   view[6] = -camera.forward.y;
-   view[7] = 0.0f;
-   view[8] = camera.right.z;
-   view[9] = camera.up.z;
-   view[10] = -camera.forward.z;
-   view[11] = 0.0f;
-   view[12] = -dot3(camera.right, camera.position);
-   view[13] = -dot3(camera.up, camera.position);
-   view[14] = dot3(camera.forward, camera.position);
-   view[15] = 1.0f;
-
-   float proj[16] = {};
-   float tanHalfFov = std::tan(camera.verticalFovRadians * 0.5f);
-   if (tanHalfFov <= 0.0f)
-   {
-      tanHalfFov = 0.001f;
-   }
-   float focal = 1.0f / tanHalfFov;
-   proj[0] = focal / aspect;
-   proj[5] = -focal;
-   proj[10] = farPlane / (nearPlane - farPlane);
-   proj[11] = -1.0f;
-   proj[14] = (nearPlane * farPlane) / (nearPlane - farPlane);
 
    ForwardPushConstants constants = {};
-   float viewProj[16] = {};
-   multiplyMat4(proj, view, viewProj);
-   multiplyMat4(viewProj, model, constants.mvp);
-
+   constants.model[0] = 1.0f;
+   constants.model[5] = 1.0f;
+   constants.model[10] = 1.0f;
+   constants.model[15] = 1.0f;
    float pulse = 0.92f + 0.08f * std::sin(gradient.time * 0.75f);
    constants.tint[0] = pulse;
    constants.tint[1] = pulse;
    constants.tint[2] = pulse;
    constants.tint[3] = 1.0f;
-   constants.cameraPosition[0] = camera.position.x;
-   constants.cameraPosition[1] = camera.position.y;
-   constants.cameraPosition[2] = camera.position.z;
-   constants.cameraPosition[3] = 0.0f;
-   constants.lightGrid[0] = Vulkan.forwardLightCount;
-   constants.lightGrid[1] = Vulkan.forwardTileCountX;
-   constants.lightGrid[2] = Vulkan.forwardTileCountY;
-   constants.lightGrid[3] = ForwardTileSizePixels;
 
+   vkCmdBindPipeline(frame.commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, Vulkan.skyPipeline);
+   VkDeviceSize skyVertexOffset = 0;
+   vkCmdBindVertexBuffers(frame.commandBuffer, 0, 1, &Vulkan.skyVertexBuffer, &skyVertexOffset);
+   vkCmdBindIndexBuffer(frame.commandBuffer, Vulkan.skyIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
    vkCmdPushConstants(
       frame.commandBuffer,
       Vulkan.forwardPipelineLayout,
@@ -4721,8 +5047,27 @@ auto DrawFrameForward(u32 frameIndex, u32 imageIndex, const GradientParams &grad
       0,
       sizeof(ForwardPushConstants),
       &constants);
+   vkCmdDrawIndexed(frame.commandBuffer, Vulkan.skyIndexCount, 1, 0, 0, 0);
 
-   vkCmdDrawIndexed(frame.commandBuffer, Vulkan.sceneIndexCount, 1, 0, 0, 0);
+   vkCmdBindPipeline(frame.commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, Vulkan.forwardPipeline);
+   std::array<VkBuffer, 2> sceneVertexBuffers = {Vulkan.sceneVertexBuffer, Vulkan.sceneInstanceBuffer};
+   std::array<VkDeviceSize, 2> sceneVertexOffsets = {0, 0};
+   vkCmdBindVertexBuffers(
+      frame.commandBuffer,
+      0,
+      static_cast<u32>(sceneVertexBuffers.size()),
+      sceneVertexBuffers.data(),
+      sceneVertexOffsets.data());
+   vkCmdBindIndexBuffer(frame.commandBuffer, Vulkan.sceneIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+   vkCmdPushConstants(
+      frame.commandBuffer,
+      Vulkan.forwardPipelineLayout,
+      VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+      0,
+      sizeof(ForwardPushConstants),
+      &constants);
+   vkCmdDrawIndexed(frame.commandBuffer, Vulkan.sceneCarIndexCount, Vulkan.sceneCarInstanceCount, 0, 0, 0);
+   vkCmdDrawIndexed(frame.commandBuffer, Vulkan.sceneGroundIndexCount, 1, Vulkan.sceneGroundFirstIndex, 0, Vulkan.sceneGroundInstanceIndex);
 
    vkCmdEndRendering(frame.commandBuffer);
 

@@ -106,10 +106,8 @@ struct Vertex
 
 struct ForwardPushConstants
 {
-    float mvp[16];
+    float model[16];
     float tint[4];
-    float cameraPosition[4];
-    u32 lightGrid[4];
 };
 
 //------------------------------------------------------------------------------------
@@ -280,6 +278,9 @@ auto FindMemoryType(u32 typeBits, VkMemoryPropertyFlags properties) -> u32;
 // Pipeline-related functions
 void CreateForwardPipeline();
 void DestroyForwardPipeline();
+void CreateFrameGlobalsResources();
+void DestroyFrameGlobalsResources();
+void UpdateFrameGlobals(const CameraParams &camera, VkExtent2D extent, float timeSeconds, u32 frameIndex);
 void CreateShadowResources();
 void DestroyShadowResources();
 void CreateShadowPipeline();

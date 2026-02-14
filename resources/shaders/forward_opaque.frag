@@ -2,13 +2,20 @@
 
 layout(push_constant) uniform ForwardPushConstants
 {
-    mat4 mvp;
+    mat4 model;
     vec4 tint;
-    vec4 cameraPosition;
-    uvec4 lightGrid;
 } pc;
 
-layout(set = 0, binding = 0) uniform sampler2D albedoTexture;
+layout(std140, set = 0, binding = 0) uniform FrameGlobals
+{
+    mat4 viewProj;
+    vec4 cameraPosition;
+    vec4 sunDirection;
+    uvec4 lightGrid;
+    vec4 frameParams;
+} fg;
+
+layout(set = 0, binding = 1) uniform sampler2D albedoTexture;
 
 struct GpuLight
 {
@@ -22,17 +29,17 @@ struct TileMeta
     uint count;
 };
 
-layout(std430, set = 0, binding = 1) readonly buffer LightBuffer
+layout(std430, set = 0, binding = 2) readonly buffer LightBuffer
 {
     GpuLight lights[];
 };
 
-layout(std430, set = 0, binding = 2) readonly buffer TileMetaBuffer
+layout(std430, set = 0, binding = 3) readonly buffer TileMetaBuffer
 {
     TileMeta tiles[];
 };
 
-layout(std430, set = 0, binding = 3) readonly buffer TileIndexBuffer
+layout(std430, set = 0, binding = 4) readonly buffer TileIndexBuffer
 {
     uint tileLightIndices[];
 };
@@ -44,31 +51,19 @@ struct ShadowCascade
     vec4 params;
 };
 
-layout(std140, set = 0, binding = 4) uniform ShadowGlobals
+layout(std140, set = 0, binding = 5) uniform ShadowGlobals
 {
     ShadowCascade cascades[3];
     vec4 cameraForward;
     vec4 atlasTexelSize;
 } shadowData;
 
-layout(set = 0, binding = 5) uniform sampler2DShadow shadowAtlas;
+layout(set = 0, binding = 6) uniform sampler2DShadow shadowAtlas;
 
 layout(location = 0) in vec3 fragNormal;
 layout(location = 1) in vec2 fragUV;
 layout(location = 2) in vec3 fragWorldPos;
 layout(location = 0) out vec4 outColor;
-
-vec3 EvaluateSky(vec3 viewDir, vec3 sunDir)
-{
-    float t = clamp(viewDir.y*0.5 + 0.5, 0.0, 1.0);
-    vec3 horizon = vec3(0.42, 0.52, 0.66);
-    vec3 zenith = vec3(0.06, 0.13, 0.24);
-    vec3 sky = mix(horizon, zenith, t);
-    float sunAmount = max(dot(viewDir, sunDir), 0.0);
-    sky += vec3(1.0, 0.88, 0.70) * pow(sunAmount, 192.0) * 4.0;
-    sky += vec3(1.0, 0.93, 0.82) * pow(sunAmount, 48.0) * 0.18;
-    return sky;
-}
 
 float SampleShadowCascade(uint cascadeIndex, vec3 worldPos, vec3 normal, vec3 sunDir)
 {
@@ -103,7 +98,7 @@ float EvaluateSunShadow(vec3 worldPos, vec3 normal, vec3 sunDir)
     }
 
     vec3 cameraForward = normalize(shadowData.cameraForward.xyz);
-    float viewDepth = dot(worldPos - pc.cameraPosition.xyz, cameraForward);
+    float viewDepth = dot(worldPos - fg.cameraPosition.xyz, cameraForward);
     if (viewDepth <= 0.0)
     {
         return 1.0;
@@ -140,16 +135,7 @@ float EvaluateSunShadow(vec3 worldPos, vec3 normal, vec3 sunDir)
 
 void main()
 {
-    vec3 sunDir = normalize(vec3(0.35, 0.82, 0.28));
-    bool isSky = fragUV.x < -9000.0;
-    if (isSky)
-    {
-        vec3 viewDir = normalize(fragWorldPos - pc.cameraPosition.xyz);
-        vec3 skyColor = EvaluateSky(viewDir, sunDir);
-        outColor = vec4(skyColor, 1.0);
-        return;
-    }
-
+    vec3 sunDir = normalize(fg.sunDirection.xyz);
     vec3 N = normalize(fragNormal);
 
     const float checkerCellSize = 1.15;
@@ -172,10 +158,10 @@ void main()
     vec3 bounce = mix(vec3(0.015), groundColor * 0.26, clamp(N.y, 0.0, 1.0));
     vec3 gi = ambientSky + bounce;
 
-    uint lightCount = pc.lightGrid.x;
-    uint tileCountX = max(pc.lightGrid.y, 1u);
-    uint tileCountY = max(pc.lightGrid.z, 1u);
-    uint tileSize = max(pc.lightGrid.w, 1u);
+    uint lightCount = fg.lightGrid.x;
+    uint tileCountX = max(fg.lightGrid.y, 1u);
+    uint tileCountY = max(fg.lightGrid.z, 1u);
+    uint tileSize = max(fg.lightGrid.w, 1u);
     uvec2 pixel = uvec2(gl_FragCoord.xy);
     uint tileX = min(pixel.x / tileSize, tileCountX - 1u);
     uint tileY = min(pixel.y / tileSize, tileCountY - 1u);
