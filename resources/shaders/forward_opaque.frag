@@ -133,6 +133,16 @@ float EvaluateSunShadow(vec3 worldPos, vec3 normal, vec3 sunDir)
     return mix(shadowA, shadowB, t);
 }
 
+vec3 TonemapAcesApprox(vec3 color)
+{
+    const float a = 2.51;
+    const float b = 0.03;
+    const float c = 2.43;
+    const float d = 0.59;
+    const float e = 0.14;
+    return clamp((color*(a*color + b))/(color*(c*color + d) + e), 0.0, 1.0);
+}
+
 void main()
 {
     vec3 sunDir = normalize(fg.sunDirection.xyz);
@@ -154,8 +164,8 @@ void main()
     vec3 directSun = vec3(1.0, 0.94, 0.86) * (1.05 * ndlSun * sunShadow);
 
     float hemi = clamp(N.y*0.5 + 0.5, 0.0, 1.0);
-    vec3 ambientSky = mix(vec3(0.05, 0.055, 0.06), vec3(0.18, 0.24, 0.34), hemi);
-    vec3 bounce = mix(vec3(0.015), groundColor * 0.26, clamp(N.y, 0.0, 1.0));
+    vec3 ambientSky = mix(vec3(0.025, 0.03, 0.04), vec3(0.13, 0.18, 0.27), hemi);
+    vec3 bounce = mix(vec3(0.008), groundColor * 0.18, clamp(N.y, 0.0, 1.0));
     vec3 gi = ambientSky + bounce;
 
     uint lightCount = fg.lightGrid.x;
@@ -197,5 +207,6 @@ void main()
 
     vec3 lit = baseAlbedo * (gi + directSun + pointAccum);
     lit *= pc.tint.rgb;
+    lit = TonemapAcesApprox(lit);
     outColor = vec4(lit, pc.tint.a);
 }

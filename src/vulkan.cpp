@@ -1786,7 +1786,7 @@ void CreateScene()
    VkImageCreateInfo textureImageInfo = {
       .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
       .imageType = VK_IMAGE_TYPE_2D,
-      .format = VK_FORMAT_R8G8B8A8_UNORM,
+      .format = VK_FORMAT_R8G8B8A8_SRGB,
       .extent = {textureWidth, textureHeight, 1},
       .mipLevels = 1,
       .arrayLayers = 1,
@@ -1816,7 +1816,7 @@ void CreateScene()
       .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
       .image = Vulkan.sceneTextureImage,
       .viewType = VK_IMAGE_VIEW_TYPE_2D,
-      .format = VK_FORMAT_R8G8B8A8_UNORM,
+      .format = VK_FORMAT_R8G8B8A8_SRGB,
       .subresourceRange = {
          .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
          .baseMipLevel = 0,
