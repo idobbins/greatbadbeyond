@@ -27,8 +27,27 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(glfw)
 
+FetchContent_Declare(
+  zlib
+  GIT_REPOSITORY https://github.com/madler/zlib.git
+  GIT_TAG        v1.3.1
+)
+set(ZLIB_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(ZLIB_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(ZLIB_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(zlib)
+
+if(NOT TARGET ZLIB::ZLIB)
+    if(TARGET zlibstatic)
+        add_library(ZLIB::ZLIB ALIAS zlibstatic)
+    elseif(TARGET zlib)
+        add_library(ZLIB::ZLIB ALIAS zlib)
+    else()
+        message(FATAL_ERROR "ZLIB target not found after FetchContent")
+    endif()
+endif()
+
 find_package(Vulkan REQUIRED)
-find_package(ZLIB REQUIRED)
 
 if(NOT Vulkan_GLSLC_EXECUTABLE)
     find_program(Vulkan_GLSLC_EXECUTABLE
@@ -74,13 +93,13 @@ set(KENNEY_MANIFEST_PACK ${CMAKE_CURRENT_SOURCE_DIR}/resources/external/kenney_a
 if(NOT EXISTS ${KENNEY_MANIFEST_HEADER})
     message(FATAL_ERROR
         "Missing generated manifest header: ${KENNEY_MANIFEST_HEADER}\n"
-        "Run: scripts/generate_kenney_pack.sh")
+        "Run: uv run greatbadbeyond all")
 endif()
 
 if(NOT EXISTS ${KENNEY_MANIFEST_PACK})
     message(WARNING
         "Missing runtime pack file: ${KENNEY_MANIFEST_PACK}\n"
-        "Run: scripts/generate_kenney_pack.sh")
+        "Run: uv run greatbadbeyond all")
 endif()
 
 add_executable(${PROJECT_NAME}

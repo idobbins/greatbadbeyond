@@ -232,7 +232,7 @@ static struct VulkanData
    VkSampler sceneTextureSampler;
    VkImageLayout sceneTextureLayout;
    u32 frameSeed;
-   vector<byte> decodeScratch;
+   vector<std::byte> decodeScratch;
 
    bool instanceReady;
    bool validationLayersEnabled;
@@ -406,7 +406,7 @@ void CreateInstance()
    };
 
    // stack-only extensions
-   static array<byte, InstanceExtensionScratchBytes> extensionBuffer;
+   static array<std::byte, InstanceExtensionScratchBytes> extensionBuffer;
    static pmr::monotonic_buffer_resource extensionStackOnlyResource {
       extensionBuffer.data(),
       extensionBuffer.size(),
@@ -431,7 +431,7 @@ void CreateInstance()
    }
 
    // stack-only layers
-   static array<byte, InstanceLayerScratchBytes> layerBuffer;
+   static array<std::byte, InstanceLayerScratchBytes> layerBuffer;
    static pmr::monotonic_buffer_resource layerStackOnlyResource {
       layerBuffer.data(),
       layerBuffer.size(),
@@ -945,16 +945,15 @@ void CreateDevice()
    Assert(supportedFeatures13.dynamicRendering == VK_TRUE, "Physical device does not support dynamic rendering");
    Assert(supportedFeatures13.synchronization2 == VK_TRUE, "Physical device does not support synchronization2");
 
-   VkPhysicalDeviceVulkan13Features features13 = {
-      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
-      .dynamicRendering = VK_TRUE,
-      .synchronization2 = VK_TRUE,
-   };
+   VkPhysicalDeviceVulkan13Features features13 = {};
+   features13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+   features13.pNext = nullptr;
+   features13.dynamicRendering = VK_TRUE;
+   features13.synchronization2 = VK_TRUE;
 
-   VkPhysicalDeviceFeatures2 features2 = {
-      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
-      .pNext = &features13,
-   };
+   VkPhysicalDeviceFeatures2 features2 = {};
+   features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+   features2.pNext = &features13;
 
    array<const char *, MaxDeviceExtensions> extensions = {};
    uint32_t extensionCount = 0;
@@ -1036,17 +1035,16 @@ void CreateDevice()
    addQueueFamily(Vulkan.transferQueueFamilyIndex);
    addQueueFamily(Vulkan.computeQueueFamilyIndex);
 
-   VkDeviceCreateInfo deviceCreateInfo = {
-      .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-      .pNext = &features2,
-      .queueCreateInfoCount = queueCreateInfoCount,
-      .pQueueCreateInfos = queueCreateInfos.data(),
-      .enabledExtensionCount = extensionCount,
-      .ppEnabledExtensionNames = extensions.data(),
-      .enabledLayerCount = 0,
-      .ppEnabledLayerNames = nullptr,
-      .pEnabledFeatures = nullptr,
-   };
+   VkDeviceCreateInfo deviceCreateInfo = {};
+   deviceCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+   deviceCreateInfo.pNext = &features2;
+   deviceCreateInfo.queueCreateInfoCount = queueCreateInfoCount;
+   deviceCreateInfo.pQueueCreateInfos = queueCreateInfos.data();
+   deviceCreateInfo.enabledExtensionCount = extensionCount;
+   deviceCreateInfo.ppEnabledExtensionNames = extensions.data();
+   deviceCreateInfo.enabledLayerCount = 0;
+   deviceCreateInfo.ppEnabledLayerNames = nullptr;
+   deviceCreateInfo.pEnabledFeatures = nullptr;
 
    result = vkCreateDevice(Vulkan.physicalDevice, &deviceCreateInfo, nullptr, &Vulkan.device);
    Assert(result == VK_SUCCESS, "Failed to create Vulkan logical device");
@@ -1220,7 +1218,7 @@ void CreateSwapchain()
    {
       for (const VkPresentModeKHR &mode : presentModes)
       {
-         if (mode == VK_PRESENT_MODE_MAILBOX_KHR)
+         if (mode == VK_PRESENT_MODE_FIFO_KHR)
          {
             return mode;
          }
@@ -1935,7 +1933,7 @@ void CreateScene()
    createOrResizeStagingBuffer(totalUploadBytes);
    Assert(Vulkan.uploadStagingMapped != nullptr, "Staging buffer is not mapped");
 
-   byte *stagingBytes = reinterpret_cast<byte *>(Vulkan.uploadStagingMapped);
+   std::byte *stagingBytes = reinterpret_cast<std::byte *>(Vulkan.uploadStagingMapped);
    std::memcpy(stagingBytes, sceneVertices.data(), static_cast<size_t>(sceneVertexBytes));
    std::memcpy(stagingBytes + static_cast<usize>(sceneIndexUploadOffset), sceneIndices.data(), static_cast<size_t>(sceneIndexBytes));
    std::memcpy(stagingBytes + static_cast<usize>(sceneInstanceUploadOffset), sceneInstances.data(), static_cast<size_t>(sceneInstanceBytes));

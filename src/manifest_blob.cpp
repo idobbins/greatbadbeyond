@@ -3,6 +3,9 @@
 #include <utils.h>
 
 #if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 #else
 #include <cerrno>
@@ -30,9 +33,9 @@ static constexpr const char *DefaultManifestBlobPath = "resources/external/kenne
 
 static struct ManifestBlobData
 {
-    const byte *mappedBytes;
+    const std::byte *mappedBytes;
     usize mappedSize;
-    vector<byte> fallbackBytes;
+    vector<std::byte> fallbackBytes;
 #if defined(_WIN32)
     HANDLE fileHandle;
     HANDLE mappingHandle;
@@ -163,7 +166,7 @@ void CreateManifestBlob()
 
     ManifestBlob.fileHandle = fileHandle;
     ManifestBlob.mappingHandle = mappingHandle;
-    ManifestBlob.mappedBytes = reinterpret_cast<const byte *>(mapped);
+    ManifestBlob.mappedBytes = reinterpret_cast<const std::byte *>(mapped);
     ManifestBlob.mappedSize = static_cast<usize>(fileSize.QuadPart);
     ManifestBlob.fallbackBytes.clear();
     ManifestBlob.ready = true;
@@ -223,7 +226,7 @@ void CreateManifestBlob()
     }
 
     ManifestBlob.fileDescriptor = fileDescriptor;
-    ManifestBlob.mappedBytes = reinterpret_cast<const byte *>(mapped);
+    ManifestBlob.mappedBytes = reinterpret_cast<const std::byte *>(mapped);
     ManifestBlob.mappedSize = static_cast<usize>(fileInfo.st_size);
     ManifestBlob.fallbackBytes.clear();
     ManifestBlob.ready = true;
@@ -252,7 +255,7 @@ void DestroyManifestBlob()
 #else
     if ((ManifestBlob.mappedBytes != nullptr) && (ManifestBlob.mappedSize > 0))
     {
-        munmap(const_cast<byte *>(ManifestBlob.mappedBytes), ManifestBlob.mappedSize);
+        munmap(const_cast<void *>(reinterpret_cast<const void *>(ManifestBlob.mappedBytes)), ManifestBlob.mappedSize);
         ManifestBlob.mappedBytes = nullptr;
     }
     if (ManifestBlob.fileDescriptor >= 0)
@@ -273,7 +276,7 @@ auto IsManifestBlobReady() -> bool
     return ManifestBlob.ready;
 }
 
-auto GetManifestBlobBytes() -> span<const byte>
+auto GetManifestBlobBytes() -> span<const std::byte>
 {
     if (!ManifestBlob.ready)
     {

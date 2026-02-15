@@ -1,3 +1,7 @@
+[build-system]
+requires = ["hatchling>=1.27.0"]
+build-backend = "hatchling.build"
+
 [project]
 name = "greatbadbeyond"
 version = "0.1.0"
@@ -6,3 +10,10 @@ dependencies = [
     "pillow>=12.1.1",
     "soundfile>=0.13.1",
 ]
+
+[project.scripts]
+greatbadbeyond = "greatbadbeyond.kenney_pipeline:main"
+greatbadbeyond-trace = "greatbadbeyond.trace_viz:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/greatbadbeyond"]

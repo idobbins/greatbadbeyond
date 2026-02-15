@@ -773,7 +773,11 @@ void MainLoop()
             }
             else
             {
-                std::setvbuf(traceFile, nullptr, _IOLBF, 0);
+                int bufferResult = std::setvbuf(traceFile, nullptr, _IOLBF, 4096);
+                if (bufferResult != 0)
+                {
+                    LogWarn("[hitch] Failed to set line buffering for trace output at %s", tracePath);
+                }
                 std::fprintf(traceFile, "event,wall_s,loop_frame,frame_ms,frame_work_ms,frame_outside_work_ms,poll_ms,input_ms,prep_ms,acq_ms,acq_wait_ms,acq_call_ms,img_wait_ms,record_ms,submit_ms,submit_reset_ms,queue_submit_ms,present_ms,recreate_ms,gpu_shadow_ms,gpu_forward_ms,gpu_total_ms,gpu_valid,frame_sample_valid,trigger_mask,frame_index,image_index,acquire_result,submit_result,samples,window\n");
             }
 
@@ -930,6 +934,9 @@ void MainLoop()
         return ms;
     };
     double frameCapSeconds = (frameTimingCapFps > 0.0) ? (1.0 / frameTimingCapFps) : 0.0;
+    double cameraStepAccumulatorSeconds = 0.0;
+    double cameraFixedStepSeconds = static_cast<double>(cameraFixedDeltaSeconds);
+    double cameraMaxAccumulatedSeconds = cameraFixedStepSeconds * static_cast<double>(cameraMaxSubstepsPerFrame);
 
     while (!WindowShouldClose())
     {
@@ -958,7 +965,27 @@ void MainLoop()
             glfwSetWindowShouldClose(window, GLFW_TRUE);
             break;
         }
-        UpdateCameraFromInput(static_cast<float>(Platform.FrameTiming.deltaSeconds));
+
+        // Keep camera motion deterministic by integrating with a fixed simulation step.
+        cameraStepAccumulatorSeconds += Platform.FrameTiming.deltaSeconds;
+        if (cameraStepAccumulatorSeconds > cameraMaxAccumulatedSeconds)
+        {
+            cameraStepAccumulatorSeconds = cameraMaxAccumulatedSeconds;
+        }
+
+        u32 cameraSubsteps = 0;
+        while ((cameraStepAccumulatorSeconds >= cameraFixedStepSeconds) && (cameraSubsteps < cameraMaxSubstepsPerFrame))
+        {
+            UpdateCameraFromInput(cameraFixedDeltaSeconds);
+            cameraStepAccumulatorSeconds -= cameraFixedStepSeconds;
+            cameraSubsteps += 1;
+        }
+
+        if (cameraSubsteps == 0)
+        {
+            UpdateCameraFromInput(0.0f);
+        }
+
         double inputEndTime = glfwGetTime();
         float inputUpdateMs = toMilliseconds(inputEndTime - inputStartTime);
 

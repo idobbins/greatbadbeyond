@@ -3,10 +3,6 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-manifest_builder="${repo_root}/scripts/build_kenney_manifest.sh"
-codegen="${repo_root}/tools/manifest_codegen/generate_manifest.py"
-manifest_input="${repo_root}/resources/external/kenney_asset_manifest.tsv"
-source_root="${repo_root}/resources"
 header_out_default="${repo_root}/generated/manifest.h"
 blob_out_default="${repo_root}/resources/external/kenney_assets.pack"
 
@@ -42,30 +38,21 @@ while [[ $# -gt 0 ]]; do
 done
 
 if ! command -v uv >/dev/null 2>&1; then
-    echo "uv is required to run manifest codegen" >&2
+    echo "uv is required to run kenney pipeline" >&2
     exit 1
 fi
 
-mkdir -p "$(dirname "${header_out}")"
-mkdir -p "$(dirname "${blob_out}")"
+cd "${repo_root}"
 
-"${manifest_builder}"
+command=(uv run greatbadbeyond pack)
+command+=(--header "${header_out}")
+command+=(--blob "${blob_out}")
 
-codegen_args=()
 if [[ -n "${workers}" ]]; then
-    codegen_args+=(--workers "${workers}")
+    command+=(--workers "${workers}")
 fi
 if [[ -n "${inflight}" ]]; then
-    codegen_args+=(--inflight "${inflight}")
+    command+=(--inflight "${inflight}")
 fi
 
-UV_CACHE_DIR="${UV_CACHE_DIR:-/tmp/uv-cache}" \
-uv run python "${codegen}" \
-    --input "${manifest_input}" \
-    --source-root "${source_root}" \
-    --header "${header_out}" \
-    --blob "${blob_out}" \
-    "${codegen_args[@]}"
-
-echo "wrote ${header_out}"
-echo "wrote ${blob_out}"
+"${command[@]}"
