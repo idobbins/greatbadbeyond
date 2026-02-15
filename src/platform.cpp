@@ -7,6 +7,7 @@
 #include <array>
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <iostream>
 #include <limits>
 #include <string_view>
@@ -49,6 +50,9 @@ static struct PlatformData
         array<float, frameTimingHistoryCapacity> acquireWaitImageFenceHistoryMs;
         array<float, frameTimingHistoryCapacity> recordHistoryMs;
         array<float, frameTimingHistoryCapacity> submitHistoryMs;
+        array<float, frameTimingHistoryCapacity> gpuShadowHistoryMs;
+        array<float, frameTimingHistoryCapacity> gpuForwardHistoryMs;
+        array<float, frameTimingHistoryCapacity> gpuTotalHistoryMs;
         u32 historyCount;
         u32 historyHead;
         bool ready;
@@ -167,6 +171,9 @@ void DestroyWindow()
     Platform.FrameTiming.acquireWaitImageFenceHistoryMs.fill(0.0f);
     Platform.FrameTiming.recordHistoryMs.fill(0.0f);
     Platform.FrameTiming.submitHistoryMs.fill(0.0f);
+    Platform.FrameTiming.gpuShadowHistoryMs.fill(std::numeric_limits<float>::quiet_NaN());
+    Platform.FrameTiming.gpuForwardHistoryMs.fill(std::numeric_limits<float>::quiet_NaN());
+    Platform.FrameTiming.gpuTotalHistoryMs.fill(std::numeric_limits<float>::quiet_NaN());
     Platform.FrameTiming.historyCount = 0;
     Platform.FrameTiming.historyHead = 0;
 }
@@ -288,6 +295,9 @@ void ResetFrameTiming()
     Platform.FrameTiming.acquireWaitImageFenceHistoryMs.fill(0.0f);
     Platform.FrameTiming.recordHistoryMs.fill(0.0f);
     Platform.FrameTiming.submitHistoryMs.fill(0.0f);
+    Platform.FrameTiming.gpuShadowHistoryMs.fill(std::numeric_limits<float>::quiet_NaN());
+    Platform.FrameTiming.gpuForwardHistoryMs.fill(std::numeric_limits<float>::quiet_NaN());
+    Platform.FrameTiming.gpuTotalHistoryMs.fill(std::numeric_limits<float>::quiet_NaN());
     Platform.FrameTiming.historyCount = 0;
     Platform.FrameTiming.historyHead = 0;
     Platform.FrameTiming.ready = true;
@@ -295,6 +305,19 @@ void ResetFrameTiming()
 
 void MainLoop()
 {
+    static bool frameLogConfigured = false;
+    static bool frameLogEnabled = true;
+    if (!frameLogConfigured)
+    {
+        const char *frameLogEnv = std::getenv("GBB_FRAME_LOG");
+        if ((frameLogEnv != nullptr) && (frameLogEnv[0] == '0'))
+        {
+            frameLogEnabled = false;
+            LogInfo("[frame] Periodic frame log disabled via GBB_FRAME_LOG=0");
+        }
+        frameLogConfigured = true;
+    }
+
     if (!Platform.FrameTiming.ready)
     {
         ResetFrameTiming();
@@ -390,10 +413,23 @@ void MainLoop()
         }
 
         double frameEndTime = submitEndTime;
-        float frameMs = static_cast<float>((frameEndTime - frameStartTime) * 1000.0);
-        if (!std::isfinite(frameMs) || (frameMs < 0.0f))
+        float frameWorkMs = static_cast<float>((frameEndTime - frameStartTime) * 1000.0);
+        if (!std::isfinite(frameWorkMs) || (frameWorkMs < 0.0f))
         {
-            frameMs = 0.0f;
+            frameWorkMs = 0.0f;
+        }
+
+        // Use start-to-start cadence so stalls outside submit (for example logging work)
+        // still appear in frame timing stats.
+        float frameMs = static_cast<float>(deltaSeconds * 1000.0);
+        if (!std::isfinite(frameMs) || (frameMs <= 0.0f))
+        {
+            frameMs = frameWorkMs;
+        }
+        bool frameSampleValid = frameMs >= frameTimingMinSampleMs;
+        if (!frameSampleValid)
+        {
+            LogWarn("[frame] Ignoring short sample %.3f ms (< %.3f ms threshold)", frameMs, frameTimingMinSampleMs);
         }
 
         if (!Platform.FrameTiming.warmupComplete &&
@@ -406,7 +442,7 @@ void MainLoop()
             LogInfo("[frame] Warmup complete after %.1f s; collecting timing samples", frameTimingWarmupSeconds);
         }
 
-        if (Platform.FrameTiming.warmupComplete)
+        if (Platform.FrameTiming.warmupComplete && frameSampleValid)
         {
             u32 sampleIndex = Platform.FrameTiming.historyHead;
             Platform.FrameTiming.frameHistoryMs[sampleIndex] = frameMs;
@@ -416,6 +452,9 @@ void MainLoop()
             Platform.FrameTiming.acquireWaitImageFenceHistoryMs[sampleIndex] = acquireTiming.waitImageFenceMs;
             Platform.FrameTiming.recordHistoryMs[sampleIndex] = recordMs;
             Platform.FrameTiming.submitHistoryMs[sampleIndex] = submitMs;
+            Platform.FrameTiming.gpuShadowHistoryMs[sampleIndex] = acquireTiming.gpuValid ? acquireTiming.gpuShadowMs : std::numeric_limits<float>::quiet_NaN();
+            Platform.FrameTiming.gpuForwardHistoryMs[sampleIndex] = acquireTiming.gpuValid ? acquireTiming.gpuForwardMs : std::numeric_limits<float>::quiet_NaN();
+            Platform.FrameTiming.gpuTotalHistoryMs[sampleIndex] = acquireTiming.gpuValid ? acquireTiming.gpuTotalMs : std::numeric_limits<float>::quiet_NaN();
             Platform.FrameTiming.historyHead = (Platform.FrameTiming.historyHead + 1) % frameTimingHistoryCapacity;
             if (Platform.FrameTiming.historyCount < frameTimingHistoryCapacity)
             {
@@ -426,19 +465,13 @@ void MainLoop()
             Platform.FrameTiming.samples += 1;
         }
 
-        if ((frameEndTime - Platform.FrameTiming.lastLogTime) >= frameTimingLogIntervalSeconds)
+        if (frameLogEnabled && ((frameEndTime - Platform.FrameTiming.lastLogTime) >= frameTimingLogIntervalSeconds))
         {
             u32 frameSamples = Platform.FrameTiming.samples;
             u32 historySamples = Platform.FrameTiming.historyCount;
             if (Platform.FrameTiming.warmupComplete && (frameSamples > 0) && (historySamples > 0))
             {
                 array<float, frameTimingHistoryCapacity> sortedFrameMs = {};
-                array<float, frameTimingHistoryCapacity> sortedAcquireMs = {};
-                array<float, frameTimingHistoryCapacity> sortedAcquireWaitFrameFenceMs = {};
-                array<float, frameTimingHistoryCapacity> sortedAcquireCallMs = {};
-                array<float, frameTimingHistoryCapacity> sortedAcquireWaitImageFenceMs = {};
-                array<float, frameTimingHistoryCapacity> sortedRecordMs = {};
-                array<float, frameTimingHistoryCapacity> sortedSubmitMs = {};
 
                 double rollingFrameSumMs = 0.0;
                 double rollingAcquireSumMs = 0.0;
@@ -447,8 +480,10 @@ void MainLoop()
                 double rollingAcquireWaitImageFenceSumMs = 0.0;
                 double rollingRecordSumMs = 0.0;
                 double rollingSubmitSumMs = 0.0;
-                float minFrameMs = std::numeric_limits<float>::max();
-                float maxFrameMs = 0.0f;
+                double rollingGpuShadowSumMs = 0.0;
+                double rollingGpuForwardSumMs = 0.0;
+                double rollingGpuTotalSumMs = 0.0;
+                u32 gpuHistorySamples = 0;
 
                 for (u32 index = 0; index < historySamples; ++index)
                 {
@@ -459,14 +494,11 @@ void MainLoop()
                     float acquireWaitImageFenceSampleMs = Platform.FrameTiming.acquireWaitImageFenceHistoryMs[index];
                     float recordSampleMs = Platform.FrameTiming.recordHistoryMs[index];
                     float submitSampleMs = Platform.FrameTiming.submitHistoryMs[index];
+                    float gpuShadowSampleMs = Platform.FrameTiming.gpuShadowHistoryMs[index];
+                    float gpuForwardSampleMs = Platform.FrameTiming.gpuForwardHistoryMs[index];
+                    float gpuTotalSampleMs = Platform.FrameTiming.gpuTotalHistoryMs[index];
 
                     sortedFrameMs[index] = frameSampleMs;
-                    sortedAcquireMs[index] = acquireSampleMs;
-                    sortedAcquireWaitFrameFenceMs[index] = acquireWaitFrameFenceSampleMs;
-                    sortedAcquireCallMs[index] = acquireCallSampleMs;
-                    sortedAcquireWaitImageFenceMs[index] = acquireWaitImageFenceSampleMs;
-                    sortedRecordMs[index] = recordSampleMs;
-                    sortedSubmitMs[index] = submitSampleMs;
 
                     rollingFrameSumMs += static_cast<double>(frameSampleMs);
                     rollingAcquireSumMs += static_cast<double>(acquireSampleMs);
@@ -475,29 +507,28 @@ void MainLoop()
                     rollingAcquireWaitImageFenceSumMs += static_cast<double>(acquireWaitImageFenceSampleMs);
                     rollingRecordSumMs += static_cast<double>(recordSampleMs);
                     rollingSubmitSumMs += static_cast<double>(submitSampleMs);
-
-                    minFrameMs = std::min(minFrameMs, frameSampleMs);
-                    maxFrameMs = std::max(maxFrameMs, frameSampleMs);
+                    if (std::isfinite(gpuShadowSampleMs) && std::isfinite(gpuForwardSampleMs) && std::isfinite(gpuTotalSampleMs))
+                    {
+                        rollingGpuShadowSumMs += static_cast<double>(gpuShadowSampleMs);
+                        rollingGpuForwardSumMs += static_cast<double>(gpuForwardSampleMs);
+                        rollingGpuTotalSumMs += static_cast<double>(gpuTotalSampleMs);
+                        gpuHistorySamples += 1;
+                    }
                 }
 
                 std::sort(sortedFrameMs.begin(), sortedFrameMs.begin() + historySamples);
-                std::sort(sortedAcquireMs.begin(), sortedAcquireMs.begin() + historySamples);
-                std::sort(sortedAcquireWaitFrameFenceMs.begin(), sortedAcquireWaitFrameFenceMs.begin() + historySamples);
-                std::sort(sortedAcquireCallMs.begin(), sortedAcquireCallMs.begin() + historySamples);
-                std::sort(sortedAcquireWaitImageFenceMs.begin(), sortedAcquireWaitImageFenceMs.begin() + historySamples);
-                std::sort(sortedRecordMs.begin(), sortedRecordMs.begin() + historySamples);
-                std::sort(sortedSubmitMs.begin(), sortedSubmitMs.begin() + historySamples);
 
-                const auto percentileMs = [&](const array<float, frameTimingHistoryCapacity> &sortedValues, double percentile) -> double
+                const auto percentileFrameMs = [&](double percentile) -> double
                 {
                     double p = std::clamp(percentile, 0.0, 1.0);
+                    Assert(historySamples > 0, "Percentile requires at least one sample");
                     double rank = std::ceil(p * static_cast<double>(historySamples));
                     u32 rankIndex = (rank <= 1.0) ? 0u : static_cast<u32>(rank - 1.0);
                     if (rankIndex >= historySamples)
                     {
                         rankIndex = historySamples - 1;
                     }
-                    return static_cast<double>(sortedValues[rankIndex]);
+                    return static_cast<double>(sortedFrameMs[rankIndex]);
                 };
 
                 u32 tailSampleCount = std::max<u32>(1u, historySamples/100u);
@@ -515,11 +546,13 @@ void MainLoop()
                 double averageFps = (averageMs > 0.0) ? (1000.0 / averageMs) : 0.0;
                 double onePercentLowFps = (worstTailMs > 0.0) ? (1000.0 / worstTailMs) : 0.0;
                 double ninetyNinePercentHighFps = (bestTailMs > 0.0) ? (1000.0 / bestTailMs) : 0.0;
-                double minFps = (maxFrameMs > 0.0f) ? (1000.0 / static_cast<double>(maxFrameMs)) : 0.0;
-                double maxFps = (minFrameMs > 0.0f) ? (1000.0 / static_cast<double>(minFrameMs)) : 0.0;
-                double p50Ms = percentileMs(sortedFrameMs, 0.50);
-                double p95Ms = percentileMs(sortedFrameMs, 0.95);
-                double p99Ms = percentileMs(sortedFrameMs, 0.99);
+                double p50Ms = percentileFrameMs(0.50);
+                double p95Ms = percentileFrameMs(0.95);
+                double p99Ms = percentileFrameMs(0.99);
+                double p01Ms = percentileFrameMs(0.001);
+                double p999Ms = percentileFrameMs(0.999);
+                double p0_1LowFps = (p999Ms > 0.0) ? (1000.0 / p999Ms) : 0.0;
+                double p99_9HighFps = (p01Ms > 0.0) ? (1000.0 / p01Ms) : 0.0;
 
                 double acquireAverageMs = rollingAcquireSumMs / static_cast<double>(historySamples);
                 double acquireWaitFrameFenceAverageMs = rollingAcquireWaitFrameFenceSumMs / static_cast<double>(historySamples);
@@ -527,49 +560,57 @@ void MainLoop()
                 double acquireWaitImageFenceAverageMs = rollingAcquireWaitImageFenceSumMs / static_cast<double>(historySamples);
                 double recordAverageMs = rollingRecordSumMs / static_cast<double>(historySamples);
                 double submitAverageMs = rollingSubmitSumMs / static_cast<double>(historySamples);
-                double acquireP95Ms = percentileMs(sortedAcquireMs, 0.95);
-                double acquireWaitFrameFenceP95Ms = percentileMs(sortedAcquireWaitFrameFenceMs, 0.95);
-                double acquireCallP95Ms = percentileMs(sortedAcquireCallMs, 0.95);
-                double acquireWaitImageFenceP95Ms = percentileMs(sortedAcquireWaitImageFenceMs, 0.95);
-                double recordP95Ms = percentileMs(sortedRecordMs, 0.95);
-                double submitP95Ms = percentileMs(sortedSubmitMs, 0.95);
-                double acquireP99Ms = percentileMs(sortedAcquireMs, 0.99);
-                double acquireWaitFrameFenceP99Ms = percentileMs(sortedAcquireWaitFrameFenceMs, 0.99);
-                double acquireCallP99Ms = percentileMs(sortedAcquireCallMs, 0.99);
-                double acquireWaitImageFenceP99Ms = percentileMs(sortedAcquireWaitImageFenceMs, 0.99);
-                double recordP99Ms = percentileMs(sortedRecordMs, 0.99);
-                double submitP99Ms = percentileMs(sortedSubmitMs, 0.99);
 
-                LogInfo("[frame] avg %.1f fps (%.3f ms) | 1%% low %.1f | 99%% high %.1f | p50 %.3f ms p95 %.3f ms p99 %.3f ms | stage avg %.3f/%.3f/%.3f ms p95 %.3f/%.3f/%.3f ms p99 %.3f/%.3f/%.3f ms (acq/record/submit) | acq split avg %.3f/%.3f/%.3f ms p95 %.3f/%.3f/%.3f ms p99 %.3f/%.3f/%.3f ms (wait/acquire/imgwait) | min %.1f fps max %.1f fps | samples=%u window=%u",
-                    averageFps,
-                    averageMs,
-                    onePercentLowFps,
-                    ninetyNinePercentHighFps,
-                    p50Ms,
-                    p95Ms,
-                    p99Ms,
-                    acquireAverageMs,
-                    recordAverageMs,
-                    submitAverageMs,
-                    acquireP95Ms,
-                    recordP95Ms,
-                    submitP95Ms,
-                    acquireP99Ms,
-                    recordP99Ms,
-                    submitP99Ms,
-                    acquireWaitFrameFenceAverageMs,
-                    acquireCallAverageMs,
-                    acquireWaitImageFenceAverageMs,
-                    acquireWaitFrameFenceP95Ms,
-                    acquireCallP95Ms,
-                    acquireWaitImageFenceP95Ms,
-                    acquireWaitFrameFenceP99Ms,
-                    acquireCallP99Ms,
-                    acquireWaitImageFenceP99Ms,
-                    minFps,
-                    maxFps,
-                    static_cast<unsigned>(frameSamples),
-                    static_cast<unsigned>(historySamples));
+                if (gpuHistorySamples > 0)
+                {
+                    double gpuShadowAverageMs = rollingGpuShadowSumMs / static_cast<double>(gpuHistorySamples);
+                    double gpuForwardAverageMs = rollingGpuForwardSumMs / static_cast<double>(gpuHistorySamples);
+                    double gpuTotalAverageMs = rollingGpuTotalSumMs / static_cast<double>(gpuHistorySamples);
+
+                    LogInfo("[frame] avg %.1f fps (%.3f ms) | 1%% low %.1f | 99%% high %.1f | p0.1 low %.1f | p99.9 high %.1f | p50 %.3f ms p95 %.3f ms p99 %.3f ms | stage avg %.3f/%.3f/%.3f ms (acq/record/submit) | acq split avg %.3f/%.3f/%.3f ms (wait/acquire/imgwait) | gpu avg %.3f/%.3f/%.3f ms (shadow/forward/total) | samples=%u window=%u gpuSamples=%u",
+                        averageFps,
+                        averageMs,
+                        onePercentLowFps,
+                        ninetyNinePercentHighFps,
+                        p0_1LowFps,
+                        p99_9HighFps,
+                        p50Ms,
+                        p95Ms,
+                        p99Ms,
+                        acquireAverageMs,
+                        recordAverageMs,
+                        submitAverageMs,
+                        acquireWaitFrameFenceAverageMs,
+                        acquireCallAverageMs,
+                        acquireWaitImageFenceAverageMs,
+                        gpuShadowAverageMs,
+                        gpuForwardAverageMs,
+                        gpuTotalAverageMs,
+                        static_cast<unsigned>(frameSamples),
+                        static_cast<unsigned>(historySamples),
+                        static_cast<unsigned>(gpuHistorySamples));
+                }
+                else
+                {
+                    LogInfo("[frame] avg %.1f fps (%.3f ms) | 1%% low %.1f | 99%% high %.1f | p0.1 low %.1f | p99.9 high %.1f | p50 %.3f ms p95 %.3f ms p99 %.3f ms | stage avg %.3f/%.3f/%.3f ms (acq/record/submit) | acq split avg %.3f/%.3f/%.3f ms (wait/acquire/imgwait) | gpu n/a | samples=%u window=%u",
+                        averageFps,
+                        averageMs,
+                        onePercentLowFps,
+                        ninetyNinePercentHighFps,
+                        p0_1LowFps,
+                        p99_9HighFps,
+                        p50Ms,
+                        p95Ms,
+                        p99Ms,
+                        acquireAverageMs,
+                        recordAverageMs,
+                        submitAverageMs,
+                        acquireWaitFrameFenceAverageMs,
+                        acquireCallAverageMs,
+                        acquireWaitImageFenceAverageMs,
+                        static_cast<unsigned>(frameSamples),
+                        static_cast<unsigned>(historySamples));
+                }
             }
 
             Platform.FrameTiming.lastLogTime = frameEndTime;
@@ -584,6 +625,11 @@ auto RequiresDebug() -> bool
 #if defined(NDEBUG)
     return false;
 #else
+    const char *validationEnv = std::getenv("GBB_VALIDATION");
+    if ((validationEnv != nullptr) && (validationEnv[0] == '0'))
+    {
+        return false;
+    }
     return true;
 #endif
 }

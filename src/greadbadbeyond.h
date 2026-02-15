@@ -84,6 +84,10 @@ struct AcquireTiming
     float acquireCallMs;
     float waitImageFenceMs;
     float totalMs;
+    float gpuShadowMs;
+    float gpuForwardMs;
+    float gpuTotalMs;
+    bool gpuValid;
 };
 
 struct GradientParams

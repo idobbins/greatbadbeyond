@@ -58,7 +58,34 @@ layout(std140, set = 0, binding = 5) uniform ShadowGlobals
     vec4 atlasTexelSize;
 } shadowData;
 
-layout(set = 0, binding = 6) uniform sampler2DShadow shadowAtlas;
+layout(set = 0, binding = 6) uniform sampler2D shadowAtlas;
+
+float SampleShadowDepth(vec2 uv, float compareDepth)
+{
+    float sampledDepth = texture(shadowAtlas, uv).r;
+    return (compareDepth <= sampledDepth) ? 1.0 : 0.0;
+}
+
+float SampleShadowPcf(vec2 atlasUv, vec2 texel, float compareDepth)
+{
+    vec2 texelSpace = atlasUv/texel - vec2(0.5);
+    vec2 base = floor(texelSpace);
+    vec2 frac = texelSpace - base;
+
+    vec2 uv00 = (base + vec2(0.5, 0.5))*texel;
+    vec2 uv10 = uv00 + vec2(texel.x, 0.0);
+    vec2 uv01 = uv00 + vec2(0.0, texel.y);
+    vec2 uv11 = uv00 + vec2(texel.x, texel.y);
+
+    float s00 = SampleShadowDepth(uv00, compareDepth);
+    float s10 = SampleShadowDepth(uv10, compareDepth);
+    float s01 = SampleShadowDepth(uv01, compareDepth);
+    float s11 = SampleShadowDepth(uv11, compareDepth);
+
+    float sx0 = mix(s00, s10, frac.x);
+    float sx1 = mix(s01, s11, frac.x);
+    return mix(sx0, sx1, frac.y);
+}
 
 layout(location = 0) in vec3 fragNormal;
 layout(location = 1) in vec2 fragUV;
@@ -71,22 +98,17 @@ float SampleShadowCascade(uint cascadeIndex, vec3 worldPos, vec3 normal, vec3 su
     vec3 offsetWorld = worldPos + normal*cascade.params.w;
     vec4 shadowPos4 = cascade.worldToShadow*vec4(offsetWorld, 1.0);
     vec3 shadowPos = shadowPos4.xyz/max(shadowPos4.w, 0.0001);
-    if (shadowPos.x <= 0.0 || shadowPos.x >= 1.0 || shadowPos.y <= 0.0 || shadowPos.y >= 1.0)
+    if (shadowPos.x <= 0.0 || shadowPos.x >= 1.0 || shadowPos.y <= 0.0 || shadowPos.y >= 1.0 || shadowPos.z <= 0.0 || shadowPos.z >= 1.0)
     {
         return 1.0;
     }
 
     vec2 atlasUv = cascade.atlasRect.xy + shadowPos.xy*cascade.atlasRect.zw;
     float ndl = max(dot(normal, sunDir), 0.0);
-    float compareDepth = shadowPos.z - cascade.params.z*(1.0 - ndl);
+    float compareDepth = clamp(shadowPos.z - cascade.params.z*(1.0 - ndl), 0.0, 1.0);
     vec2 texel = shadowData.atlasTexelSize.xy;
 
-    float visibility = 0.0;
-    visibility += texture(shadowAtlas, vec3(atlasUv + texel*vec2(-0.5, -0.5), compareDepth));
-    visibility += texture(shadowAtlas, vec3(atlasUv + texel*vec2(0.5, -0.5), compareDepth));
-    visibility += texture(shadowAtlas, vec3(atlasUv + texel*vec2(-0.5, 0.5), compareDepth));
-    visibility += texture(shadowAtlas, vec3(atlasUv + texel*vec2(0.5, 0.5), compareDepth));
-    return visibility*0.25;
+    return SampleShadowPcf(atlasUv, texel, compareDepth);
 }
 
 float EvaluateSunShadow(vec3 worldPos, vec3 normal, vec3 sunDir)

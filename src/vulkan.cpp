@@ -45,6 +45,10 @@ static constexpr float CsmOverlapRatio = 0.12f;
 static constexpr float CsmNearPlane = 0.05f;
 static constexpr float CsmFarPlane = 200.0f;
 static constexpr Vec3 SunDirection = {0.35f, 0.82f, 0.28f};
+static constexpr u32 GpuTimestampSlotsPerFrame = 3;
+static constexpr u32 GpuTimestampSlotShadowStart = 0;
+static constexpr u32 GpuTimestampSlotShadowEnd = 1;
+static constexpr u32 GpuTimestampSlotFrameEnd = 2;
 
 struct ForwardGpuLight
 {
@@ -143,6 +147,10 @@ static struct VulkanData
    array<VkFence, MaxSwapchainImages> swapchainImageFences;
    u32 swapchainImageCount;
    array<FrameResources, FrameOverlap> frames;
+   VkQueryPool gpuTimestampQueryPool;
+   float gpuTimestampPeriodNanoseconds;
+   bool gpuTimestampsSupported;
+   array<bool, FrameOverlap> gpuTimestampPending;
    u32 currentFrame;
 
    VkShaderModule forwardVertexShader;
@@ -243,6 +251,7 @@ static struct VulkanData
    bool shadowPipelineReady;
    bool forwardPipelineReady;
    bool forwardLightingReady;
+   bool gpuTimestampsReady;
 
 } Vulkan;
 
@@ -2761,8 +2770,8 @@ void CreateShadowResources()
       .mipLodBias = 0.0f,
       .anisotropyEnable = VK_FALSE,
       .maxAnisotropy = 1.0f,
-      .compareEnable = VK_TRUE,
-      .compareOp = VK_COMPARE_OP_LESS_OR_EQUAL,
+      .compareEnable = VK_FALSE,
+      .compareOp = VK_COMPARE_OP_ALWAYS,
       .minLod = 0.0f,
       .maxLod = 0.0f,
       .borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE,
@@ -4606,6 +4615,36 @@ void CreateFrameResources()
    Assert(Vulkan.graphicsQueueFamilyIndex < Vulkan.queueFamilyCount, "Graphics queue family index is invalid");
    Assert(Vulkan.swapchainImageCount > 0, "Swapchain images must exist before creating frame resources");
 
+   Vulkan.gpuTimestampQueryPool = VK_NULL_HANDLE;
+   Vulkan.gpuTimestampPeriodNanoseconds = 0.0f;
+   Vulkan.gpuTimestampsSupported = false;
+   Vulkan.gpuTimestampPending.fill(false);
+   Vulkan.gpuTimestampsReady = false;
+
+   VkPhysicalDeviceProperties physicalProperties = {};
+   vkGetPhysicalDeviceProperties(Vulkan.physicalDevice, &physicalProperties);
+   Vulkan.gpuTimestampPeriodNanoseconds = physicalProperties.limits.timestampPeriod;
+
+   span<const VkQueueFamilyProperties> queueFamilies = GetQueueFamilyProperties(Vulkan.physicalDevice);
+   bool graphicsQueueSupportsTimestamps = queueFamilies[Vulkan.graphicsQueueFamilyIndex].timestampValidBits > 0;
+
+   if (graphicsQueueSupportsTimestamps && (Vulkan.gpuTimestampPeriodNanoseconds > 0.0f))
+   {
+      VkQueryPoolCreateInfo queryPoolInfo = {
+         .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+         .queryType = VK_QUERY_TYPE_TIMESTAMP,
+         .queryCount = FrameOverlap * GpuTimestampSlotsPerFrame,
+      };
+      VkResult queryPoolResult = vkCreateQueryPool(Vulkan.device, &queryPoolInfo, nullptr, &Vulkan.gpuTimestampQueryPool);
+      Assert(queryPoolResult == VK_SUCCESS, "Failed to create GPU timestamp query pool");
+      Vulkan.gpuTimestampsSupported = true;
+      Vulkan.gpuTimestampsReady = true;
+   }
+   else
+   {
+      LogWarn("[vulkan] GPU timestamps unsupported on graphics queue; GPU stage timing disabled");
+   }
+
    for (u32 index = 0; index < FrameOverlap; ++index)
    {
       FrameResources &frame = Vulkan.frames[index];
@@ -4676,9 +4715,24 @@ void DestroyFrameResources()
 
    if (Vulkan.device == VK_NULL_HANDLE)
    {
+      Vulkan.gpuTimestampQueryPool = VK_NULL_HANDLE;
+      Vulkan.gpuTimestampPeriodNanoseconds = 0.0f;
+      Vulkan.gpuTimestampsSupported = false;
+      Vulkan.gpuTimestampPending.fill(false);
+      Vulkan.gpuTimestampsReady = false;
       Vulkan.frameResourcesReady = false;
       return;
    }
+
+   if (Vulkan.gpuTimestampQueryPool != VK_NULL_HANDLE)
+   {
+      vkDestroyQueryPool(Vulkan.device, Vulkan.gpuTimestampQueryPool, nullptr);
+      Vulkan.gpuTimestampQueryPool = VK_NULL_HANDLE;
+   }
+   Vulkan.gpuTimestampPeriodNanoseconds = 0.0f;
+   Vulkan.gpuTimestampsSupported = false;
+   Vulkan.gpuTimestampPending.fill(false);
+   Vulkan.gpuTimestampsReady = false;
 
    for (u32 index = 0; index < FrameOverlap; ++index)
    {
@@ -4760,6 +4814,37 @@ auto AcquireNextImage(u32 &imageIndex, u32 &frameIndex, AcquireTiming &timing) -
    double waitFrameFenceEndTime = glfwGetTime();
    timing.waitFrameFenceMs = toMilliseconds(waitFrameFenceEndTime - waitFrameFenceStartTime);
    Assert(waitResult == VK_SUCCESS, "Failed to wait for in-flight fence");
+
+   if (Vulkan.gpuTimestampsReady && Vulkan.gpuTimestampsSupported && Vulkan.gpuTimestampPending[frameIndex])
+   {
+      u32 queryBase = frameIndex * GpuTimestampSlotsPerFrame;
+      std::array<u64, GpuTimestampSlotsPerFrame> timestampValues = {};
+      VkResult queryResult = vkGetQueryPoolResults(
+         Vulkan.device,
+         Vulkan.gpuTimestampQueryPool,
+         queryBase,
+         GpuTimestampSlotsPerFrame,
+         sizeof(timestampValues),
+         timestampValues.data(),
+         sizeof(u64),
+         VK_QUERY_RESULT_64_BIT);
+
+      if (queryResult == VK_SUCCESS)
+      {
+         u64 shadowStart = timestampValues[GpuTimestampSlotShadowStart];
+         u64 shadowEnd = timestampValues[GpuTimestampSlotShadowEnd];
+         u64 frameEnd = timestampValues[GpuTimestampSlotFrameEnd];
+         if ((shadowEnd >= shadowStart) && (frameEnd >= shadowEnd))
+         {
+            double tickToMilliseconds = static_cast<double>(Vulkan.gpuTimestampPeriodNanoseconds) / 1000000.0;
+            timing.gpuShadowMs = static_cast<float>(static_cast<double>(shadowEnd - shadowStart) * tickToMilliseconds);
+            timing.gpuForwardMs = static_cast<float>(static_cast<double>(frameEnd - shadowEnd) * tickToMilliseconds);
+            timing.gpuTotalMs = static_cast<float>(static_cast<double>(frameEnd - shadowStart) * tickToMilliseconds);
+            timing.gpuValid = true;
+         }
+      }
+      Vulkan.gpuTimestampPending[frameIndex] = false;
+   }
 
    imageIndex = UINT32_MAX;
    double acquireStartTime = glfwGetTime();
@@ -4845,6 +4930,17 @@ auto DrawFrameForward(u32 frameIndex, u32 imageIndex, const GradientParams &grad
       return beginResult;
    }
 
+   u32 timestampQueryBase = frameIndex * GpuTimestampSlotsPerFrame;
+   if (Vulkan.gpuTimestampsReady && Vulkan.gpuTimestampsSupported)
+   {
+      vkCmdResetQueryPool(frame.commandBuffer, Vulkan.gpuTimestampQueryPool, timestampQueryBase, GpuTimestampSlotsPerFrame);
+      vkCmdWriteTimestamp(
+         frame.commandBuffer,
+         VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+         Vulkan.gpuTimestampQueryPool,
+         timestampQueryBase + GpuTimestampSlotShadowStart);
+   }
+
    VkExtent2D extent = Vulkan.swapchainExtent;
    Assert((extent.width > 0) && (extent.height > 0), "Swapchain extent is invalid");
 
@@ -4853,6 +4949,14 @@ auto DrawFrameForward(u32 frameIndex, u32 imageIndex, const GradientParams &grad
    UpdateFrameGlobals(camera, extent, gradient.time, frameIndex);
    UpdateShadowCascades(camera, extent, frameIndex);
    RecordShadowPass(frame.commandBuffer);
+   if (Vulkan.gpuTimestampsReady && Vulkan.gpuTimestampsSupported)
+   {
+      vkCmdWriteTimestamp(
+         frame.commandBuffer,
+         VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+         Vulkan.gpuTimestampQueryPool,
+         timestampQueryBase + GpuTimestampSlotShadowEnd);
+   }
 
    VkImage image = Vulkan.swapchainImages[imageIndex];
    VkImageView imageView = Vulkan.swapchainImageViews[imageIndex];
@@ -5118,6 +5222,15 @@ auto DrawFrameForward(u32 frameIndex, u32 imageIndex, const GradientParams &grad
       1,
       &barrierToPresent);
 
+   if (Vulkan.gpuTimestampsReady && Vulkan.gpuTimestampsSupported)
+   {
+      vkCmdWriteTimestamp(
+         frame.commandBuffer,
+         VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+         Vulkan.gpuTimestampQueryPool,
+         timestampQueryBase + GpuTimestampSlotFrameEnd);
+   }
+
    VkResult endResult = vkEndCommandBuffer(frame.commandBuffer);
    if (endResult == VK_SUCCESS)
    {
@@ -5187,6 +5300,11 @@ auto SubmitFrame(u32 frameIndex, u32 imageIndex) -> VkResult
    }
 
    Assert(presentResult == VK_SUCCESS, "Failed to present swapchain image");
+
+   if (Vulkan.gpuTimestampsReady && Vulkan.gpuTimestampsSupported)
+   {
+      Vulkan.gpuTimestampPending[frameIndex] = true;
+   }
 
    Vulkan.currentFrame = (Vulkan.currentFrame + 1) % FrameOverlap;
    return VK_SUCCESS;

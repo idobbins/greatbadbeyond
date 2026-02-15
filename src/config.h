@@ -21,8 +21,9 @@ static constexpr uint32_t swapchainImageCount = 3;
 static constexpr uint32_t FrameOverlap = 3;
 static constexpr VkSampleCountFlagBits preferredMsaaSamples = VK_SAMPLE_COUNT_2_BIT;
 static constexpr uint32_t frameTimingHistoryCapacity = 1200;
-static constexpr double frameTimingLogIntervalSeconds = 1.0;
+static constexpr double frameTimingLogIntervalSeconds = 5.0;
 static constexpr double frameTimingWarmupSeconds = 2.0;
+static constexpr float frameTimingMinSampleMs = 1.0f;
 
 static constexpr int DefaultWindowWidth = 1280;
 static constexpr int DefaultWindowHeight = 720;
@@ -32,8 +33,6 @@ static constexpr const char *DefaultApplicationName = "Greadbadbeyond";
 static constexpr const char *DefaultEngineName = "Greadbadbeyond";
 
 static constexpr VkDebugUtilsMessageSeverityFlagsEXT DefaultDebugSeverityMask =
-    VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT |
-    VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT |
     VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
     VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
 
