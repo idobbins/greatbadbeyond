@@ -21,6 +21,7 @@ static constexpr uint32_t swapchainImageCount = 3;
 static constexpr uint32_t FrameOverlap = 3;
 static constexpr VkSampleCountFlagBits preferredMsaaSamples = VK_SAMPLE_COUNT_2_BIT;
 static constexpr uint32_t frameTimingHistoryCapacity = 1200;
+static constexpr uint32_t frameTimingLogQueueCapacity = 8;
 static constexpr double frameTimingLogIntervalSeconds = 5.0;
 static constexpr double frameTimingWarmupSeconds = 2.0;
 static constexpr float frameTimingMinSampleMs = 1.0f;
