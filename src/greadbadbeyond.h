@@ -90,6 +90,14 @@ struct AcquireTiming
     bool gpuValid;
 };
 
+struct SubmitTiming
+{
+    float resetFenceMs;
+    float queueSubmitMs;
+    float queuePresentMs;
+    float totalMs;
+};
+
 struct GradientParams
 {
     Vec2 resolution;
@@ -252,7 +260,7 @@ void CreateFrameResources();
 void DestroyFrameResources();
 auto AcquireNextImage(u32 &imageIndex, u32 &frameIndex, AcquireTiming &timing) -> VkResult;
 auto DrawFrameForward(u32 frameIndex, u32 imageIndex, const GradientParams &gradient) -> VkResult;
-auto SubmitFrame(u32 frameIndex, u32 imageIndex) -> VkResult;
+auto SubmitFrame(u32 frameIndex, u32 imageIndex, SubmitTiming &timing) -> VkResult;
 
 // VMA-related functions
 void CreateVMAAllocator();

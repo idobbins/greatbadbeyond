@@ -7,7 +7,9 @@
 #include <array>
 #include <algorithm>
 #include <cmath>
+#include <chrono>
 #include <condition_variable>
+#include <cstdio>
 #include <cstdlib>
 #include <iostream>
 #include <limits>
@@ -41,6 +43,7 @@ static struct PlatformData
     {
         struct FrameLogSnapshot
         {
+            double wallTimeSeconds;
             u32 frameSamples;
             u32 historySamples;
             array<float, frameTimingHistoryCapacity> frameHistoryMs;
@@ -53,6 +56,42 @@ static struct PlatformData
             array<float, frameTimingHistoryCapacity> gpuShadowHistoryMs;
             array<float, frameTimingHistoryCapacity> gpuForwardHistoryMs;
             array<float, frameTimingHistoryCapacity> gpuTotalHistoryMs;
+
+        };
+
+        struct HitchTraceEvent
+        {
+            u32 kind;
+            u64 loopFrameId;
+            u32 frameIndex;
+            u32 imageIndex;
+            u32 frameSamples;
+            u32 historySamples;
+            int acquireResult;
+            int submitResult;
+            bool frameSampleValid;
+            bool gpuValid;
+            u32 triggerMask;
+            double wallTimeSeconds;
+            float frameMs;
+            float frameWorkMs;
+            float frameOutsideWorkMs;
+            float pollEventsMs;
+            float inputUpdateMs;
+            float prepMs;
+            float acquireMs;
+            float acquireWaitFrameFenceMs;
+            float acquireCallMs;
+            float acquireWaitImageFenceMs;
+            float recordMs;
+            float submitMs;
+            float submitResetFenceMs;
+            float submitQueueMs;
+            float presentMs;
+            float recreateSwapchainMs;
+            float gpuShadowMs;
+            float gpuForwardMs;
+            float gpuTotalMs;
 
         };
 
@@ -75,6 +114,7 @@ static struct PlatformData
         array<float, frameTimingHistoryCapacity> gpuTotalHistoryMs;
         u32 historyCount;
         u32 historyHead;
+        u64 loopFrameCounter;
         array<FrameLogSnapshot, frameTimingLogQueueCapacity> logQueue;
         u32 logQueueHead;
         u32 logQueueTail;
@@ -85,10 +125,39 @@ static struct PlatformData
         thread logThread;
         bool logThreadReady;
         bool logStopRequested;
+        bool hitchTraceEnabled;
+        bool hitchTraceAllFrames;
+        float hitchTraceFrameThresholdMs;
+        float hitchTraceWorkThresholdMs;
+        float hitchTraceQueueSubmitThresholdMs;
+        array<HitchTraceEvent, frameTimingHitchTraceQueueCapacity> hitchQueue;
+        u32 hitchQueueHead;
+        u32 hitchQueueTail;
+        u32 hitchQueueCount;
+        u32 droppedHitchTraceCount;
+        mutex hitchMutex;
+        condition_variable hitchCondition;
+        thread hitchThread;
+        bool hitchThreadReady;
+        bool hitchStopRequested;
         bool ready;
 
     } FrameTiming;
 } Platform;
+
+static constexpr u32 HitchTraceEventFrame = 1u;
+static constexpr u32 HitchTraceEventResize = 2u;
+static constexpr u32 HitchTraceEventAcquireOutOfDate = 3u;
+static constexpr u32 HitchTraceEventSubmitOutOfDate = 4u;
+static constexpr u32 HitchTraceEventAcquireFailure = 5u;
+static constexpr u32 HitchTraceEventSubmitFailure = 6u;
+static constexpr u32 HitchTraceEventWarmupComplete = 7u;
+static constexpr u32 HitchTriggerInvalidSample = 1u << 0u;
+static constexpr u32 HitchTriggerFrameCadence = 1u << 1u;
+static constexpr u32 HitchTriggerFrameWork = 1u << 2u;
+static constexpr u32 HitchTriggerQueueSubmit = 1u << 3u;
+static constexpr const char *HitchTraceDefaultPath = "hitch_trace.csv";
+static constexpr const char *FrameStatsDefaultPath = "frame_stats.csv";
 
 void GlfwErrorCallback(int code, const char *description)
 {
@@ -198,6 +267,25 @@ void DestroyWindow()
         Platform.FrameTiming.droppedLogCount = 0;
     }
 
+    if (Platform.FrameTiming.hitchThreadReady)
+    {
+        {
+            lock_guard<mutex> lock(Platform.FrameTiming.hitchMutex);
+            Platform.FrameTiming.hitchStopRequested = true;
+        }
+        Platform.FrameTiming.hitchCondition.notify_all();
+        if (Platform.FrameTiming.hitchThread.joinable())
+        {
+            Platform.FrameTiming.hitchThread.join();
+        }
+        Platform.FrameTiming.hitchThreadReady = false;
+        Platform.FrameTiming.hitchStopRequested = false;
+        Platform.FrameTiming.hitchQueueHead = 0;
+        Platform.FrameTiming.hitchQueueTail = 0;
+        Platform.FrameTiming.hitchQueueCount = 0;
+        Platform.FrameTiming.droppedHitchTraceCount = 0;
+    }
+
     glfwDestroyWindow(Platform.Window.handle);
     Platform.Window.handle = nullptr;
 
@@ -225,10 +313,20 @@ void DestroyWindow()
     Platform.FrameTiming.gpuTotalHistoryMs.fill(std::numeric_limits<float>::quiet_NaN());
     Platform.FrameTiming.historyCount = 0;
     Platform.FrameTiming.historyHead = 0;
+    Platform.FrameTiming.loopFrameCounter = 0;
     Platform.FrameTiming.logQueueHead = 0;
     Platform.FrameTiming.logQueueTail = 0;
     Platform.FrameTiming.logQueueCount = 0;
     Platform.FrameTiming.droppedLogCount = 0;
+    Platform.FrameTiming.hitchTraceEnabled = false;
+    Platform.FrameTiming.hitchTraceAllFrames = false;
+    Platform.FrameTiming.hitchTraceFrameThresholdMs = frameTimingHitchThresholdMs;
+    Platform.FrameTiming.hitchTraceWorkThresholdMs = frameTimingWorkHitchThresholdMs;
+    Platform.FrameTiming.hitchTraceQueueSubmitThresholdMs = frameTimingQueueSubmitHitchThresholdMs;
+    Platform.FrameTiming.hitchQueueHead = 0;
+    Platform.FrameTiming.hitchQueueTail = 0;
+    Platform.FrameTiming.hitchQueueCount = 0;
+    Platform.FrameTiming.droppedHitchTraceCount = 0;
 }
 
 auto WindowShouldClose() -> bool
@@ -341,6 +439,13 @@ void ResetFrameTiming()
         Platform.FrameTiming.logQueueCount = 0;
         Platform.FrameTiming.droppedLogCount = 0;
     }
+    {
+        lock_guard<mutex> lock(Platform.FrameTiming.hitchMutex);
+        Platform.FrameTiming.hitchQueueHead = 0;
+        Platform.FrameTiming.hitchQueueTail = 0;
+        Platform.FrameTiming.hitchQueueCount = 0;
+        Platform.FrameTiming.droppedHitchTraceCount = 0;
+    }
 
     Platform.FrameTiming.lastTime = now;
     Platform.FrameTiming.lastLogTime = now;
@@ -361,6 +466,7 @@ void ResetFrameTiming()
     Platform.FrameTiming.gpuTotalHistoryMs.fill(std::numeric_limits<float>::quiet_NaN());
     Platform.FrameTiming.historyCount = 0;
     Platform.FrameTiming.historyHead = 0;
+    Platform.FrameTiming.loopFrameCounter = 0;
     Platform.FrameTiming.ready = true;
 }
 
@@ -368,6 +474,8 @@ void MainLoop()
 {
     static bool frameLogConfigured = false;
     static bool frameLogEnabled = true;
+    static bool hitchTraceConfigured = false;
+    static bool frameCapConfigured = false;
     if (!frameLogConfigured)
     {
         const char *frameLogEnv = std::getenv("GBB_FRAME_LOG");
@@ -377,6 +485,33 @@ void MainLoop()
             LogInfo("[frame] Periodic frame log disabled via GBB_FRAME_LOG=0");
         }
         frameLogConfigured = true;
+    }
+
+    if (!hitchTraceConfigured)
+    {
+        Platform.FrameTiming.hitchTraceEnabled = true;
+        Platform.FrameTiming.hitchTraceAllFrames = false;
+        Platform.FrameTiming.hitchTraceFrameThresholdMs = frameTimingHitchThresholdMs;
+        Platform.FrameTiming.hitchTraceWorkThresholdMs = frameTimingWorkHitchThresholdMs;
+        Platform.FrameTiming.hitchTraceQueueSubmitThresholdMs = frameTimingQueueSubmitHitchThresholdMs;
+        LogInfo(
+            "[hitch] Trace enabled (path=%s frame>=%.3f ms work>=%.3f ms submit>=%.3f ms mode=%s)",
+            HitchTraceDefaultPath,
+            Platform.FrameTiming.hitchTraceFrameThresholdMs,
+            Platform.FrameTiming.hitchTraceWorkThresholdMs,
+            Platform.FrameTiming.hitchTraceQueueSubmitThresholdMs,
+            Platform.FrameTiming.hitchTraceAllFrames ? "all-frames" : "hitches-only");
+
+        hitchTraceConfigured = true;
+    }
+
+    if (!frameCapConfigured)
+    {
+        if (frameTimingCapFps > 0.0)
+        {
+            LogInfo("[frame] Hard cap enabled at %.1f fps", frameTimingCapFps);
+        }
+        frameCapConfigured = true;
     }
 
     if (!Platform.FrameTiming.ready)
@@ -395,8 +530,20 @@ void MainLoop()
             Platform.FrameTiming.droppedLogCount = 0;
         }
 
-        Platform.FrameTiming.logThread = thread([]()
+        const char *statsPath = FrameStatsDefaultPath;
+        LogInfo("[frame] Periodic stats capture enabled (path=%s)", statsPath);
+        Platform.FrameTiming.logThread = thread([statsPath]()
         {
+            FILE *statsFile = std::fopen(statsPath, "w");
+            if (statsFile == nullptr)
+            {
+                LogWarn("[frame] Failed to open frame stats output at %s", statsPath);
+            }
+            else
+            {
+                std::fprintf(statsFile, "wall_s,avg_fps,avg_ms,low1_fps,high99_fps,p0_1_low_fps,p99_9_high_fps,p50_ms,p95_ms,p99_ms,acq_avg_ms,record_avg_ms,submit_avg_ms,acq_wait_avg_ms,acq_call_avg_ms,img_wait_avg_ms,gpu_shadow_avg_ms,gpu_forward_avg_ms,gpu_total_avg_ms,samples,window,gpu_samples\n");
+            }
+
             while (true)
             {
                 auto snapshot = Platform.FrameTiming.logQueue[0];
@@ -537,60 +684,259 @@ void MainLoop()
                     double gpuShadowAverageMs = rollingGpuShadowSumMs / static_cast<double>(gpuHistorySamples);
                     double gpuForwardAverageMs = rollingGpuForwardSumMs / static_cast<double>(gpuHistorySamples);
                     double gpuTotalAverageMs = rollingGpuTotalSumMs / static_cast<double>(gpuHistorySamples);
-
-                    LogInfo("[frame] avg %.1f fps (%.3f ms) | 1%% low %.1f | 99%% high %.1f | p0.1 low %.1f | p99.9 high %.1f | p50 %.3f ms p95 %.3f ms p99 %.3f ms | stage avg %.3f/%.3f/%.3f ms (acq/record/submit) | acq split avg %.3f/%.3f/%.3f ms (wait/acquire/imgwait) | gpu avg %.3f/%.3f/%.3f ms (shadow/forward/total) | samples=%u window=%u gpuSamples=%u",
-                        averageFps,
-                        averageMs,
-                        onePercentLowFps,
-                        ninetyNinePercentHighFps,
-                        p0_1LowFps,
-                        p99_9HighFps,
-                        p50Ms,
-                        p95Ms,
-                        p99Ms,
-                        acquireAverageMs,
-                        recordAverageMs,
-                        submitAverageMs,
-                        acquireWaitFrameFenceAverageMs,
-                        acquireCallAverageMs,
-                        acquireWaitImageFenceAverageMs,
-                        gpuShadowAverageMs,
-                        gpuForwardAverageMs,
-                        gpuTotalAverageMs,
-                        static_cast<unsigned>(frameSamples),
-                        static_cast<unsigned>(historySamples),
-                        static_cast<unsigned>(gpuHistorySamples));
+                    if (statsFile != nullptr)
+                    {
+                        std::fprintf(
+                            statsFile,
+                            "%.6f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%u,%u,%u\n",
+                            snapshot.wallTimeSeconds,
+                            averageFps,
+                            averageMs,
+                            onePercentLowFps,
+                            ninetyNinePercentHighFps,
+                            p0_1LowFps,
+                            p99_9HighFps,
+                            p50Ms,
+                            p95Ms,
+                            p99Ms,
+                            acquireAverageMs,
+                            recordAverageMs,
+                            submitAverageMs,
+                            acquireWaitFrameFenceAverageMs,
+                            acquireCallAverageMs,
+                            acquireWaitImageFenceAverageMs,
+                            gpuShadowAverageMs,
+                            gpuForwardAverageMs,
+                            gpuTotalAverageMs,
+                            static_cast<unsigned>(frameSamples),
+                            static_cast<unsigned>(historySamples),
+                            static_cast<unsigned>(gpuHistorySamples));
+                    }
                 }
                 else
                 {
-                    LogInfo("[frame] avg %.1f fps (%.3f ms) | 1%% low %.1f | 99%% high %.1f | p0.1 low %.1f | p99.9 high %.1f | p50 %.3f ms p95 %.3f ms p99 %.3f ms | stage avg %.3f/%.3f/%.3f ms (acq/record/submit) | acq split avg %.3f/%.3f/%.3f ms (wait/acquire/imgwait) | gpu n/a | samples=%u window=%u",
-                        averageFps,
-                        averageMs,
-                        onePercentLowFps,
-                        ninetyNinePercentHighFps,
-                        p0_1LowFps,
-                        p99_9HighFps,
-                        p50Ms,
-                        p95Ms,
-                        p99Ms,
-                        acquireAverageMs,
-                        recordAverageMs,
-                        submitAverageMs,
-                        acquireWaitFrameFenceAverageMs,
-                        acquireCallAverageMs,
-                        acquireWaitImageFenceAverageMs,
-                        static_cast<unsigned>(frameSamples),
-                        static_cast<unsigned>(historySamples));
+                    if (statsFile != nullptr)
+                    {
+                        std::fprintf(
+                            statsFile,
+                            "%.6f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,nan,nan,nan,%u,%u,%u\n",
+                            snapshot.wallTimeSeconds,
+                            averageFps,
+                            averageMs,
+                            onePercentLowFps,
+                            ninetyNinePercentHighFps,
+                            p0_1LowFps,
+                            p99_9HighFps,
+                            p50Ms,
+                            p95Ms,
+                            p99Ms,
+                            acquireAverageMs,
+                            recordAverageMs,
+                            submitAverageMs,
+                            acquireWaitFrameFenceAverageMs,
+                            acquireCallAverageMs,
+                            acquireWaitImageFenceAverageMs,
+                            static_cast<unsigned>(frameSamples),
+                            static_cast<unsigned>(historySamples),
+                            0u);
+                    }
                 }
+            }
+
+            if (statsFile != nullptr)
+            {
+                std::fflush(statsFile);
+                std::fclose(statsFile);
             }
         });
         Platform.FrameTiming.logThreadReady = true;
     }
 
+    if (Platform.FrameTiming.hitchTraceEnabled && !Platform.FrameTiming.hitchThreadReady)
+    {
+        {
+            lock_guard<mutex> lock(Platform.FrameTiming.hitchMutex);
+            Platform.FrameTiming.hitchStopRequested = false;
+            Platform.FrameTiming.hitchQueueHead = 0;
+            Platform.FrameTiming.hitchQueueTail = 0;
+            Platform.FrameTiming.hitchQueueCount = 0;
+            Platform.FrameTiming.droppedHitchTraceCount = 0;
+        }
+
+        const char *tracePath = HitchTraceDefaultPath;
+        Platform.FrameTiming.hitchThread = thread([tracePath]()
+        {
+            FILE *traceFile = std::fopen(tracePath, "w");
+            if (traceFile == nullptr)
+            {
+                LogWarn("[hitch] Failed to open trace output at %s", tracePath);
+            }
+            else
+            {
+                std::setvbuf(traceFile, nullptr, _IOLBF, 0);
+                std::fprintf(traceFile, "event,wall_s,loop_frame,frame_ms,frame_work_ms,frame_outside_work_ms,poll_ms,input_ms,prep_ms,acq_ms,acq_wait_ms,acq_call_ms,img_wait_ms,record_ms,submit_ms,submit_reset_ms,queue_submit_ms,present_ms,recreate_ms,gpu_shadow_ms,gpu_forward_ms,gpu_total_ms,gpu_valid,frame_sample_valid,trigger_mask,frame_index,image_index,acquire_result,submit_result,samples,window\n");
+            }
+
+            while (true)
+            {
+                auto event = Platform.FrameTiming.hitchQueue[0];
+                bool hasEvent = false;
+                u32 droppedEventCount = 0;
+                {
+                    unique_lock<mutex> lock(Platform.FrameTiming.hitchMutex);
+                    Platform.FrameTiming.hitchCondition.wait(lock, []()
+                    {
+                        return Platform.FrameTiming.hitchStopRequested || (Platform.FrameTiming.hitchQueueCount > 0);
+                    });
+
+                    if (Platform.FrameTiming.hitchQueueCount > 0)
+                    {
+                        u32 queueIndex = Platform.FrameTiming.hitchQueueHead;
+                        event = Platform.FrameTiming.hitchQueue[queueIndex];
+                        Platform.FrameTiming.hitchQueueHead = (queueIndex + 1u) % frameTimingHitchTraceQueueCapacity;
+                        Platform.FrameTiming.hitchQueueCount -= 1;
+                        droppedEventCount = Platform.FrameTiming.droppedHitchTraceCount;
+                        Platform.FrameTiming.droppedHitchTraceCount = 0;
+                        hasEvent = true;
+                    }
+                    else if (Platform.FrameTiming.hitchStopRequested)
+                    {
+                        break;
+                    }
+                }
+
+                if (droppedEventCount > 0)
+                {
+                    LogWarn("[hitch] Dropped %u hitch events because trace queue was full", static_cast<unsigned>(droppedEventCount));
+                }
+
+                if (!hasEvent || (traceFile == nullptr))
+                {
+                    continue;
+                }
+
+                const char *eventName = "unknown";
+                if (event.kind == HitchTraceEventFrame)
+                {
+                    eventName = "frame";
+                }
+                else if (event.kind == HitchTraceEventResize)
+                {
+                    eventName = "resize";
+                }
+                else if (event.kind == HitchTraceEventAcquireOutOfDate)
+                {
+                    eventName = "acquire_out_of_date";
+                }
+                else if (event.kind == HitchTraceEventSubmitOutOfDate)
+                {
+                    eventName = "submit_out_of_date";
+                }
+                else if (event.kind == HitchTraceEventAcquireFailure)
+                {
+                    eventName = "acquire_failure";
+                }
+                else if (event.kind == HitchTraceEventSubmitFailure)
+                {
+                    eventName = "submit_failure";
+                }
+                else if (event.kind == HitchTraceEventWarmupComplete)
+                {
+                    eventName = "warmup_complete";
+                }
+
+                std::fprintf(
+                    traceFile,
+                    "%s,%.6f,%llu,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%u,%u,%u,%u,%u,%d,%d,%u,%u\n",
+                    eventName,
+                    event.wallTimeSeconds,
+                    static_cast<unsigned long long>(event.loopFrameId),
+                    event.frameMs,
+                    event.frameWorkMs,
+                    event.frameOutsideWorkMs,
+                    event.pollEventsMs,
+                    event.inputUpdateMs,
+                    event.prepMs,
+                    event.acquireMs,
+                    event.acquireWaitFrameFenceMs,
+                    event.acquireCallMs,
+                    event.acquireWaitImageFenceMs,
+                    event.recordMs,
+                    event.submitMs,
+                    event.submitResetFenceMs,
+                    event.submitQueueMs,
+                    event.presentMs,
+                    event.recreateSwapchainMs,
+                    event.gpuShadowMs,
+                    event.gpuForwardMs,
+                    event.gpuTotalMs,
+                    event.gpuValid ? 1u : 0u,
+                    event.frameSampleValid ? 1u : 0u,
+                    event.triggerMask,
+                    event.frameIndex,
+                    event.imageIndex,
+                    event.acquireResult,
+                    event.submitResult,
+                    event.frameSamples,
+                    event.historySamples);
+            }
+
+            if (traceFile != nullptr)
+            {
+                std::fflush(traceFile);
+                std::fclose(traceFile);
+            }
+        });
+        Platform.FrameTiming.hitchThreadReady = true;
+    }
+
+    const auto queueHitchEvent = [&](const auto &event)
+    {
+        if (!Platform.FrameTiming.hitchThreadReady)
+        {
+            return;
+        }
+
+        bool queued = false;
+        {
+            lock_guard<mutex> lock(Platform.FrameTiming.hitchMutex);
+            if (Platform.FrameTiming.hitchQueueCount < frameTimingHitchTraceQueueCapacity)
+            {
+                u32 queueIndex = Platform.FrameTiming.hitchQueueTail;
+                Platform.FrameTiming.hitchQueue[queueIndex] = event;
+                Platform.FrameTiming.hitchQueueTail = (queueIndex + 1u) % frameTimingHitchTraceQueueCapacity;
+                Platform.FrameTiming.hitchQueueCount += 1;
+                queued = true;
+            }
+            else
+            {
+                Platform.FrameTiming.droppedHitchTraceCount += 1;
+            }
+        }
+
+        if (queued)
+        {
+            Platform.FrameTiming.hitchCondition.notify_one();
+        }
+    };
+
+    const auto toMilliseconds = [](double seconds) -> float
+    {
+        float ms = static_cast<float>(seconds * 1000.0);
+        if (!std::isfinite(ms) || (ms < 0.0f))
+        {
+            return 0.0f;
+        }
+        return ms;
+    };
+    double frameCapSeconds = (frameTimingCapFps > 0.0) ? (1.0 / frameTimingCapFps) : 0.0;
+
     while (!WindowShouldClose())
     {
         double frameStartTime = glfwGetTime();
         double deltaSeconds = frameStartTime - Platform.FrameTiming.lastTime;
+        u64 loopFrameId = Platform.FrameTiming.loopFrameCounter;
+        Platform.FrameTiming.loopFrameCounter += 1;
         if (deltaSeconds < 0.0)
         {
             deltaSeconds = 0.0;
@@ -598,8 +944,14 @@ void MainLoop()
 
         Platform.FrameTiming.lastTime = frameStartTime;
         Platform.FrameTiming.deltaSeconds = static_cast<float>(deltaSeconds);
+        float deltaMs = toMilliseconds(deltaSeconds);
 
+        double pollStartTime = glfwGetTime();
         PollEvents();
+        double pollEndTime = glfwGetTime();
+        float pollEventsMs = toMilliseconds(pollEndTime - pollStartTime);
+
+        double inputStartTime = glfwGetTime();
         GLFWwindow *window = GetWindowHandle();
         if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
         {
@@ -607,11 +959,37 @@ void MainLoop()
             break;
         }
         UpdateCameraFromInput(static_cast<float>(Platform.FrameTiming.deltaSeconds));
+        double inputEndTime = glfwGetTime();
+        float inputUpdateMs = toMilliseconds(inputEndTime - inputStartTime);
 
         if (ConsumeFramebufferResize())
         {
-            ResetCameraAccum();
-            RecreateSwapchain();
+            float recreateSwapchainMs = 0.0f;
+            if (Platform.FrameTiming.hitchTraceEnabled)
+            {
+                double recreateStartTime = glfwGetTime();
+                ResetCameraAccum();
+                RecreateSwapchain();
+                double recreateEndTime = glfwGetTime();
+                recreateSwapchainMs = toMilliseconds(recreateEndTime - recreateStartTime);
+
+                auto hitchEvent = Platform.FrameTiming.hitchQueue[0];
+                hitchEvent = {};
+                hitchEvent.kind = HitchTraceEventResize;
+                hitchEvent.loopFrameId = loopFrameId;
+                hitchEvent.wallTimeSeconds = recreateEndTime;
+                hitchEvent.frameMs = deltaMs;
+                hitchEvent.pollEventsMs = pollEventsMs;
+                hitchEvent.inputUpdateMs = inputUpdateMs;
+                hitchEvent.recreateSwapchainMs = recreateSwapchainMs;
+                hitchEvent.frameSampleValid = false;
+                queueHitchEvent(hitchEvent);
+            }
+            else
+            {
+                ResetCameraAccum();
+                RecreateSwapchain();
+            }
             continue;
         }
 
@@ -623,22 +1001,78 @@ void MainLoop()
 
         if ((acquireResult == VK_ERROR_OUT_OF_DATE_KHR) || (acquireResult == VK_SUBOPTIMAL_KHR))
         {
+            float recreateSwapchainMs = 0.0f;
+            double recreateStartTime = glfwGetTime();
             RecreateSwapchain();
+            double recreateEndTime = glfwGetTime();
+            recreateSwapchainMs = toMilliseconds(recreateEndTime - recreateStartTime);
+            if (Platform.FrameTiming.hitchTraceEnabled)
+            {
+                auto hitchEvent = Platform.FrameTiming.hitchQueue[0];
+                hitchEvent = {};
+                hitchEvent.kind = HitchTraceEventAcquireOutOfDate;
+                hitchEvent.loopFrameId = loopFrameId;
+                hitchEvent.wallTimeSeconds = recreateEndTime;
+                hitchEvent.frameIndex = frameIndex;
+                hitchEvent.imageIndex = imageIndex;
+                hitchEvent.acquireResult = acquireResult;
+                hitchEvent.submitResult = VK_SUCCESS;
+                hitchEvent.frameMs = deltaMs;
+                hitchEvent.pollEventsMs = pollEventsMs;
+                hitchEvent.inputUpdateMs = inputUpdateMs;
+                hitchEvent.acquireMs = acquireMs;
+                hitchEvent.acquireWaitFrameFenceMs = acquireTiming.waitFrameFenceMs;
+                hitchEvent.acquireCallMs = acquireTiming.acquireCallMs;
+                hitchEvent.acquireWaitImageFenceMs = acquireTiming.waitImageFenceMs;
+                hitchEvent.recreateSwapchainMs = recreateSwapchainMs;
+                hitchEvent.gpuValid = acquireTiming.gpuValid;
+                hitchEvent.gpuShadowMs = acquireTiming.gpuShadowMs;
+                hitchEvent.gpuForwardMs = acquireTiming.gpuForwardMs;
+                hitchEvent.gpuTotalMs = acquireTiming.gpuTotalMs;
+                queueHitchEvent(hitchEvent);
+            }
             continue;
         }
 
         if (acquireResult != VK_SUCCESS)
         {
+            if (Platform.FrameTiming.hitchTraceEnabled)
+            {
+                auto hitchEvent = Platform.FrameTiming.hitchQueue[0];
+                hitchEvent = {};
+                hitchEvent.kind = HitchTraceEventAcquireFailure;
+                hitchEvent.loopFrameId = loopFrameId;
+                hitchEvent.wallTimeSeconds = glfwGetTime();
+                hitchEvent.frameIndex = frameIndex;
+                hitchEvent.imageIndex = imageIndex;
+                hitchEvent.acquireResult = acquireResult;
+                hitchEvent.submitResult = VK_SUCCESS;
+                hitchEvent.frameMs = deltaMs;
+                hitchEvent.pollEventsMs = pollEventsMs;
+                hitchEvent.inputUpdateMs = inputUpdateMs;
+                hitchEvent.acquireMs = acquireMs;
+                hitchEvent.acquireWaitFrameFenceMs = acquireTiming.waitFrameFenceMs;
+                hitchEvent.acquireCallMs = acquireTiming.acquireCallMs;
+                hitchEvent.acquireWaitImageFenceMs = acquireTiming.waitImageFenceMs;
+                hitchEvent.gpuValid = acquireTiming.gpuValid;
+                hitchEvent.gpuShadowMs = acquireTiming.gpuShadowMs;
+                hitchEvent.gpuForwardMs = acquireTiming.gpuForwardMs;
+                hitchEvent.gpuTotalMs = acquireTiming.gpuTotalMs;
+                queueHitchEvent(hitchEvent);
+            }
             LogError("[vulkan] AcquireNextImage failed (result=%d)", acquireResult);
             break;
         }
 
+        double prepStartTime = glfwGetTime();
         GradientParams gradient = {};
         Size framebuffer = GetFramebufferSize();
         gradient.resolution.x = (framebuffer.width > 0)? static_cast<float>(framebuffer.width) : 1.0f;
         gradient.resolution.y = (framebuffer.height > 0)? static_cast<float>(framebuffer.height) : 1.0f;
         gradient.time = static_cast<float>(glfwGetTime());
         gradient.padding = 0.0f;
+        double prepEndTime = glfwGetTime();
+        float prepMs = toMilliseconds(prepEndTime - prepStartTime);
 
         double recordStartTime = glfwGetTime();
         VkResult recordResult = DrawFrameForward(frameIndex, imageIndex, gradient);
@@ -655,23 +1089,84 @@ void MainLoop()
             break;
         }
 
-        double submitStartTime = glfwGetTime();
-        VkResult submitResult = SubmitFrame(frameIndex, imageIndex);
+        SubmitTiming submitTiming = {};
+        VkResult submitResult = SubmitFrame(frameIndex, imageIndex, submitTiming);
         double submitEndTime = glfwGetTime();
-        float submitMs = static_cast<float>((submitEndTime - submitStartTime) * 1000.0);
-        if (!std::isfinite(submitMs) || (submitMs < 0.0f))
-        {
-            submitMs = 0.0f;
-        }
+        float submitMs = submitTiming.totalMs;
 
         if ((submitResult == VK_ERROR_OUT_OF_DATE_KHR) || (submitResult == VK_SUBOPTIMAL_KHR))
         {
+            float recreateSwapchainMs = 0.0f;
+            double recreateStartTime = glfwGetTime();
             RecreateSwapchain();
+            double recreateEndTime = glfwGetTime();
+            recreateSwapchainMs = toMilliseconds(recreateEndTime - recreateStartTime);
+            if (Platform.FrameTiming.hitchTraceEnabled)
+            {
+                auto hitchEvent = Platform.FrameTiming.hitchQueue[0];
+                hitchEvent = {};
+                hitchEvent.kind = HitchTraceEventSubmitOutOfDate;
+                hitchEvent.loopFrameId = loopFrameId;
+                hitchEvent.wallTimeSeconds = recreateEndTime;
+                hitchEvent.frameIndex = frameIndex;
+                hitchEvent.imageIndex = imageIndex;
+                hitchEvent.acquireResult = acquireResult;
+                hitchEvent.submitResult = submitResult;
+                hitchEvent.frameMs = deltaMs;
+                hitchEvent.pollEventsMs = pollEventsMs;
+                hitchEvent.inputUpdateMs = inputUpdateMs;
+                hitchEvent.prepMs = prepMs;
+                hitchEvent.acquireMs = acquireMs;
+                hitchEvent.acquireWaitFrameFenceMs = acquireTiming.waitFrameFenceMs;
+                hitchEvent.acquireCallMs = acquireTiming.acquireCallMs;
+                hitchEvent.acquireWaitImageFenceMs = acquireTiming.waitImageFenceMs;
+                hitchEvent.recordMs = recordMs;
+                hitchEvent.submitMs = submitMs;
+                hitchEvent.submitResetFenceMs = submitTiming.resetFenceMs;
+                hitchEvent.submitQueueMs = submitTiming.queueSubmitMs;
+                hitchEvent.presentMs = submitTiming.queuePresentMs;
+                hitchEvent.recreateSwapchainMs = recreateSwapchainMs;
+                hitchEvent.gpuValid = acquireTiming.gpuValid;
+                hitchEvent.gpuShadowMs = acquireTiming.gpuShadowMs;
+                hitchEvent.gpuForwardMs = acquireTiming.gpuForwardMs;
+                hitchEvent.gpuTotalMs = acquireTiming.gpuTotalMs;
+                queueHitchEvent(hitchEvent);
+            }
             continue;
         }
 
         if (submitResult != VK_SUCCESS)
         {
+            if (Platform.FrameTiming.hitchTraceEnabled)
+            {
+                auto hitchEvent = Platform.FrameTiming.hitchQueue[0];
+                hitchEvent = {};
+                hitchEvent.kind = HitchTraceEventSubmitFailure;
+                hitchEvent.loopFrameId = loopFrameId;
+                hitchEvent.wallTimeSeconds = submitEndTime;
+                hitchEvent.frameIndex = frameIndex;
+                hitchEvent.imageIndex = imageIndex;
+                hitchEvent.acquireResult = acquireResult;
+                hitchEvent.submitResult = submitResult;
+                hitchEvent.frameMs = deltaMs;
+                hitchEvent.pollEventsMs = pollEventsMs;
+                hitchEvent.inputUpdateMs = inputUpdateMs;
+                hitchEvent.prepMs = prepMs;
+                hitchEvent.acquireMs = acquireMs;
+                hitchEvent.acquireWaitFrameFenceMs = acquireTiming.waitFrameFenceMs;
+                hitchEvent.acquireCallMs = acquireTiming.acquireCallMs;
+                hitchEvent.acquireWaitImageFenceMs = acquireTiming.waitImageFenceMs;
+                hitchEvent.recordMs = recordMs;
+                hitchEvent.submitMs = submitMs;
+                hitchEvent.submitResetFenceMs = submitTiming.resetFenceMs;
+                hitchEvent.submitQueueMs = submitTiming.queueSubmitMs;
+                hitchEvent.presentMs = submitTiming.queuePresentMs;
+                hitchEvent.gpuValid = acquireTiming.gpuValid;
+                hitchEvent.gpuShadowMs = acquireTiming.gpuShadowMs;
+                hitchEvent.gpuForwardMs = acquireTiming.gpuForwardMs;
+                hitchEvent.gpuTotalMs = acquireTiming.gpuTotalMs;
+                queueHitchEvent(hitchEvent);
+            }
             LogError("[vulkan] SubmitFrame failed (result=%d)", submitResult);
             break;
         }
@@ -690,11 +1185,12 @@ void MainLoop()
         {
             frameMs = frameWorkMs;
         }
-        bool frameSampleValid = frameMs >= frameTimingMinSampleMs;
-        if (!frameSampleValid)
+        float frameOutsideWorkMs = frameMs - frameWorkMs;
+        if (!std::isfinite(frameOutsideWorkMs) || (frameOutsideWorkMs < 0.0f))
         {
-            LogWarn("[frame] Ignoring short sample %.3f ms (< %.3f ms threshold)", frameMs, frameTimingMinSampleMs);
+            frameOutsideWorkMs = 0.0f;
         }
+        bool frameSampleValid = frameMs >= frameTimingMinSampleMs;
 
         if (!Platform.FrameTiming.warmupComplete &&
             ((frameEndTime - Platform.FrameTiming.resetTime) >= frameTimingWarmupSeconds))
@@ -703,7 +1199,36 @@ void MainLoop()
             Platform.FrameTiming.lastLogTime = frameEndTime;
             Platform.FrameTiming.accumulatedMs = 0.0;
             Platform.FrameTiming.samples = 0;
-            LogInfo("[frame] Warmup complete after %.1f s; collecting timing samples", frameTimingWarmupSeconds);
+            if (Platform.FrameTiming.hitchTraceEnabled)
+            {
+                auto hitchEvent = Platform.FrameTiming.hitchQueue[0];
+                hitchEvent = {};
+                hitchEvent.kind = HitchTraceEventWarmupComplete;
+                hitchEvent.loopFrameId = loopFrameId;
+                hitchEvent.wallTimeSeconds = frameEndTime;
+                hitchEvent.frameIndex = frameIndex;
+                hitchEvent.imageIndex = imageIndex;
+                hitchEvent.frameMs = frameMs;
+                hitchEvent.frameWorkMs = frameWorkMs;
+                hitchEvent.frameOutsideWorkMs = frameOutsideWorkMs;
+                hitchEvent.pollEventsMs = pollEventsMs;
+                hitchEvent.inputUpdateMs = inputUpdateMs;
+                hitchEvent.prepMs = prepMs;
+                hitchEvent.acquireMs = acquireMs;
+                hitchEvent.acquireWaitFrameFenceMs = acquireTiming.waitFrameFenceMs;
+                hitchEvent.acquireCallMs = acquireTiming.acquireCallMs;
+                hitchEvent.acquireWaitImageFenceMs = acquireTiming.waitImageFenceMs;
+                hitchEvent.recordMs = recordMs;
+                hitchEvent.submitMs = submitMs;
+                hitchEvent.submitResetFenceMs = submitTiming.resetFenceMs;
+                hitchEvent.submitQueueMs = submitTiming.queueSubmitMs;
+                hitchEvent.presentMs = submitTiming.queuePresentMs;
+                hitchEvent.gpuValid = acquireTiming.gpuValid;
+                hitchEvent.gpuShadowMs = acquireTiming.gpuShadowMs;
+                hitchEvent.gpuForwardMs = acquireTiming.gpuForwardMs;
+                hitchEvent.gpuTotalMs = acquireTiming.gpuTotalMs;
+                queueHitchEvent(hitchEvent);
+            }
         }
 
         if (Platform.FrameTiming.warmupComplete && frameSampleValid)
@@ -729,6 +1254,65 @@ void MainLoop()
             Platform.FrameTiming.samples += 1;
         }
 
+        if (Platform.FrameTiming.hitchTraceEnabled)
+        {
+            u32 triggerMask = 0;
+            if (!frameSampleValid)
+            {
+                triggerMask |= HitchTriggerInvalidSample;
+            }
+            if (frameMs >= Platform.FrameTiming.hitchTraceFrameThresholdMs)
+            {
+                triggerMask |= HitchTriggerFrameCadence;
+            }
+            if (frameWorkMs >= Platform.FrameTiming.hitchTraceWorkThresholdMs)
+            {
+                triggerMask |= HitchTriggerFrameWork;
+            }
+            if (submitTiming.queueSubmitMs >= Platform.FrameTiming.hitchTraceQueueSubmitThresholdMs)
+            {
+                triggerMask |= HitchTriggerQueueSubmit;
+            }
+
+            bool logFrameEvent = Platform.FrameTiming.hitchTraceAllFrames || (triggerMask != 0u);
+            if (logFrameEvent)
+            {
+                auto hitchEvent = Platform.FrameTiming.hitchQueue[0];
+                hitchEvent = {};
+                hitchEvent.kind = HitchTraceEventFrame;
+                hitchEvent.loopFrameId = loopFrameId;
+                hitchEvent.wallTimeSeconds = frameEndTime;
+                hitchEvent.frameIndex = frameIndex;
+                hitchEvent.imageIndex = imageIndex;
+                hitchEvent.frameSamples = Platform.FrameTiming.samples;
+                hitchEvent.historySamples = Platform.FrameTiming.historyCount;
+                hitchEvent.acquireResult = acquireResult;
+                hitchEvent.submitResult = submitResult;
+                hitchEvent.frameSampleValid = frameSampleValid;
+                hitchEvent.gpuValid = acquireTiming.gpuValid;
+                hitchEvent.triggerMask = triggerMask;
+                hitchEvent.frameMs = frameMs;
+                hitchEvent.frameWorkMs = frameWorkMs;
+                hitchEvent.frameOutsideWorkMs = frameOutsideWorkMs;
+                hitchEvent.pollEventsMs = pollEventsMs;
+                hitchEvent.inputUpdateMs = inputUpdateMs;
+                hitchEvent.prepMs = prepMs;
+                hitchEvent.acquireMs = acquireMs;
+                hitchEvent.acquireWaitFrameFenceMs = acquireTiming.waitFrameFenceMs;
+                hitchEvent.acquireCallMs = acquireTiming.acquireCallMs;
+                hitchEvent.acquireWaitImageFenceMs = acquireTiming.waitImageFenceMs;
+                hitchEvent.recordMs = recordMs;
+                hitchEvent.submitMs = submitMs;
+                hitchEvent.submitResetFenceMs = submitTiming.resetFenceMs;
+                hitchEvent.submitQueueMs = submitTiming.queueSubmitMs;
+                hitchEvent.presentMs = submitTiming.queuePresentMs;
+                hitchEvent.gpuShadowMs = acquireTiming.gpuValid ? acquireTiming.gpuShadowMs : std::numeric_limits<float>::quiet_NaN();
+                hitchEvent.gpuForwardMs = acquireTiming.gpuValid ? acquireTiming.gpuForwardMs : std::numeric_limits<float>::quiet_NaN();
+                hitchEvent.gpuTotalMs = acquireTiming.gpuValid ? acquireTiming.gpuTotalMs : std::numeric_limits<float>::quiet_NaN();
+                queueHitchEvent(hitchEvent);
+            }
+        }
+
         if (frameLogEnabled && ((frameEndTime - Platform.FrameTiming.lastLogTime) >= frameTimingLogIntervalSeconds))
         {
             u32 frameSamples = Platform.FrameTiming.samples;
@@ -742,6 +1326,7 @@ void MainLoop()
                     {
                         u32 queueIndex = Platform.FrameTiming.logQueueTail;
                         auto &snapshot = Platform.FrameTiming.logQueue[queueIndex];
+                        snapshot.wallTimeSeconds = frameEndTime;
                         snapshot.frameSamples = frameSamples;
                         snapshot.historySamples = historySamples;
                         for (u32 index = 0; index < historySamples; ++index)
@@ -776,6 +1361,24 @@ void MainLoop()
             Platform.FrameTiming.lastLogTime = frameEndTime;
             Platform.FrameTiming.accumulatedMs = 0.0;
             Platform.FrameTiming.samples = 0;
+        }
+
+        if (frameCapSeconds > 0.0)
+        {
+            double frameElapsedSeconds = glfwGetTime() - frameStartTime;
+            double remainingSeconds = frameCapSeconds - frameElapsedSeconds;
+            if (remainingSeconds > 0.0)
+            {
+                constexpr double sleepGuardSeconds = 0.0005;
+                if (remainingSeconds > sleepGuardSeconds)
+                {
+                    std::this_thread::sleep_for(std::chrono::duration<double>(remainingSeconds - sleepGuardSeconds));
+                }
+                while ((glfwGetTime() - frameStartTime) < frameCapSeconds)
+                {
+                    std::this_thread::yield();
+                }
+            }
         }
     }
 }

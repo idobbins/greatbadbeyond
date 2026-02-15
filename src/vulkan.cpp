@@ -5245,7 +5245,7 @@ auto DrawFrameForward(u32 frameIndex, u32 imageIndex, const GradientParams &grad
    return endResult;
 }
 
-auto SubmitFrame(u32 frameIndex, u32 imageIndex) -> VkResult
+auto SubmitFrame(u32 frameIndex, u32 imageIndex, SubmitTiming &timing) -> VkResult
 {
    Assert(Vulkan.frameResourcesReady, "Frame resources must exist before submitting work");
    Assert(Vulkan.graphicsQueue != VK_NULL_HANDLE, "Graphics queue is not initialized");
@@ -5260,11 +5260,26 @@ auto SubmitFrame(u32 frameIndex, u32 imageIndex) -> VkResult
    VkSemaphore renderFinishedSemaphore = Vulkan.swapchainRenderFinishedSemaphores[imageIndex];
    Assert(renderFinishedSemaphore != VK_NULL_HANDLE, "Render-finished semaphore for swapchain image is not initialized");
 
+   timing = {};
+   const auto toMilliseconds = [](double seconds) -> float
+   {
+      float ms = static_cast<float>(seconds * 1000.0);
+      if (!std::isfinite(ms) || (ms < 0.0f))
+      {
+         return 0.0f;
+      }
+      return ms;
+   };
+   double totalStartTime = glfwGetTime();
+
    VkPipelineStageFlags waitStages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
    VkSemaphore waitSemaphores[] = {frame.imageAvailableSemaphore};
    VkSemaphore signalSemaphores[] = {renderFinishedSemaphore};
 
+   double resetStartTime = glfwGetTime();
    VkResult resetResult = vkResetFences(Vulkan.device, 1, &frame.inFlightFence);
+   double resetEndTime = glfwGetTime();
+   timing.resetFenceMs = toMilliseconds(resetEndTime - resetStartTime);
    Assert(resetResult == VK_SUCCESS, "Failed to reset in-flight fence");
 
    VkSubmitInfo submitInfo = {
@@ -5278,7 +5293,10 @@ auto SubmitFrame(u32 frameIndex, u32 imageIndex) -> VkResult
       .pSignalSemaphores = signalSemaphores,
    };
 
+   double submitStartTime = glfwGetTime();
    VkResult submitResult = vkQueueSubmit(Vulkan.graphicsQueue, 1, &submitInfo, frame.inFlightFence);
+   double submitEndTime = glfwGetTime();
+   timing.queueSubmitMs = toMilliseconds(submitEndTime - submitStartTime);
    Assert(submitResult == VK_SUCCESS, "Failed to submit command buffer");
 
    VkSwapchainKHR swapchainHandle = Vulkan.swapchain;
@@ -5292,7 +5310,11 @@ auto SubmitFrame(u32 frameIndex, u32 imageIndex) -> VkResult
       .pResults = nullptr,
    };
 
+   double presentStartTime = glfwGetTime();
    VkResult presentResult = vkQueuePresentKHR(Vulkan.presentQueue, &presentInfo);
+   double presentEndTime = glfwGetTime();
+   timing.queuePresentMs = toMilliseconds(presentEndTime - presentStartTime);
+   timing.totalMs = toMilliseconds(presentEndTime - totalStartTime);
 
    if ((presentResult == VK_ERROR_OUT_OF_DATE_KHR) || (presentResult == VK_SUBOPTIMAL_KHR))
    {
