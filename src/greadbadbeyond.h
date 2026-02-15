@@ -78,6 +78,14 @@ struct FrameResources
     VkSemaphore imageAvailableSemaphore;
 };
 
+struct AcquireTiming
+{
+    float waitFrameFenceMs;
+    float acquireCallMs;
+    float waitImageFenceMs;
+    float totalMs;
+};
+
 struct GradientParams
 {
     Vec2 resolution;
@@ -145,6 +153,7 @@ auto IsKeyPressed() -> bool;
 void PollEvents();
 void MainLoop();
 auto GetFrameDeltaSeconds() -> float;
+void ResetFrameTiming();
 auto RequiresDebug() -> bool;
 auto RequiresPortability() -> bool;
 
@@ -237,7 +246,7 @@ void RecreateSwapchain();
 // Frame lifecycle functions
 void CreateFrameResources();
 void DestroyFrameResources();
-auto AcquireNextImage(u32 &imageIndex, u32 &frameIndex) -> VkResult;
+auto AcquireNextImage(u32 &imageIndex, u32 &frameIndex, AcquireTiming &timing) -> VkResult;
 auto DrawFrameForward(u32 frameIndex, u32 imageIndex, const GradientParams &gradient) -> VkResult;
 auto SubmitFrame(u32 frameIndex, u32 imageIndex) -> VkResult;
 

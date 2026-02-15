@@ -7,6 +7,7 @@ auto main() -> int
     CreateCamera();
     CreateManifestBlob();
     CreateVulkan();
+    ResetFrameTiming();
 
     MainLoop();
 

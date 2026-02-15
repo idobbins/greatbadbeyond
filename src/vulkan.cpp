@@ -4730,11 +4730,22 @@ void DestroyFrameResources()
    Vulkan.currentFrame = 0;
 }
 
-auto AcquireNextImage(u32 &imageIndex, u32 &frameIndex) -> VkResult
+auto AcquireNextImage(u32 &imageIndex, u32 &frameIndex, AcquireTiming &timing) -> VkResult
 {
    Assert(Vulkan.swapchainReady, "Create the Vulkan swapchain before acquiring images");
    Assert(Vulkan.deviceReady, "Create the Vulkan device before acquiring images");
    Assert(Vulkan.frameResourcesReady, "Create frame resources before acquiring images");
+
+   timing = {};
+   const auto toMilliseconds = [](double seconds) -> float
+   {
+      float ms = static_cast<float>(seconds * 1000.0);
+      if (!std::isfinite(ms) || (ms < 0.0f))
+      {
+         return 0.0f;
+      }
+      return ms;
+   };
 
    frameIndex = Vulkan.currentFrame;
    Assert(frameIndex < FrameOverlap, "Frame index out of range");
@@ -4743,13 +4754,15 @@ auto AcquireNextImage(u32 &imageIndex, u32 &frameIndex) -> VkResult
    Assert(frame.inFlightFence != VK_NULL_HANDLE, "Frame fence is not initialized");
    Assert(frame.imageAvailableSemaphore != VK_NULL_HANDLE, "Frame image-available semaphore is not initialized");
 
+   double totalStartTime = glfwGetTime();
+   double waitFrameFenceStartTime = glfwGetTime();
    VkResult waitResult = vkWaitForFences(Vulkan.device, 1, &frame.inFlightFence, VK_TRUE, UINT64_MAX);
+   double waitFrameFenceEndTime = glfwGetTime();
+   timing.waitFrameFenceMs = toMilliseconds(waitFrameFenceEndTime - waitFrameFenceStartTime);
    Assert(waitResult == VK_SUCCESS, "Failed to wait for in-flight fence");
 
-   VkResult resetResult = vkResetFences(Vulkan.device, 1, &frame.inFlightFence);
-   Assert(resetResult == VK_SUCCESS, "Failed to reset in-flight fence");
-
    imageIndex = UINT32_MAX;
+   double acquireStartTime = glfwGetTime();
    VkResult acquireResult = vkAcquireNextImageKHR(
       Vulkan.device,
       Vulkan.swapchain,
@@ -4757,6 +4770,8 @@ auto AcquireNextImage(u32 &imageIndex, u32 &frameIndex) -> VkResult
       frame.imageAvailableSemaphore,
       VK_NULL_HANDLE,
       &imageIndex);
+   double acquireEndTime = glfwGetTime();
+   timing.acquireCallMs = toMilliseconds(acquireEndTime - acquireStartTime);
 
    if ((acquireResult != VK_SUCCESS) &&
        (acquireResult != VK_SUBOPTIMAL_KHR) &&
@@ -4771,12 +4786,20 @@ auto AcquireNextImage(u32 &imageIndex, u32 &frameIndex) -> VkResult
       VkFence &imageFence = Vulkan.swapchainImageFences[imageIndex];
       if (imageFence != VK_NULL_HANDLE)
       {
-         VkResult waitResult = vkWaitForFences(Vulkan.device, 1, &imageFence, VK_TRUE, UINT64_MAX);
-         Assert(waitResult == VK_SUCCESS, "Failed to wait for image fence");
+         if (imageFence != frame.inFlightFence)
+         {
+            double waitImageFenceStartTime = glfwGetTime();
+            VkResult waitResult = vkWaitForFences(Vulkan.device, 1, &imageFence, VK_TRUE, UINT64_MAX);
+            double waitImageFenceEndTime = glfwGetTime();
+            timing.waitImageFenceMs = toMilliseconds(waitImageFenceEndTime - waitImageFenceStartTime);
+            Assert(waitResult == VK_SUCCESS, "Failed to wait for image fence");
+         }
       }
       Vulkan.swapchainImageFences[imageIndex] = frame.inFlightFence;
    }
 
+   double totalEndTime = glfwGetTime();
+   timing.totalMs = toMilliseconds(totalEndTime - totalStartTime);
    return acquireResult;
 }
 
@@ -5127,6 +5150,9 @@ auto SubmitFrame(u32 frameIndex, u32 imageIndex) -> VkResult
    VkPipelineStageFlags waitStages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
    VkSemaphore waitSemaphores[] = {frame.imageAvailableSemaphore};
    VkSemaphore signalSemaphores[] = {renderFinishedSemaphore};
+
+   VkResult resetResult = vkResetFences(Vulkan.device, 1, &frame.inFlightFence);
+   Assert(resetResult == VK_SUCCESS, "Failed to reset in-flight fence");
 
    VkSubmitInfo submitInfo = {
       .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,

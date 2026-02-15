@@ -18,10 +18,11 @@ static constexpr std::size_t InstanceExtensionScratchBytes = 1024;
 static constexpr std::size_t InstanceLayerScratchBytes = 1024;
 
 static constexpr uint32_t swapchainImageCount = 3;
-static constexpr uint32_t FrameOverlap = 2;
+static constexpr uint32_t FrameOverlap = 3;
 static constexpr VkSampleCountFlagBits preferredMsaaSamples = VK_SAMPLE_COUNT_2_BIT;
 static constexpr uint32_t frameTimingHistoryCapacity = 1200;
 static constexpr double frameTimingLogIntervalSeconds = 1.0;
+static constexpr double frameTimingWarmupSeconds = 2.0;
 
 static constexpr int DefaultWindowWidth = 1280;
 static constexpr int DefaultWindowHeight = 720;
