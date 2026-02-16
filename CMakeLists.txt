@@ -38,57 +38,33 @@ set(SHADER_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/resources/shaders)
 set(SHADER_GENERATED_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated/shaders)
 set(SHADER_EMBED_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_spv.cmake)
 
-set(TRIANGLE_VERT_SOURCE ${SHADER_SOURCE_DIR}/triangle.vert)
-set(TRIANGLE_FRAG_SOURCE ${SHADER_SOURCE_DIR}/triangle.frag)
-set(TRIANGLE_VERT_SPV ${SHADER_GENERATED_DIR}/triangle.vert.spv)
-set(TRIANGLE_FRAG_SPV ${SHADER_GENERATED_DIR}/triangle.frag.spv)
-set(TRIANGLE_VERT_HEADER ${SHADER_GENERATED_DIR}/triangle_vert_spv.h)
-set(TRIANGLE_FRAG_HEADER ${SHADER_GENERATED_DIR}/triangle_frag_spv.h)
+set(TRIANGLE_COMP_SOURCE ${SHADER_SOURCE_DIR}/triangle.comp)
+set(TRIANGLE_COMP_SPV ${SHADER_GENERATED_DIR}/triangle.comp.spv)
+set(TRIANGLE_COMP_HEADER ${SHADER_GENERATED_DIR}/triangle_comp_spv.h)
 
 add_custom_command(
-    OUTPUT ${TRIANGLE_VERT_SPV}
+    OUTPUT ${TRIANGLE_COMP_SPV}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADER_GENERATED_DIR}
-    COMMAND ${Vulkan_GLSLC_EXECUTABLE} ${TRIANGLE_VERT_SOURCE} -o ${TRIANGLE_VERT_SPV}
-    DEPENDS ${TRIANGLE_VERT_SOURCE}
-    COMMENT "Compiling triangle.vert to SPIR-V"
+    COMMAND ${Vulkan_GLSLC_EXECUTABLE} ${TRIANGLE_COMP_SOURCE} -o ${TRIANGLE_COMP_SPV}
+    DEPENDS ${TRIANGLE_COMP_SOURCE}
+    COMMENT "Compiling triangle.comp to SPIR-V"
     VERBATIM
 )
 
 add_custom_command(
-    OUTPUT ${TRIANGLE_FRAG_SPV}
-    COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADER_GENERATED_DIR}
-    COMMAND ${Vulkan_GLSLC_EXECUTABLE} ${TRIANGLE_FRAG_SOURCE} -o ${TRIANGLE_FRAG_SPV}
-    DEPENDS ${TRIANGLE_FRAG_SOURCE}
-    COMMENT "Compiling triangle.frag to SPIR-V"
-    VERBATIM
-)
-
-add_custom_command(
-    OUTPUT ${TRIANGLE_VERT_HEADER}
+    OUTPUT ${TRIANGLE_COMP_HEADER}
     COMMAND ${CMAKE_COMMAND}
-        -DINPUT_FILE=${TRIANGLE_VERT_SPV}
-        -DOUTPUT_FILE=${TRIANGLE_VERT_HEADER}
-        -DSYMBOL_NAME=kTriangleVertSpv
+        -DINPUT_FILE=${TRIANGLE_COMP_SPV}
+        -DOUTPUT_FILE=${TRIANGLE_COMP_HEADER}
+        -DSYMBOL_NAME=kTriangleCompSpv
         -P ${SHADER_EMBED_SCRIPT}
-    DEPENDS ${TRIANGLE_VERT_SPV} ${SHADER_EMBED_SCRIPT}
-    COMMENT "Embedding triangle.vert.spv into C++ header"
-    VERBATIM
-)
-
-add_custom_command(
-    OUTPUT ${TRIANGLE_FRAG_HEADER}
-    COMMAND ${CMAKE_COMMAND}
-        -DINPUT_FILE=${TRIANGLE_FRAG_SPV}
-        -DOUTPUT_FILE=${TRIANGLE_FRAG_HEADER}
-        -DSYMBOL_NAME=kTriangleFragSpv
-        -P ${SHADER_EMBED_SCRIPT}
-    DEPENDS ${TRIANGLE_FRAG_SPV} ${SHADER_EMBED_SCRIPT}
-    COMMENT "Embedding triangle.frag.spv into C++ header"
+    DEPENDS ${TRIANGLE_COMP_SPV} ${SHADER_EMBED_SCRIPT}
+    COMMENT "Embedding triangle.comp.spv into C++ header"
     VERBATIM
 )
 
 add_custom_target(embedded_shaders
-    DEPENDS ${TRIANGLE_VERT_HEADER} ${TRIANGLE_FRAG_HEADER}
+    DEPENDS ${TRIANGLE_COMP_HEADER}
 )
 
 add_executable(${PROJECT_NAME}
