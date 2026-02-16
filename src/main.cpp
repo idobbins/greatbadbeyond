@@ -44,6 +44,16 @@ constexpr uint32_t HDR_GRID_DIM_Z = 14;
 constexpr uint32_t HDR_BRICK_COUNT = 15;
 constexpr uint32_t HDR_BRICK_TABLE_OFFSET_WORDS = 16;
 constexpr uint32_t HDR_BRICK_POOL_OFFSET_WORDS = 17;
+constexpr uint32_t HDR_CAM_FORWARD_X = 18;
+constexpr uint32_t HDR_CAM_FORWARD_Y = 19;
+constexpr uint32_t HDR_CAM_FORWARD_Z = 20;
+constexpr uint32_t HDR_CAM_RIGHT_X = 21;
+constexpr uint32_t HDR_CAM_RIGHT_Y = 22;
+constexpr uint32_t HDR_CAM_RIGHT_Z = 23;
+constexpr uint32_t HDR_CAM_UP_X = 24;
+constexpr uint32_t HDR_CAM_UP_Y = 25;
+constexpr uint32_t HDR_CAM_UP_Z = 26;
+constexpr uint32_t HDR_CAM_TAN_HALF_FOV_Y = 27;
 
 constexpr float CAMERA_MOVE_SPEED = 3.25f;
 constexpr float CAMERA_MOUSE_SENSITIVITY = 0.0024f;
@@ -71,6 +81,7 @@ static_assert(MAX_SWAPCHAIN_IMAGES >= MAX_FRAMES_IN_FLIGHT);
 static_assert(SCENE_BRICK_COUNT <= BRICK_POOL_CAPACITY);
 static_assert(SCENE_GRID_CELL_COUNT <= BRICK_TABLE_WORDS);
 static_assert(HDR_BRICK_POOL_OFFSET_WORDS < ARENA_HEADER_WORDS);
+static_assert(HDR_CAM_TAN_HALF_FOV_Y < ARENA_HEADER_WORDS);
 static_assert((ARENA_BRICK_POOL_BASE_WORD + BRICK_WORDS * BRICK_POOL_CAPACITY) <= SLOT_WORDS);
 static_assert((kTriangleCompSpv_size != 0));
 static_assert((kTriangleCompSpv_size % 4) == 0);
@@ -286,6 +297,21 @@ void UpdateFlightCamera()
 void WriteArenaHeaderData(uint32_t currentFrame)
 {
     const uint32_t base = currentFrame * SLOT_WORDS;
+    const float cosPitch = std::cos(cameraPitch);
+    const float sinPitch = std::sin(cameraPitch);
+    const float cosYaw = std::cos(cameraYaw);
+    const float sinYaw = std::sin(cameraYaw);
+    const float forwardX = cosPitch * cosYaw;
+    const float forwardY = sinPitch;
+    const float forwardZ = cosPitch * sinYaw;
+    const float rightX = -sinYaw;
+    const float rightY = 0.0f;
+    const float rightZ = cosYaw;
+    const float upX = -sinPitch * cosYaw;
+    const float upY = cosPitch;
+    const float upZ = -sinPitch * sinYaw;
+    const float tanHalfFovY = std::tan(CAMERA_FOV_Y * 0.5f);
+
     dataBufferWords[base + HDR_CAM_POS_X] = std::bit_cast<uint32_t>(cameraPosX);
     dataBufferWords[base + HDR_CAM_POS_Y] = std::bit_cast<uint32_t>(cameraPosY);
     dataBufferWords[base + HDR_CAM_POS_Z] = std::bit_cast<uint32_t>(cameraPosZ);
@@ -305,6 +331,16 @@ void WriteArenaHeaderData(uint32_t currentFrame)
     dataBufferWords[base + HDR_BRICK_COUNT] = SCENE_BRICK_COUNT;
     dataBufferWords[base + HDR_BRICK_TABLE_OFFSET_WORDS] = ARENA_BRICK_TABLE_BASE_WORD;
     dataBufferWords[base + HDR_BRICK_POOL_OFFSET_WORDS] = ARENA_BRICK_POOL_BASE_WORD;
+    dataBufferWords[base + HDR_CAM_FORWARD_X] = std::bit_cast<uint32_t>(forwardX);
+    dataBufferWords[base + HDR_CAM_FORWARD_Y] = std::bit_cast<uint32_t>(forwardY);
+    dataBufferWords[base + HDR_CAM_FORWARD_Z] = std::bit_cast<uint32_t>(forwardZ);
+    dataBufferWords[base + HDR_CAM_RIGHT_X] = std::bit_cast<uint32_t>(rightX);
+    dataBufferWords[base + HDR_CAM_RIGHT_Y] = std::bit_cast<uint32_t>(rightY);
+    dataBufferWords[base + HDR_CAM_RIGHT_Z] = std::bit_cast<uint32_t>(rightZ);
+    dataBufferWords[base + HDR_CAM_UP_X] = std::bit_cast<uint32_t>(upX);
+    dataBufferWords[base + HDR_CAM_UP_Y] = std::bit_cast<uint32_t>(upY);
+    dataBufferWords[base + HDR_CAM_UP_Z] = std::bit_cast<uint32_t>(upZ);
+    dataBufferWords[base + HDR_CAM_TAN_HALF_FOV_Y] = std::bit_cast<uint32_t>(tanHalfFovY);
 }
 
 void WriteBrickData(uint32_t currentFrame)
