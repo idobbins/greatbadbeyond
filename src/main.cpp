@@ -5,7 +5,6 @@
 #include <GLFW/glfw3.h>
 
 #include <array>
-#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -19,6 +18,12 @@ constexpr uint32_t MAX_INSTANCE_EXTENSIONS = 16;
 constexpr uint32_t MAX_DEVICE_EXTENSIONS = 4;
 constexpr uint32_t MAX_PHYSICAL_DEVICES = 8;
 constexpr uint32_t MAX_SWAPCHAIN_IMAGES = MAX_FRAMES_IN_FLIGHT;
+
+static_assert(MAX_FRAMES_IN_FLIGHT > 0, "MAX_FRAMES_IN_FLIGHT must be non-zero");
+static_assert(MAX_SWAPCHAIN_IMAGES == MAX_FRAMES_IN_FLIGHT, "MAX_SWAPCHAIN_IMAGES must match MAX_FRAMES_IN_FLIGHT");
+static_assert((kTriangleVertSpv_size != 0) && (kTriangleFragSpv_size != 0), "embedded shader headers are empty");
+static_assert((kTriangleVertSpv_size % 4) == 0, "vertex shader size must be 4-byte aligned");
+static_assert((kTriangleFragSpv_size % 4) == 0, "fragment shader size must be 4-byte aligned");
 
 #ifndef VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR
 #define VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR 0x00000001
@@ -45,6 +50,9 @@ constexpr const char **EXTRA_INSTANCE_EXTENSIONS = nullptr;
 constexpr uint32_t EXTRA_DEVICE_EXTENSION_COUNT = 0;
 constexpr const char **EXTRA_DEVICE_EXTENSIONS = nullptr;
 #endif
+
+static_assert(EXTRA_INSTANCE_EXTENSION_COUNT <= MAX_INSTANCE_EXTENSIONS, "MAX_INSTANCE_EXTENSIONS too small for platform extras");
+static_assert((1 + EXTRA_DEVICE_EXTENSION_COUNT) <= MAX_DEVICE_EXTENSIONS, "MAX_DEVICE_EXTENSIONS too small");
 
 GLFWwindow *window = nullptr;
 
@@ -82,21 +90,6 @@ inline void Assert(bool condition, std::string_view message)
                     std::fprintf(stderr, "Runtime assertion failed: %.*s\n", static_cast<int>(message.size()), message.data()),
                     std::fflush(stderr),
                     std::exit(EXIT_FAILURE));
-}
-
-auto CreateShaderModule(const std::uint8_t *code, std::size_t size) -> VkShaderModule
-{
-    Assert((size != 0) && ((size % 4) == 0), "invalid embedded shader data");
-
-    VkShaderModuleCreateInfo createInfo{
-        .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-        .codeSize = size,
-        .pCode = reinterpret_cast<const uint32_t *>(code),
-    };
-
-    VkShaderModule shaderModule = VK_NULL_HANDLE;
-    Assert(vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule) == VK_SUCCESS, "vkCreateShaderModule");
-    return shaderModule;
 }
 
 void RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex)
@@ -189,9 +182,6 @@ void DrawFrame(uint32_t currentFrame)
 
 auto main() -> int
 {
-    Assert((kTriangleVertSpv_size != 0) && (kTriangleFragSpv_size != 0), "embedded shader headers are empty");
-    Assert((kTriangleVertSpv_size % 4) == 0, "vertex shader size must be 4-byte aligned");
-    Assert((kTriangleFragSpv_size % 4) == 0, "fragment shader size must be 4-byte aligned");
     Assert(glfwInit() != GLFW_FALSE, "failed to initialize GLFW");
 
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
@@ -280,8 +270,6 @@ auto main() -> int
     }
 
     {
-        Assert((1 + EXTRA_DEVICE_EXTENSION_COUNT) <= MAX_DEVICE_EXTENSIONS, "MAX_DEVICE_EXTENSIONS too small");
-
         std::array<const char *, MAX_DEVICE_EXTENSIONS> deviceExtensions{};
         uint32_t deviceExtensionCount = 0;
         deviceExtensions[deviceExtensionCount++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
@@ -420,8 +408,21 @@ auto main() -> int
 
         Assert((vkCreateRenderPass(device, &renderPassInfo, nullptr, &renderPass)) == VK_SUCCESS, "vkCreateRenderPass");
 
-        VkShaderModule vertModule = CreateShaderModule(kTriangleVertSpv, kTriangleVertSpv_size);
-        VkShaderModule fragModule = CreateShaderModule(kTriangleFragSpv, kTriangleFragSpv_size);
+        VkShaderModuleCreateInfo vertModuleInfo{
+            .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+            .codeSize = kTriangleVertSpv_size,
+            .pCode = reinterpret_cast<const uint32_t *>(kTriangleVertSpv),
+        };
+        VkShaderModule vertModule = VK_NULL_HANDLE;
+        Assert(vkCreateShaderModule(device, &vertModuleInfo, nullptr, &vertModule) == VK_SUCCESS, "vkCreateShaderModule(vert)");
+
+        VkShaderModuleCreateInfo fragModuleInfo{
+            .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+            .codeSize = kTriangleFragSpv_size,
+            .pCode = reinterpret_cast<const uint32_t *>(kTriangleFragSpv),
+        };
+        VkShaderModule fragModule = VK_NULL_HANDLE;
+        Assert(vkCreateShaderModule(device, &fragModuleInfo, nullptr, &fragModule) == VK_SUCCESS, "vkCreateShaderModule(frag)");
 
         VkPipelineShaderStageCreateInfo shaderStages[2] = {
             {
