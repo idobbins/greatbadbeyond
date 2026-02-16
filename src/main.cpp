@@ -46,6 +46,9 @@ constexpr float CAMERA_MOVE_SPEED = 3.25f;
 constexpr float CAMERA_MOUSE_SENSITIVITY = 0.0024f;
 constexpr float CAMERA_FOV_Y = 1.0471976f;
 constexpr float CAMERA_SPEED_BOOST_MULTIPLIER = 3.0f;
+constexpr double CAMERA_FIXED_STEP_SECONDS = 1.0 / 120.0;
+constexpr double CAMERA_MAX_FRAME_DELTA_SECONDS = 0.05;
+constexpr uint32_t CAMERA_MAX_FIXED_STEPS = 8;
 constexpr float TEST_BRICK_MIN_X = -1.0f;
 constexpr float TEST_BRICK_MIN_Y = -1.0f;
 constexpr float TEST_BRICK_MIN_Z = -1.0f;
@@ -134,6 +137,9 @@ double lastMouseY = 0.0;
 bool mouseInitialized = false;
 bool cameraTimeInitialized = false;
 double lastCameraSampleTime = 0.0;
+double cameraFixedAccumulatorSeconds = 0.0;
+double accumulatedMouseDeltaX = 0.0;
+double accumulatedMouseDeltaY = 0.0;
 uint32_t frameCounter = 0;
 
 uint32_t FindMemoryTypeIndex(uint32_t typeBits, VkMemoryPropertyFlags requiredFlags)
@@ -168,11 +174,10 @@ void UpdateFlightCamera()
     {
         deltaTimeSeconds = 0.0;
     }
-    if (deltaTimeSeconds > 0.05)
+    if (deltaTimeSeconds > CAMERA_MAX_FRAME_DELTA_SECONDS)
     {
-        deltaTimeSeconds = 0.05;
+        deltaTimeSeconds = CAMERA_MAX_FRAME_DELTA_SECONDS;
     }
-    const float deltaTime = static_cast<float>(deltaTimeSeconds);
 
     double mouseX = 0.0;
     double mouseY = 0.0;
@@ -190,66 +195,105 @@ void UpdateFlightCamera()
     lastMouseX = mouseX;
     lastMouseY = mouseY;
 
-    cameraYaw += static_cast<float>(mouseDeltaX) * CAMERA_MOUSE_SENSITIVITY;
-    cameraPitch -= static_cast<float>(mouseDeltaY) * CAMERA_MOUSE_SENSITIVITY;
+    accumulatedMouseDeltaX += mouseDeltaX;
+    accumulatedMouseDeltaY += mouseDeltaY;
+
+    cameraFixedAccumulatorSeconds += deltaTimeSeconds;
+
+    uint32_t stepsToRun = static_cast<uint32_t>(cameraFixedAccumulatorSeconds / CAMERA_FIXED_STEP_SECONDS);
+    if (stepsToRun == 0)
+    {
+        return;
+    }
+    if (stepsToRun > CAMERA_MAX_FIXED_STEPS)
+    {
+        stepsToRun = CAMERA_MAX_FIXED_STEPS;
+    }
+
+    const float mouseStepX = static_cast<float>(accumulatedMouseDeltaX / static_cast<double>(stepsToRun));
+    const float mouseStepY = static_cast<float>(accumulatedMouseDeltaY / static_cast<double>(stepsToRun));
+    accumulatedMouseDeltaX = 0.0;
+    accumulatedMouseDeltaY = 0.0;
+
+    const bool moveForward = glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS;
+    const bool moveBack = glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS;
+    const bool moveRight = glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS;
+    const bool moveLeft = glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS;
+    const bool moveUp = glfwGetKey(window, GLFW_KEY_E) == GLFW_PRESS;
+    const bool moveDown = glfwGetKey(window, GLFW_KEY_Q) == GLFW_PRESS;
+    const bool speedBoostHeld = glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS;
+
+    const float speedBoost = speedBoostHeld ? CAMERA_SPEED_BOOST_MULTIPLIER : 1.0f;
+    const float step = CAMERA_MOVE_SPEED * speedBoost * static_cast<float>(CAMERA_FIXED_STEP_SECONDS);
 
     constexpr float maxPitch = 1.5533430f;
-    if (cameraPitch > maxPitch)
+
+    for (uint32_t i = 0; i < stepsToRun; i++)
     {
-        cameraPitch = maxPitch;
-    }
-    if (cameraPitch < -maxPitch)
-    {
-        cameraPitch = -maxPitch;
+        cameraYaw += mouseStepX * CAMERA_MOUSE_SENSITIVITY;
+        cameraPitch -= mouseStepY * CAMERA_MOUSE_SENSITIVITY;
+
+        if (cameraPitch > maxPitch)
+        {
+            cameraPitch = maxPitch;
+        }
+        if (cameraPitch < -maxPitch)
+        {
+            cameraPitch = -maxPitch;
+        }
+
+        const float cosPitch = std::cos(cameraPitch);
+        const float sinPitch = std::sin(cameraPitch);
+        const float cosYaw = std::cos(cameraYaw);
+        const float sinYaw = std::sin(cameraYaw);
+
+        const float forwardX = cosPitch * cosYaw;
+        const float forwardY = sinPitch;
+        const float forwardZ = cosPitch * sinYaw;
+
+        const float rightX = -sinYaw;
+        const float rightY = 0.0f;
+        const float rightZ = cosYaw;
+
+        if (moveForward)
+        {
+            cameraPosX += forwardX * step;
+            cameraPosY += forwardY * step;
+            cameraPosZ += forwardZ * step;
+        }
+        if (moveBack)
+        {
+            cameraPosX -= forwardX * step;
+            cameraPosY -= forwardY * step;
+            cameraPosZ -= forwardZ * step;
+        }
+        if (moveRight)
+        {
+            cameraPosX += rightX * step;
+            cameraPosY += rightY * step;
+            cameraPosZ += rightZ * step;
+        }
+        if (moveLeft)
+        {
+            cameraPosX -= rightX * step;
+            cameraPosY -= rightY * step;
+            cameraPosZ -= rightZ * step;
+        }
+        if (moveUp)
+        {
+            cameraPosY += step;
+        }
+        if (moveDown)
+        {
+            cameraPosY -= step;
+        }
     }
 
-    const float cosPitch = std::cos(cameraPitch);
-    const float sinPitch = std::sin(cameraPitch);
-    const float cosYaw = std::cos(cameraYaw);
-    const float sinYaw = std::sin(cameraYaw);
-
-    const float forwardX = cosPitch * cosYaw;
-    const float forwardY = sinPitch;
-    const float forwardZ = cosPitch * sinYaw;
-
-    const float rightX = -sinYaw;
-    const float rightY = 0.0f;
-    const float rightZ = cosYaw;
-
-    const float speedBoost = glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ? CAMERA_SPEED_BOOST_MULTIPLIER : 1.0f;
-    const float step = CAMERA_MOVE_SPEED * speedBoost * deltaTime;
-
-    if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
+    cameraFixedAccumulatorSeconds -= static_cast<double>(stepsToRun) * CAMERA_FIXED_STEP_SECONDS;
+    const double maxAccumulator = CAMERA_FIXED_STEP_SECONDS * static_cast<double>(CAMERA_MAX_FIXED_STEPS);
+    if (cameraFixedAccumulatorSeconds > maxAccumulator)
     {
-        cameraPosX += forwardX * step;
-        cameraPosY += forwardY * step;
-        cameraPosZ += forwardZ * step;
-    }
-    if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS)
-    {
-        cameraPosX -= forwardX * step;
-        cameraPosY -= forwardY * step;
-        cameraPosZ -= forwardZ * step;
-    }
-    if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)
-    {
-        cameraPosX += rightX * step;
-        cameraPosY += rightY * step;
-        cameraPosZ += rightZ * step;
-    }
-    if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS)
-    {
-        cameraPosX -= rightX * step;
-        cameraPosY -= rightY * step;
-        cameraPosZ -= rightZ * step;
-    }
-    if (glfwGetKey(window, GLFW_KEY_E) == GLFW_PRESS)
-    {
-        cameraPosY += step;
-    }
-    if (glfwGetKey(window, GLFW_KEY_Q) == GLFW_PRESS)
-    {
-        cameraPosY -= step;
+        cameraFixedAccumulatorSeconds = maxAccumulator;
     }
 }
 
