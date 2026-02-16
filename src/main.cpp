@@ -18,9 +18,18 @@ constexpr uint32_t MAX_DEVICE_EXTENSIONS = 4;
 constexpr uint32_t MAX_PHYSICAL_DEVICES = 8;
 constexpr uint32_t MAX_SWAPCHAIN_IMAGES = 3;
 constexpr uint32_t ARENA_HEADER_WORDS = 32;
-constexpr uint32_t BRICK_TABLE_WORDS = 16;
 constexpr uint32_t BRICK_WORDS = 16;
-constexpr uint32_t BRICK_POOL_CAPACITY = 4;
+constexpr float TEST_BRICK_VOXEL_SIZE = 0.5f;
+constexpr float BRICK_WORLD_SIZE = TEST_BRICK_VOXEL_SIZE * 4.0f;
+constexpr float SCENE_GRID_MIN_X = -64.0f;
+constexpr float SCENE_GRID_MIN_Y = -12.0f;
+constexpr float SCENE_GRID_MIN_Z = -64.0f;
+constexpr uint32_t SCENE_GRID_DIM_X = 64;
+constexpr uint32_t SCENE_GRID_DIM_Y = 12;
+constexpr uint32_t SCENE_GRID_DIM_Z = 64;
+constexpr uint32_t SCENE_GRID_CELL_COUNT = SCENE_GRID_DIM_X * SCENE_GRID_DIM_Y * SCENE_GRID_DIM_Z;
+constexpr uint32_t BRICK_TABLE_WORDS = SCENE_GRID_CELL_COUNT;
+constexpr uint32_t BRICK_POOL_CAPACITY = SCENE_GRID_CELL_COUNT;
 constexpr uint32_t ARENA_BRICK_TABLE_BASE_WORD = ARENA_HEADER_WORDS;
 constexpr uint32_t ARENA_BRICK_POOL_BASE_WORD = ARENA_BRICK_TABLE_BASE_WORD + BRICK_TABLE_WORDS;
 constexpr uint32_t SLOT_WORDS = ARENA_HEADER_WORDS + BRICK_TABLE_WORDS + BRICK_WORDS * BRICK_POOL_CAPACITY;
@@ -54,6 +63,7 @@ constexpr uint32_t HDR_CAM_UP_X = 24;
 constexpr uint32_t HDR_CAM_UP_Y = 25;
 constexpr uint32_t HDR_CAM_UP_Z = 26;
 constexpr uint32_t HDR_CAM_TAN_HALF_FOV_Y = 27;
+constexpr uint32_t HDR_BRICK_VOXEL_SIZE = 28;
 
 constexpr float CAMERA_MOVE_SPEED = 3.25f;
 constexpr float CAMERA_MOUSE_SENSITIVITY = 0.0024f;
@@ -62,26 +72,20 @@ constexpr float CAMERA_SPEED_BOOST_MULTIPLIER = 3.0f;
 constexpr double CAMERA_FIXED_STEP_SECONDS = 1.0 / 120.0;
 constexpr double CAMERA_MAX_FRAME_DELTA_SECONDS = 0.05;
 constexpr uint32_t CAMERA_MAX_FIXED_STEPS = 8;
-constexpr float TEST_BRICK_VOXEL_SIZE = 0.5f;
-constexpr float BRICK_WORLD_SIZE = TEST_BRICK_VOXEL_SIZE * 4.0f;
-constexpr float SCENE_GRID_MIN_X = -3.0f;
-constexpr float SCENE_GRID_MIN_Y = -1.0f;
-constexpr float SCENE_GRID_MIN_Z = -3.0f;
-constexpr uint32_t SCENE_GRID_DIM_X = 3;
-constexpr uint32_t SCENE_GRID_DIM_Y = 1;
-constexpr uint32_t SCENE_GRID_DIM_Z = 3;
-constexpr uint32_t SCENE_GRID_CELL_COUNT = SCENE_GRID_DIM_X * SCENE_GRID_DIM_Y * SCENE_GRID_DIM_Z;
-constexpr uint32_t SCENE_BRICK_COUNT = 4;
+constexpr float TERRAIN_NOISE_SCALE = 0.045f;
+constexpr float TERRAIN_BASE_HEIGHT = -2.0f;
+constexpr float TERRAIN_HEIGHT_RANGE = 10.0f;
+constexpr uint32_t TERRAIN_HASH_SEED_X = 0x1f123bb5u;
+constexpr uint32_t TERRAIN_HASH_SEED_Z = 0x9e3779b9u;
 
 constexpr uint32_t DATA_WORD_COUNT = SLOT_WORDS * MAX_FRAMES_IN_FLIGHT;
 constexpr VkDeviceSize DATA_BUFFER_SIZE = static_cast<VkDeviceSize>(DATA_WORD_COUNT) * sizeof(uint32_t);
 
 static_assert(MAX_FRAMES_IN_FLIGHT == 3);
 static_assert(MAX_SWAPCHAIN_IMAGES >= MAX_FRAMES_IN_FLIGHT);
-static_assert(SCENE_BRICK_COUNT <= BRICK_POOL_CAPACITY);
 static_assert(SCENE_GRID_CELL_COUNT <= BRICK_TABLE_WORDS);
 static_assert(HDR_BRICK_POOL_OFFSET_WORDS < ARENA_HEADER_WORDS);
-static_assert(HDR_CAM_TAN_HALF_FOV_Y < ARENA_HEADER_WORDS);
+static_assert(HDR_BRICK_VOXEL_SIZE < ARENA_HEADER_WORDS);
 static_assert((ARENA_BRICK_POOL_BASE_WORD + BRICK_WORDS * BRICK_POOL_CAPACITY) <= SLOT_WORDS);
 static_assert((kTriangleCompSpv_size != 0));
 static_assert((kTriangleCompSpv_size % 4) == 0);
@@ -143,8 +147,8 @@ std::array<VkSemaphore, MAX_FRAMES_IN_FLIGHT> imageAvailableSemaphores{};
 std::array<VkSemaphore, MAX_FRAMES_IN_FLIGHT> renderFinishedSemaphores{};
 
 float cameraPosX = 0.0f;
-float cameraPosY = 0.0f;
-float cameraPosZ = 2.5f;
+float cameraPosY = 9.0f;
+float cameraPosZ = 0.0f;
 float cameraYaw = -1.5707963f;
 float cameraPitch = 0.0f;
 double lastMouseX = 0.0;
@@ -156,6 +160,7 @@ double cameraFixedAccumulatorSeconds = 0.0;
 double accumulatedMouseDeltaX = 0.0;
 double accumulatedMouseDeltaY = 0.0;
 uint32_t frameCounter = 0;
+uint32_t sceneBrickCount = 0;
 
 uint32_t FindMemoryTypeIndex(uint32_t typeBits, VkMemoryPropertyFlags requiredFlags)
 {
@@ -180,26 +185,101 @@ constexpr uint32_t GridLinearIndex(uint32_t x, uint32_t y, uint32_t z)
     return x + y * SCENE_GRID_DIM_X + z * SCENE_GRID_DIM_X * SCENE_GRID_DIM_Y;
 }
 
-uint64_t BuildBrickMask(uint32_t variant)
+// 2-bit Morton packing for x/y/z in [0,3], yielding bit index [0,63].
+constexpr uint32_t BrickBitIndex(uint32_t x, uint32_t y, uint32_t z)
+{
+    const uint32_t lowBits = (x & 1u) | ((y & 1u) << 1u) | ((z & 1u) << 2u);
+    const uint32_t highBits = ((x & 2u) << 2u) | ((y & 2u) << 3u) | ((z & 2u) << 4u);
+    return lowBits | highBits;
+}
+
+uint32_t HashMix32(uint32_t x)
+{
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
+}
+
+uint32_t Hash2D(uint32_t x, uint32_t z)
+{
+    return HashMix32((x * TERRAIN_HASH_SEED_X) ^ (z * TERRAIN_HASH_SEED_Z) ^ 0x85ebca6bu);
+}
+
+float HashToUnit(uint32_t h)
+{
+    constexpr float inv = 1.0f / 16777215.0f;
+    return static_cast<float>(h & 0x00FFFFFFu) * inv;
+}
+
+float Smooth01(float t)
+{
+    return t * t * (3.0f - 2.0f * t);
+}
+
+float Lerp(float a, float b, float t)
+{
+    return a + (b - a) * t;
+}
+
+float ValueNoise2D(float x, float z)
+{
+    const float floorX = std::floor(x);
+    const float floorZ = std::floor(z);
+    const uint32_t ix0 = static_cast<uint32_t>(static_cast<int32_t>(floorX) + 32768);
+    const uint32_t iz0 = static_cast<uint32_t>(static_cast<int32_t>(floorZ) + 32768);
+    const uint32_t ix1 = ix0 + 1u;
+    const uint32_t iz1 = iz0 + 1u;
+    const float fx = x - floorX;
+    const float fz = z - floorZ;
+    const float u = Smooth01(fx);
+    const float v = Smooth01(fz);
+    const float n00 = HashToUnit(Hash2D(ix0, iz0));
+    const float n10 = HashToUnit(Hash2D(ix1, iz0));
+    const float n01 = HashToUnit(Hash2D(ix0, iz1));
+    const float n11 = HashToUnit(Hash2D(ix1, iz1));
+    return Lerp(Lerp(n00, n10, u), Lerp(n01, n11, u), v);
+}
+
+float TerrainHeight(float wx, float wz)
+{
+    const float nx = wx * TERRAIN_NOISE_SCALE + 23.0f;
+    const float nz = wz * TERRAIN_NOISE_SCALE + 41.0f;
+    float amp = 1.0f;
+    float freq = 1.0f;
+    float h = 0.0f;
+    float norm = 0.0f;
+    for (uint32_t octave = 0; octave < 4u; octave++)
+    {
+        h += ValueNoise2D(nx * freq, nz * freq) * amp;
+        norm += amp;
+        amp *= 0.5f;
+        freq *= 2.0f;
+    }
+    h /= norm;
+    const float ridge = 1.0f - std::fabs(h * 2.0f - 1.0f);
+    const float shaped = h * 0.72f + ridge * 0.28f;
+    return TERRAIN_BASE_HEIGHT + shaped * TERRAIN_HEIGHT_RANGE;
+}
+
+uint64_t BuildTerrainBrickMask(float brickMinX, float brickMinY, float brickMinZ)
 {
     uint64_t occupancy = 0;
-    for (uint32_t z = 0; z < 4; z++)
+    for (uint32_t z = 0; z < 4u; z++)
     {
-        for (uint32_t y = 0; y < 4; y++)
+        for (uint32_t y = 0; y < 4u; y++)
         {
-            for (uint32_t x = 0; x < 4; x++)
+            for (uint32_t x = 0; x < 4u; x++)
             {
-                const float fx = static_cast<float>(x) - 1.5f;
-                const float fy = static_cast<float>(y) - 1.5f;
-                const float fz = static_cast<float>(z) - 1.5f;
-                const bool sphereFill = (fx * fx + fy * fy + fz * fz) <= 2.6f;
-                const bool cutX = ((variant & 1u) != 0u) && (x == 0u);
-                const bool cutZ = ((variant & 2u) != 0u) && (z == 3u);
-                const bool cutDiag = (variant == 3u) && (y == 1u) && (x >= 1u) && (z >= 1u);
-                const bool filled = sphereFill && !(cutX || cutZ || cutDiag);
-                const uint32_t bitIndex = x + y * 4 + z * 16;
-                const uint64_t fillMask = filled ? (1ull << bitIndex) : 0ull;
-                occupancy |= fillMask;
+                const float wx = brickMinX + (static_cast<float>(x) + 0.5f) * TEST_BRICK_VOXEL_SIZE;
+                const float wy = brickMinY + (static_cast<float>(y) + 0.5f) * TEST_BRICK_VOXEL_SIZE;
+                const float wz = brickMinZ + (static_cast<float>(z) + 0.5f) * TEST_BRICK_VOXEL_SIZE;
+                const float height = TerrainHeight(wx, wz);
+                const bool filled = wy <= height;
+                const uint32_t bitIndex = BrickBitIndex(x, y, z);
+                occupancy |= filled ? (1ull << bitIndex) : 0ull;
             }
         }
     }
@@ -328,7 +408,7 @@ void WriteArenaHeaderData(uint32_t currentFrame)
     dataBufferWords[base + HDR_GRID_DIM_X] = SCENE_GRID_DIM_X;
     dataBufferWords[base + HDR_GRID_DIM_Y] = SCENE_GRID_DIM_Y;
     dataBufferWords[base + HDR_GRID_DIM_Z] = SCENE_GRID_DIM_Z;
-    dataBufferWords[base + HDR_BRICK_COUNT] = SCENE_BRICK_COUNT;
+    dataBufferWords[base + HDR_BRICK_COUNT] = sceneBrickCount;
     dataBufferWords[base + HDR_BRICK_TABLE_OFFSET_WORDS] = ARENA_BRICK_TABLE_BASE_WORD;
     dataBufferWords[base + HDR_BRICK_POOL_OFFSET_WORDS] = ARENA_BRICK_POOL_BASE_WORD;
     dataBufferWords[base + HDR_CAM_FORWARD_X] = std::bit_cast<uint32_t>(forwardX);
@@ -341,14 +421,11 @@ void WriteArenaHeaderData(uint32_t currentFrame)
     dataBufferWords[base + HDR_CAM_UP_Y] = std::bit_cast<uint32_t>(upY);
     dataBufferWords[base + HDR_CAM_UP_Z] = std::bit_cast<uint32_t>(upZ);
     dataBufferWords[base + HDR_CAM_TAN_HALF_FOV_Y] = std::bit_cast<uint32_t>(tanHalfFovY);
+    dataBufferWords[base + HDR_BRICK_VOXEL_SIZE] = std::bit_cast<uint32_t>(TEST_BRICK_VOXEL_SIZE);
 }
 
 void WriteBrickData(uint32_t currentFrame)
 {
-    constexpr std::array<uint32_t, SCENE_BRICK_COUNT> brickGridX{1, 0, 2, 1};
-    constexpr std::array<uint32_t, SCENE_BRICK_COUNT> brickGridY{0, 0, 0, 0};
-    constexpr std::array<uint32_t, SCENE_BRICK_COUNT> brickGridZ{1, 1, 1, 2};
-
     const uint32_t frameBase = currentFrame * SLOT_WORDS;
     const uint32_t tableBase = frameBase + ARENA_BRICK_TABLE_BASE_WORD;
     const uint32_t poolBase = frameBase + ARENA_BRICK_POOL_BASE_WORD;
@@ -358,28 +435,39 @@ void WriteBrickData(uint32_t currentFrame)
         dataBufferWords[tableBase + i] = EMPTY_BRICK_SLOT;
     }
 
-    for (uint32_t brickIndex = 0; brickIndex < SCENE_BRICK_COUNT; brickIndex++)
+    uint32_t brickIndex = 0;
+    for (uint32_t gz = 0; gz < SCENE_GRID_DIM_Z; gz++)
     {
-        const uint32_t gx = brickGridX[brickIndex];
-        const uint32_t gy = brickGridY[brickIndex];
-        const uint32_t gz = brickGridZ[brickIndex];
-        const uint32_t gridIndex = GridLinearIndex(gx, gy, gz);
+        for (uint32_t gy = 0; gy < SCENE_GRID_DIM_Y; gy++)
+        {
+            for (uint32_t gx = 0; gx < SCENE_GRID_DIM_X; gx++)
+            {
+                const uint32_t gridIndex = GridLinearIndex(gx, gy, gz);
+                const float brickMinX = SCENE_GRID_MIN_X + static_cast<float>(gx) * BRICK_WORLD_SIZE;
+                const float brickMinY = SCENE_GRID_MIN_Y + static_cast<float>(gy) * BRICK_WORLD_SIZE;
+                const float brickMinZ = SCENE_GRID_MIN_Z + static_cast<float>(gz) * BRICK_WORLD_SIZE;
+                const uint64_t occupancy = BuildTerrainBrickMask(brickMinX, brickMinY, brickMinZ);
 
-        dataBufferWords[tableBase + gridIndex] = brickIndex;
+                if (occupancy == 0ull)
+                {
+                    continue;
+                }
 
-        const uint32_t brickBase = poolBase + brickIndex * BRICK_WORDS;
-        const uint64_t occupancy = BuildBrickMask(brickIndex);
-        const float brickMinX = SCENE_GRID_MIN_X + static_cast<float>(gx) * BRICK_WORLD_SIZE;
-        const float brickMinY = SCENE_GRID_MIN_Y + static_cast<float>(gy) * BRICK_WORLD_SIZE;
-        const float brickMinZ = SCENE_GRID_MIN_Z + static_cast<float>(gz) * BRICK_WORLD_SIZE;
+                dataBufferWords[tableBase + gridIndex] = brickIndex;
 
-        dataBufferWords[brickBase + 0] = static_cast<uint32_t>(occupancy & 0xFFFFFFFFull);
-        dataBufferWords[brickBase + 1] = static_cast<uint32_t>(occupancy >> 32);
-        dataBufferWords[brickBase + 2] = std::bit_cast<uint32_t>(brickMinX);
-        dataBufferWords[brickBase + 3] = std::bit_cast<uint32_t>(brickMinY);
-        dataBufferWords[brickBase + 4] = std::bit_cast<uint32_t>(brickMinZ);
-        dataBufferWords[brickBase + 5] = std::bit_cast<uint32_t>(TEST_BRICK_VOXEL_SIZE);
+                const uint32_t brickBase = poolBase + brickIndex * BRICK_WORDS;
+                dataBufferWords[brickBase + 0] = static_cast<uint32_t>(occupancy & 0xFFFFFFFFull);
+                dataBufferWords[brickBase + 1] = static_cast<uint32_t>(occupancy >> 32);
+                dataBufferWords[brickBase + 2] = std::bit_cast<uint32_t>(brickMinX);
+                dataBufferWords[brickBase + 3] = std::bit_cast<uint32_t>(brickMinY);
+                dataBufferWords[brickBase + 4] = std::bit_cast<uint32_t>(brickMinZ);
+                dataBufferWords[brickBase + 5] = std::bit_cast<uint32_t>(TEST_BRICK_VOXEL_SIZE);
+                brickIndex++;
+            }
+        }
     }
+
+    sceneBrickCount = brickIndex;
 }
 
 void RecordCommandBuffer(VkCommandBuffer commandBuffer, VkDescriptorSet descriptorSet, uint32_t imageIndex)
@@ -709,8 +797,8 @@ auto main() -> int
 
         for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
         {
-            WriteArenaHeaderData(i);
             WriteBrickData(i);
+            WriteArenaHeaderData(i);
         }
     }
 
