@@ -89,6 +89,9 @@ The primary goal is deterministic, explicit behavior with minimal runtime variab
 - MSVC designated initializers must follow declaration order for Vulkan structs.
 - Keep initializer ordering compliant with strict compilers.
 - Keep shader embedding and build wiring simple and single-purpose.
+- Use standard C++ syntax only (portable across MSVC/Clang/GCC).
+- Do not use GNU/C compound literal patterns (for example `&{...}`) in C++.
+- For Vulkan APIs requiring `const T*`, use named local stack structs and pass their addresses.
 - MoltenVK support is required.
 - Keep `VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR` on Apple.
 - Keep `VK_KHR_portability_enumeration` instance extension on Apple.
