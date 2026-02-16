@@ -4,6 +4,7 @@
 #include <GLFW/glfw3.h>
 
 #include <array>
+#include <bit>
 #include <cstdint>
 #include <cstring>
 
@@ -21,24 +22,18 @@ static_assert(MAX_SWAPCHAIN_IMAGES >= MAX_FRAMES_IN_FLIGHT);
 static_assert((kTriangleCompSpv_size != 0));
 static_assert((kTriangleCompSpv_size % 4) == 0);
 
-#ifndef VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR
-#define VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR 0x00000001
-#endif
-#ifndef VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME
-#define VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME "VK_KHR_portability_enumeration"
-#endif
-#ifndef VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME
-#define VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME "VK_KHR_portability_subset"
-#endif
+constexpr VkInstanceCreateFlags PORTABILITY_ENUMERATE_FLAG = 0x00000001;
+constexpr const char *PORTABILITY_ENUMERATION_EXTENSION = "VK_KHR_portability_enumeration";
+constexpr const char *PORTABILITY_SUBSET_EXTENSION = "VK_KHR_portability_subset";
 
 #if defined(__APPLE__)
 constexpr uint32_t EXTRA_INSTANCE_EXTENSION_COUNT = 1;
 constexpr const char *EXTRA_INSTANCE_EXTENSIONS[EXTRA_INSTANCE_EXTENSION_COUNT] = {
-    VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME,
+    PORTABILITY_ENUMERATION_EXTENSION,
 };
 constexpr uint32_t EXTRA_DEVICE_EXTENSION_COUNT = 1;
 constexpr const char *EXTRA_DEVICE_EXTENSIONS[EXTRA_DEVICE_EXTENSION_COUNT] = {
-    VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME,
+    PORTABILITY_SUBSET_EXTENSION,
 };
 #else
 constexpr uint32_t EXTRA_INSTANCE_EXTENSION_COUNT = 0;
@@ -81,13 +76,6 @@ std::array<VkCommandBuffer, MAX_FRAMES_IN_FLIGHT> commandBuffers{};
 std::array<VkFence, MAX_FRAMES_IN_FLIGHT> inFlightFences{};
 std::array<VkSemaphore, MAX_FRAMES_IN_FLIGHT> imageAvailableSemaphores{};
 std::array<VkSemaphore, MAX_FRAMES_IN_FLIGHT> renderFinishedSemaphores{};
-
-uint32_t PackFloat(float value)
-{
-    uint32_t word = 0;
-    std::memcpy(&word, &value, sizeof(word));
-    return word;
-}
 
 uint32_t FindMemoryTypeIndex(uint32_t typeBits, VkMemoryPropertyFlags requiredFlags)
 {
@@ -266,7 +254,7 @@ auto main() -> int
 
 #if defined(__APPLE__)
         constexpr uint32_t appApiVersion = VK_API_VERSION_1_1;
-        constexpr VkInstanceCreateFlags instanceCreateFlags = VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+        constexpr VkInstanceCreateFlags instanceCreateFlags = PORTABILITY_ENUMERATE_FLAG;
 #else
         constexpr uint32_t appApiVersion = VK_API_VERSION_1_3;
         constexpr VkInstanceCreateFlags instanceCreateFlags = 0;
@@ -421,18 +409,18 @@ auto main() -> int
 
         std::array<uint32_t, 16> words{};
         words[0] = 1;
-        words[4] = PackFloat(0.0f);
-        words[5] = PackFloat(-0.6f);
-        words[6] = PackFloat(0.0f);
-        words[7] = PackFloat(1.0f);
-        words[8] = PackFloat(0.6f);
-        words[9] = PackFloat(0.6f);
-        words[10] = PackFloat(0.0f);
-        words[11] = PackFloat(1.0f);
-        words[12] = PackFloat(-0.6f);
-        words[13] = PackFloat(0.6f);
-        words[14] = PackFloat(0.0f);
-        words[15] = PackFloat(1.0f);
+        words[4] = std::bit_cast<uint32_t>(0.0f);
+        words[5] = std::bit_cast<uint32_t>(-0.6f);
+        words[6] = std::bit_cast<uint32_t>(0.0f);
+        words[7] = std::bit_cast<uint32_t>(1.0f);
+        words[8] = std::bit_cast<uint32_t>(0.6f);
+        words[9] = std::bit_cast<uint32_t>(0.6f);
+        words[10] = std::bit_cast<uint32_t>(0.0f);
+        words[11] = std::bit_cast<uint32_t>(1.0f);
+        words[12] = std::bit_cast<uint32_t>(-0.6f);
+        words[13] = std::bit_cast<uint32_t>(0.6f);
+        words[14] = std::bit_cast<uint32_t>(0.0f);
+        words[15] = std::bit_cast<uint32_t>(1.0f);
 
         void *mapped = nullptr;
         vkMapMemory(device, dataBufferMemory, 0, sizeof(words), 0, &mapped);
