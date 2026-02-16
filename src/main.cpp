@@ -18,7 +18,7 @@ constexpr uint32_t MAX_FRAMES_IN_FLIGHT = 3;
 constexpr uint32_t MAX_INSTANCE_EXTENSIONS = 16;
 constexpr uint32_t MAX_DEVICE_EXTENSIONS = 4;
 constexpr uint32_t MAX_PHYSICAL_DEVICES = 8;
-constexpr uint32_t MAX_SWAPCHAIN_IMAGES = 8;
+constexpr uint32_t MAX_SWAPCHAIN_IMAGES = MAX_FRAMES_IN_FLIGHT;
 
 #ifndef VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR
 #define VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR 0x00000001
@@ -74,16 +74,14 @@ std::array<VkCommandBuffer, MAX_FRAMES_IN_FLIGHT> commandBuffers{};
 std::array<VkSemaphore, MAX_FRAMES_IN_FLIGHT> imageAvailableSemaphores{};
 std::array<VkSemaphore, MAX_FRAMES_IN_FLIGHT> renderFinishedSemaphores{};
 std::array<VkFence, MAX_FRAMES_IN_FLIGHT> inFlightFences{};
-std::array<VkFence, MAX_SWAPCHAIN_IMAGES> imageInFlightFences{};
 
 inline void Assert(bool condition, std::string_view message)
 {
-    if (!condition)
-    {
-        std::fprintf(stderr, "Runtime assertion failed: %.*s\n", static_cast<int>(message.size()), message.data());
-        std::fflush(stderr);
-        std::exit(EXIT_FAILURE);
-    }
+    condition ? static_cast<void>(0)
+              : static_cast<void>(
+                    std::fprintf(stderr, "Runtime assertion failed: %.*s\n", static_cast<int>(message.size()), message.data()),
+                    std::fflush(stderr),
+                    std::exit(EXIT_FAILURE));
 }
 
 auto CreateShaderModule(const std::uint8_t *code, std::size_t size) -> VkShaderModule
@@ -146,18 +144,7 @@ void DrawFrame(uint32_t currentFrame)
         VK_NULL_HANDLE,
         &imageIndex);
 
-    if (acquireResult == VK_ERROR_OUT_OF_DATE_KHR)
-    {
-        return;
-    }
-
     Assert((acquireResult == VK_SUCCESS) || (acquireResult == VK_SUBOPTIMAL_KHR), "vkAcquireNextImageKHR");
-
-    if (imageInFlightFences[imageIndex] != VK_NULL_HANDLE)
-    {
-        Assert(vkWaitForFences(device, 1, &imageInFlightFences[imageIndex], VK_TRUE, UINT64_MAX) == VK_SUCCESS, "vkWaitForFences(image)");
-    }
-    imageInFlightFences[imageIndex] = inFlightFences[currentFrame];
 
     Assert(vkResetFences(device, 1, &inFlightFences[currentFrame]) == VK_SUCCESS, "vkResetFences");
     Assert(vkResetCommandBuffer(commandBuffers[currentFrame], 0) == VK_SUCCESS, "vkResetCommandBuffer");
@@ -195,8 +182,7 @@ void DrawFrame(uint32_t currentFrame)
     VkResult presentResult = vkQueuePresentKHR(presentQueue, &presentInfo);
     Assert(
         (presentResult == VK_SUCCESS) ||
-        (presentResult == VK_SUBOPTIMAL_KHR) ||
-        (presentResult == VK_ERROR_OUT_OF_DATE_KHR),
+        (presentResult == VK_SUBOPTIMAL_KHR),
         "vkQueuePresentKHR");
 }
 
@@ -335,40 +321,12 @@ auto main() -> int
         Assert((vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice, surface, &surfaceCaps)) == VK_SUCCESS, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR");
 
         uint32_t imageCount = MAX_FRAMES_IN_FLIGHT;
-        if (imageCount < surfaceCaps.minImageCount)
-        {
-            imageCount = surfaceCaps.minImageCount;
-        }
-        if ((surfaceCaps.maxImageCount > 0) && (imageCount > surfaceCaps.maxImageCount))
-        {
-            imageCount = surfaceCaps.maxImageCount;
-        }
+        Assert(imageCount >= surfaceCaps.minImageCount, "MAX_FRAMES_IN_FLIGHT below surface minImageCount");
+        Assert((surfaceCaps.maxImageCount == 0) || (imageCount <= surfaceCaps.maxImageCount), "MAX_FRAMES_IN_FLIGHT above surface maxImageCount");
+        Assert(surfaceCaps.currentExtent.width != UINT32_MAX, "surface does not provide fixed extent");
+        Assert((surfaceCaps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR) != 0, "surface does not support opaque composite alpha");
 
-        if (surfaceCaps.currentExtent.width != UINT32_MAX)
-        {
-            swapExtent = surfaceCaps.currentExtent;
-        }
-        else
-        {
-            swapExtent.width = WINDOW_WIDTH;
-            swapExtent.height = WINDOW_HEIGHT;
-
-            if (swapExtent.width < surfaceCaps.minImageExtent.width) swapExtent.width = surfaceCaps.minImageExtent.width;
-            if (swapExtent.width > surfaceCaps.maxImageExtent.width) swapExtent.width = surfaceCaps.maxImageExtent.width;
-            if (swapExtent.height < surfaceCaps.minImageExtent.height) swapExtent.height = surfaceCaps.minImageExtent.height;
-            if (swapExtent.height > surfaceCaps.maxImageExtent.height) swapExtent.height = surfaceCaps.maxImageExtent.height;
-        }
-
-        VkCompositeAlphaFlagBitsKHR compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-        if ((surfaceCaps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR) == 0)
-        {
-            if ((surfaceCaps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR) != 0)
-                compositeAlpha = VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR;
-            else if ((surfaceCaps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR) != 0)
-                compositeAlpha = VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR;
-            else
-                compositeAlpha = VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
-        }
+        swapExtent = surfaceCaps.currentExtent;
 
         VkSwapchainCreateInfoKHR createInfo{
             .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
@@ -383,7 +341,7 @@ auto main() -> int
             .queueFamilyIndexCount = 0,
             .pQueueFamilyIndices = nullptr,
             .preTransform = surfaceCaps.currentTransform,
-            .compositeAlpha = compositeAlpha,
+            .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
             .presentMode = VK_PRESENT_MODE_FIFO_KHR,
             .clipped = VK_TRUE,
             .oldSwapchain = VK_NULL_HANDLE,
@@ -394,7 +352,7 @@ auto main() -> int
         swapFormat = VK_FORMAT_B8G8R8A8_SRGB;
 
         Assert((vkGetSwapchainImagesKHR(device, swapchain, &swapImageCount, nullptr)) == VK_SUCCESS, "vkGetSwapchainImagesKHR(count)");
-        Assert((swapImageCount > 0) && (swapImageCount <= MAX_SWAPCHAIN_IMAGES), "swapchain image count invalid for fixed cache");
+        Assert(swapImageCount == MAX_SWAPCHAIN_IMAGES, "swapchain image count must match MAX_FRAMES_IN_FLIGHT");
 
         Assert((vkGetSwapchainImagesKHR(device, swapchain, &swapImageCount, swapImages.data())) == VK_SUCCESS, "vkGetSwapchainImagesKHR(list)");
 
@@ -626,10 +584,6 @@ auto main() -> int
             Assert((vkCreateFence(device, &fenceInfo, nullptr, &inFlightFences[i])) == VK_SUCCESS, "vkCreateFence");
         }
 
-        for (uint32_t i = 0; i < MAX_SWAPCHAIN_IMAGES; i++)
-        {
-            imageInFlightFences[i] = VK_NULL_HANDLE;
-        }
     }
 
     uint32_t currentFrame = 0;
@@ -640,54 +594,32 @@ auto main() -> int
         currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
     }
 
-    if (device != VK_NULL_HANDLE)
-    {
-        vkDeviceWaitIdle(device);
-    }
+    vkDeviceWaitIdle(device);
 
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
     {
-        if (inFlightFences[i] != VK_NULL_HANDLE) vkDestroyFence(device, inFlightFences[i], nullptr);
-        if (renderFinishedSemaphores[i] != VK_NULL_HANDLE) vkDestroySemaphore(device, renderFinishedSemaphores[i], nullptr);
-        if (imageAvailableSemaphores[i] != VK_NULL_HANDLE) vkDestroySemaphore(device, imageAvailableSemaphores[i], nullptr);
+        vkDestroyFence(device, inFlightFences[i], nullptr);
+        vkDestroySemaphore(device, renderFinishedSemaphores[i], nullptr);
+        vkDestroySemaphore(device, imageAvailableSemaphores[i], nullptr);
     }
 
-    if (commandPool != VK_NULL_HANDLE)
-    {
-        vkDestroyCommandPool(device, commandPool, nullptr);
-    }
+    vkDestroyCommandPool(device, commandPool, nullptr);
 
     for (uint32_t i = 0; i < swapImageCount; i++)
     {
-        if (swapFramebuffers[i] != VK_NULL_HANDLE) vkDestroyFramebuffer(device, swapFramebuffers[i], nullptr);
-        if (swapImageViews[i] != VK_NULL_HANDLE) vkDestroyImageView(device, swapImageViews[i], nullptr);
+        vkDestroyFramebuffer(device, swapFramebuffers[i], nullptr);
+        vkDestroyImageView(device, swapImageViews[i], nullptr);
     }
 
-    if (graphicsPipeline != VK_NULL_HANDLE) vkDestroyPipeline(device, graphicsPipeline, nullptr);
-    if (pipelineLayout != VK_NULL_HANDLE) vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
-    if (renderPass != VK_NULL_HANDLE) vkDestroyRenderPass(device, renderPass, nullptr);
-    if (swapchain != VK_NULL_HANDLE) vkDestroySwapchainKHR(device, swapchain, nullptr);
-
-    if (device != VK_NULL_HANDLE)
-    {
-        vkDestroyDevice(device, nullptr);
-    }
-
-    if (surface != VK_NULL_HANDLE)
-    {
-        vkDestroySurfaceKHR(instance, surface, nullptr);
-    }
-
-    if (instance != VK_NULL_HANDLE)
-    {
-        vkDestroyInstance(instance, nullptr);
-    }
-
-    if (window != nullptr)
-    {
-        glfwDestroyWindow(window);
-        window = nullptr;
-    }
+    vkDestroyPipeline(device, graphicsPipeline, nullptr);
+    vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+    vkDestroyRenderPass(device, renderPass, nullptr);
+    vkDestroySwapchainKHR(device, swapchain, nullptr);
+    vkDestroyDevice(device, nullptr);
+    vkDestroySurfaceKHR(instance, surface, nullptr);
+    vkDestroyInstance(instance, nullptr);
+    glfwDestroyWindow(window);
+    window = nullptr;
 
     glfwTerminate();
     return 0;
