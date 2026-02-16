@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <string_view>
 
 constexpr uint32_t WINDOW_WIDTH = 1280;
 constexpr uint32_t WINDOW_HEIGHT = 720;
@@ -75,27 +76,19 @@ std::array<VkSemaphore, MAX_FRAMES_IN_FLIGHT> renderFinishedSemaphores{};
 std::array<VkFence, MAX_FRAMES_IN_FLIGHT> inFlightFences{};
 std::array<VkFence, MAX_SWAPCHAIN_IMAGES> imageInFlightFences{};
 
-[[noreturn]] void Fatal(const char *message)
+inline void Assert(bool condition, std::string_view message)
 {
-    std::fprintf(stderr, "error: %s\n", message);
-    std::abort();
-}
-
-void CheckVk(VkResult result, const char *operation)
-{
-    if (result != VK_SUCCESS)
+    if (!condition)
     {
-        std::fprintf(stderr, "error: %s failed (VkResult=%d)\n", operation, static_cast<int>(result));
-        std::abort();
+        std::fprintf(stderr, "Runtime assertion failed: %.*s\n", static_cast<int>(message.size()), message.data());
+        std::fflush(stderr);
+        std::exit(EXIT_FAILURE);
     }
 }
 
 auto CreateShaderModule(const std::uint8_t *code, std::size_t size) -> VkShaderModule
 {
-    if ((size == 0) || ((size % 4) != 0))
-    {
-        Fatal("invalid embedded shader data");
-    }
+    Assert((size != 0) && ((size % 4) == 0), "invalid embedded shader data");
 
     VkShaderModuleCreateInfo createInfo{
         .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
@@ -104,7 +97,7 @@ auto CreateShaderModule(const std::uint8_t *code, std::size_t size) -> VkShaderM
     };
 
     VkShaderModule shaderModule = VK_NULL_HANDLE;
-    CheckVk(vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule), "vkCreateShaderModule");
+    Assert(vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule) == VK_SUCCESS, "vkCreateShaderModule");
     return shaderModule;
 }
 
@@ -114,7 +107,7 @@ void RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex)
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
     };
 
-    CheckVk(vkBeginCommandBuffer(commandBuffer, &beginInfo), "vkBeginCommandBuffer");
+    Assert(vkBeginCommandBuffer(commandBuffer, &beginInfo) == VK_SUCCESS, "vkBeginCommandBuffer");
 
     VkClearValue clearColor{
         .color = {{0.05f, 0.05f, 0.08f, 1.0f}},
@@ -137,12 +130,12 @@ void RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex)
     vkCmdDraw(commandBuffer, 3, 1, 0, 0);
     vkCmdEndRenderPass(commandBuffer);
 
-    CheckVk(vkEndCommandBuffer(commandBuffer), "vkEndCommandBuffer");
+    Assert(vkEndCommandBuffer(commandBuffer) == VK_SUCCESS, "vkEndCommandBuffer");
 }
 
 void DrawFrame(uint32_t currentFrame)
 {
-    CheckVk(vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX), "vkWaitForFences");
+    Assert(vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX) == VK_SUCCESS, "vkWaitForFences");
 
     uint32_t imageIndex = 0;
     VkResult acquireResult = vkAcquireNextImageKHR(
@@ -158,19 +151,16 @@ void DrawFrame(uint32_t currentFrame)
         return;
     }
 
-    if ((acquireResult != VK_SUCCESS) && (acquireResult != VK_SUBOPTIMAL_KHR))
-    {
-        CheckVk(acquireResult, "vkAcquireNextImageKHR");
-    }
+    Assert((acquireResult == VK_SUCCESS) || (acquireResult == VK_SUBOPTIMAL_KHR), "vkAcquireNextImageKHR");
 
     if (imageInFlightFences[imageIndex] != VK_NULL_HANDLE)
     {
-        CheckVk(vkWaitForFences(device, 1, &imageInFlightFences[imageIndex], VK_TRUE, UINT64_MAX), "vkWaitForFences(image)");
+        Assert(vkWaitForFences(device, 1, &imageInFlightFences[imageIndex], VK_TRUE, UINT64_MAX) == VK_SUCCESS, "vkWaitForFences(image)");
     }
     imageInFlightFences[imageIndex] = inFlightFences[currentFrame];
 
-    CheckVk(vkResetFences(device, 1, &inFlightFences[currentFrame]), "vkResetFences");
-    CheckVk(vkResetCommandBuffer(commandBuffers[currentFrame], 0), "vkResetCommandBuffer");
+    Assert(vkResetFences(device, 1, &inFlightFences[currentFrame]) == VK_SUCCESS, "vkResetFences");
+    Assert(vkResetCommandBuffer(commandBuffers[currentFrame], 0) == VK_SUCCESS, "vkResetCommandBuffer");
 
     RecordCommandBuffer(commandBuffers[currentFrame], imageIndex);
 
@@ -189,7 +179,7 @@ void DrawFrame(uint32_t currentFrame)
         .pSignalSemaphores = signalSemaphores,
     };
 
-    CheckVk(vkQueueSubmit(graphicsQueue, 1, &submitInfo, inFlightFences[currentFrame]), "vkQueueSubmit");
+    Assert(vkQueueSubmit(graphicsQueue, 1, &submitInfo, inFlightFences[currentFrame]) == VK_SUCCESS, "vkQueueSubmit");
 
     VkSwapchainKHR swapchains[] = {swapchain};
 
@@ -203,56 +193,32 @@ void DrawFrame(uint32_t currentFrame)
     };
 
     VkResult presentResult = vkQueuePresentKHR(presentQueue, &presentInfo);
-    if ((presentResult != VK_SUCCESS) && (presentResult != VK_SUBOPTIMAL_KHR) && (presentResult != VK_ERROR_OUT_OF_DATE_KHR))
-    {
-        CheckVk(presentResult, "vkQueuePresentKHR");
-    }
+    Assert(
+        (presentResult == VK_SUCCESS) ||
+        (presentResult == VK_SUBOPTIMAL_KHR) ||
+        (presentResult == VK_ERROR_OUT_OF_DATE_KHR),
+        "vkQueuePresentKHR");
 }
 
 
 auto main() -> int
 {
-    if ((kTriangleVertSpv_size == 0) || (kTriangleFragSpv_size == 0))
-    {
-        Fatal("embedded shader headers are empty");
-    }
-
-    if ((kTriangleVertSpv_size % 4) != 0)
-    {
-        Fatal("vertex shader size must be 4-byte aligned");
-    }
-
-    if ((kTriangleFragSpv_size % 4) != 0)
-    {
-        Fatal("fragment shader size must be 4-byte aligned");
-    }
-
-    if (glfwInit() == GLFW_FALSE)
-    {
-        Fatal("failed to initialize GLFW");
-    }
+    Assert((kTriangleVertSpv_size != 0) && (kTriangleFragSpv_size != 0), "embedded shader headers are empty");
+    Assert((kTriangleVertSpv_size % 4) == 0, "vertex shader size must be 4-byte aligned");
+    Assert((kTriangleFragSpv_size % 4) == 0, "fragment shader size must be 4-byte aligned");
+    Assert(glfwInit() != GLFW_FALSE, "failed to initialize GLFW");
 
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
 
     window = glfwCreateWindow(static_cast<int>(WINDOW_WIDTH), static_cast<int>(WINDOW_HEIGHT), "greadbadbeyond", nullptr, nullptr);
-    if (window == nullptr)
-    {
-        Fatal("failed to create GLFW window");
-    }
+    Assert(window != nullptr, "failed to create GLFW window");
 
     {
         uint32_t glfwExtensionCount = 0;
         const char **glfwExtensions = glfwGetRequiredInstanceExtensions(&glfwExtensionCount);
-        if ((glfwExtensions == nullptr) || (glfwExtensionCount == 0))
-        {
-            Fatal("glfwGetRequiredInstanceExtensions returned no extensions");
-        }
-
-        if ((glfwExtensionCount + EXTRA_INSTANCE_EXTENSION_COUNT) > MAX_INSTANCE_EXTENSIONS)
-        {
-            Fatal("MAX_INSTANCE_EXTENSIONS too small");
-        }
+        Assert((glfwExtensions != nullptr) && (glfwExtensionCount > 0), "glfwGetRequiredInstanceExtensions returned no extensions");
+        Assert((glfwExtensionCount + EXTRA_INSTANCE_EXTENSION_COUNT) <= MAX_INSTANCE_EXTENSIONS, "MAX_INSTANCE_EXTENSIONS too small");
 
         std::array<const char *, MAX_INSTANCE_EXTENSIONS> instanceExtensions{};
         uint32_t instanceExtensionCount = 0;
@@ -294,63 +260,41 @@ auto main() -> int
             .ppEnabledLayerNames = nullptr,
         };
 
-        CheckVk(vkCreateInstance(&createInfo, nullptr, &instance), "vkCreateInstance");
+        Assert((vkCreateInstance(&createInfo, nullptr, &instance)) == VK_SUCCESS, "vkCreateInstance");
     }
 
-    CheckVk(glfwCreateWindowSurface(instance, window, nullptr, &surface), "glfwCreateWindowSurface");
+    Assert((glfwCreateWindowSurface(instance, window, nullptr, &surface)) == VK_SUCCESS, "glfwCreateWindowSurface");
 
     {
         uint32_t deviceCount = 0;
-        CheckVk(vkEnumeratePhysicalDevices(instance, &deviceCount, nullptr), "vkEnumeratePhysicalDevices(count)");
+        Assert((vkEnumeratePhysicalDevices(instance, &deviceCount, nullptr)) == VK_SUCCESS, "vkEnumeratePhysicalDevices(count)");
 
-        if (deviceCount == 0)
-        {
-            Fatal("no Vulkan physical devices found");
-        }
-
-        if (deviceCount > MAX_PHYSICAL_DEVICES)
-        {
-            Fatal("MAX_PHYSICAL_DEVICES too small");
-        }
+        Assert(deviceCount > 0, "no Vulkan physical devices found");
+        Assert(deviceCount <= MAX_PHYSICAL_DEVICES, "MAX_PHYSICAL_DEVICES too small");
 
         std::array<VkPhysicalDevice, MAX_PHYSICAL_DEVICES> devices{};
-        CheckVk(vkEnumeratePhysicalDevices(instance, &deviceCount, devices.data()), "vkEnumeratePhysicalDevices(list)");
+        Assert((vkEnumeratePhysicalDevices(instance, &deviceCount, devices.data())) == VK_SUCCESS, "vkEnumeratePhysicalDevices(list)");
 
         physicalDevice = devices[0];
 
         uint32_t queueFamilyCount = 0;
         vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, nullptr);
-        if (queueFamilyCount == 0)
-        {
-            Fatal("selected GPU has no queue families");
-        }
+        Assert(queueFamilyCount > 0, "selected GPU has no queue families");
 
         std::array<VkQueueFamilyProperties, 16> queueFamilies{};
-        if (queueFamilyCount > queueFamilies.size())
-        {
-            Fatal("queue family count exceeds fixed queue family cache");
-        }
+        Assert(queueFamilyCount <= queueFamilies.size(), "queue family count exceeds fixed queue family cache");
 
         vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, queueFamilies.data());
 
-        if ((queueFamilies[0].queueFlags & VK_QUEUE_GRAPHICS_BIT) == 0)
-        {
-            Fatal("queue family 0 does not support graphics");
-        }
+        Assert((queueFamilies[0].queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0, "queue family 0 does not support graphics");
 
         VkBool32 presentSupport = VK_FALSE;
-        CheckVk(vkGetPhysicalDeviceSurfaceSupportKHR(physicalDevice, 0, surface, &presentSupport), "vkGetPhysicalDeviceSurfaceSupportKHR");
-        if (presentSupport == VK_FALSE)
-        {
-            Fatal("queue family 0 does not support present");
-        }
+        Assert((vkGetPhysicalDeviceSurfaceSupportKHR(physicalDevice, 0, surface, &presentSupport)) == VK_SUCCESS, "vkGetPhysicalDeviceSurfaceSupportKHR");
+        Assert(presentSupport == VK_TRUE, "queue family 0 does not support present");
     }
 
     {
-        if ((1 + EXTRA_DEVICE_EXTENSION_COUNT) > MAX_DEVICE_EXTENSIONS)
-        {
-            Fatal("MAX_DEVICE_EXTENSIONS too small");
-        }
+        Assert((1 + EXTRA_DEVICE_EXTENSION_COUNT) <= MAX_DEVICE_EXTENSIONS, "MAX_DEVICE_EXTENSIONS too small");
 
         std::array<const char *, MAX_DEVICE_EXTENSIONS> deviceExtensions{};
         uint32_t deviceExtensionCount = 0;
@@ -381,14 +325,14 @@ auto main() -> int
             .pEnabledFeatures = &deviceFeatures,
         };
 
-        CheckVk(vkCreateDevice(physicalDevice, &createInfo, nullptr, &device), "vkCreateDevice");
+        Assert((vkCreateDevice(physicalDevice, &createInfo, nullptr, &device)) == VK_SUCCESS, "vkCreateDevice");
         vkGetDeviceQueue(device, 0, 0, &graphicsQueue);
         vkGetDeviceQueue(device, 0, 0, &presentQueue);
     }
 
     {
         VkSurfaceCapabilitiesKHR surfaceCaps{};
-        CheckVk(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice, surface, &surfaceCaps), "vkGetPhysicalDeviceSurfaceCapabilitiesKHR");
+        Assert((vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice, surface, &surfaceCaps)) == VK_SUCCESS, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR");
 
         uint32_t imageCount = MAX_FRAMES_IN_FLIGHT;
         if (imageCount < surfaceCaps.minImageCount)
@@ -445,17 +389,14 @@ auto main() -> int
             .oldSwapchain = VK_NULL_HANDLE,
         };
 
-        CheckVk(vkCreateSwapchainKHR(device, &createInfo, nullptr, &swapchain), "vkCreateSwapchainKHR");
+        Assert((vkCreateSwapchainKHR(device, &createInfo, nullptr, &swapchain)) == VK_SUCCESS, "vkCreateSwapchainKHR");
 
         swapFormat = VK_FORMAT_B8G8R8A8_SRGB;
 
-        CheckVk(vkGetSwapchainImagesKHR(device, swapchain, &swapImageCount, nullptr), "vkGetSwapchainImagesKHR(count)");
-        if ((swapImageCount == 0) || (swapImageCount > MAX_SWAPCHAIN_IMAGES))
-        {
-            Fatal("swapchain image count invalid for fixed cache");
-        }
+        Assert((vkGetSwapchainImagesKHR(device, swapchain, &swapImageCount, nullptr)) == VK_SUCCESS, "vkGetSwapchainImagesKHR(count)");
+        Assert((swapImageCount > 0) && (swapImageCount <= MAX_SWAPCHAIN_IMAGES), "swapchain image count invalid for fixed cache");
 
-        CheckVk(vkGetSwapchainImagesKHR(device, swapchain, &swapImageCount, swapImages.data()), "vkGetSwapchainImagesKHR(list)");
+        Assert((vkGetSwapchainImagesKHR(device, swapchain, &swapImageCount, swapImages.data())) == VK_SUCCESS, "vkGetSwapchainImagesKHR(list)");
 
         for (uint32_t i = 0; i < swapImageCount; i++)
         {
@@ -473,7 +414,7 @@ auto main() -> int
                 },
             };
 
-            CheckVk(vkCreateImageView(device, &viewInfo, nullptr, &swapImageViews[i]), "vkCreateImageView");
+            Assert((vkCreateImageView(device, &viewInfo, nullptr, &swapImageViews[i])) == VK_SUCCESS, "vkCreateImageView");
         }
     }
 
@@ -519,7 +460,7 @@ auto main() -> int
             .pDependencies = &dependency,
         };
 
-        CheckVk(vkCreateRenderPass(device, &renderPassInfo, nullptr, &renderPass), "vkCreateRenderPass");
+        Assert((vkCreateRenderPass(device, &renderPassInfo, nullptr, &renderPass)) == VK_SUCCESS, "vkCreateRenderPass");
 
         VkShaderModule vertModule = CreateShaderModule(kTriangleVertSpv, kTriangleVertSpv_size);
         VkShaderModule fragModule = CreateShaderModule(kTriangleFragSpv, kTriangleFragSpv_size);
@@ -609,7 +550,7 @@ auto main() -> int
         VkPipelineLayoutCreateInfo pipelineLayoutInfo{
             .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
         };
-        CheckVk(vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayout), "vkCreatePipelineLayout");
+        Assert((vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayout)) == VK_SUCCESS, "vkCreatePipelineLayout");
 
         VkGraphicsPipelineCreateInfo pipelineInfo{
             .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
@@ -626,7 +567,7 @@ auto main() -> int
             .subpass = 0,
         };
 
-        CheckVk(vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &graphicsPipeline), "vkCreateGraphicsPipelines");
+        Assert((vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &graphicsPipeline)) == VK_SUCCESS, "vkCreateGraphicsPipelines");
 
         vkDestroyShaderModule(device, fragModule, nullptr);
         vkDestroyShaderModule(device, vertModule, nullptr);
@@ -645,7 +586,7 @@ auto main() -> int
                 .layers = 1,
             };
 
-            CheckVk(vkCreateFramebuffer(device, &framebufferInfo, nullptr, &swapFramebuffers[i]), "vkCreateFramebuffer");
+            Assert((vkCreateFramebuffer(device, &framebufferInfo, nullptr, &swapFramebuffers[i])) == VK_SUCCESS, "vkCreateFramebuffer");
         }
     }
 
@@ -656,7 +597,7 @@ auto main() -> int
             .queueFamilyIndex = 0,
         };
 
-        CheckVk(vkCreateCommandPool(device, &poolInfo, nullptr, &commandPool), "vkCreateCommandPool");
+        Assert((vkCreateCommandPool(device, &poolInfo, nullptr, &commandPool)) == VK_SUCCESS, "vkCreateCommandPool");
 
         VkCommandBufferAllocateInfo allocInfo{
             .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
@@ -665,7 +606,7 @@ auto main() -> int
             .commandBufferCount = MAX_FRAMES_IN_FLIGHT,
         };
 
-        CheckVk(vkAllocateCommandBuffers(device, &allocInfo, commandBuffers.data()), "vkAllocateCommandBuffers");
+        Assert((vkAllocateCommandBuffers(device, &allocInfo, commandBuffers.data())) == VK_SUCCESS, "vkAllocateCommandBuffers");
     }
 
     {
@@ -680,9 +621,9 @@ auto main() -> int
 
         for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
         {
-            CheckVk(vkCreateSemaphore(device, &semaphoreInfo, nullptr, &imageAvailableSemaphores[i]), "vkCreateSemaphore(imageAvailable)");
-            CheckVk(vkCreateSemaphore(device, &semaphoreInfo, nullptr, &renderFinishedSemaphores[i]), "vkCreateSemaphore(renderFinished)");
-            CheckVk(vkCreateFence(device, &fenceInfo, nullptr, &inFlightFences[i]), "vkCreateFence");
+            Assert((vkCreateSemaphore(device, &semaphoreInfo, nullptr, &imageAvailableSemaphores[i])) == VK_SUCCESS, "vkCreateSemaphore(imageAvailable)");
+            Assert((vkCreateSemaphore(device, &semaphoreInfo, nullptr, &renderFinishedSemaphores[i])) == VK_SUCCESS, "vkCreateSemaphore(renderFinished)");
+            Assert((vkCreateFence(device, &fenceInfo, nullptr, &inFlightFences[i])) == VK_SUCCESS, "vkCreateFence");
         }
 
         for (uint32_t i = 0; i < MAX_SWAPCHAIN_IMAGES; i++)
