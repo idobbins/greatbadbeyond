@@ -6,21 +6,18 @@
 
 #include <array>
 #include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <string_view>
 
 constexpr uint32_t WINDOW_WIDTH = 1280;
 constexpr uint32_t WINDOW_HEIGHT = 720;
-constexpr uint32_t MAX_FRAMES_IN_FLIGHT = 3;
+constexpr uint32_t MAX_FRAMES_IN_FLIGHT = 2;
 
 constexpr uint32_t MAX_INSTANCE_EXTENSIONS = 16;
 constexpr uint32_t MAX_DEVICE_EXTENSIONS = 4;
 constexpr uint32_t MAX_PHYSICAL_DEVICES = 8;
-constexpr uint32_t MAX_SWAPCHAIN_IMAGES = MAX_FRAMES_IN_FLIGHT;
+constexpr uint32_t MAX_SWAPCHAIN_IMAGES = 3;
 
 static_assert(MAX_FRAMES_IN_FLIGHT > 0);
-static_assert(MAX_SWAPCHAIN_IMAGES == MAX_FRAMES_IN_FLIGHT);
+static_assert(MAX_SWAPCHAIN_IMAGES >= MAX_FRAMES_IN_FLIGHT);
 static_assert((kTriangleVertSpv_size != 0) && (kTriangleFragSpv_size != 0));
 static_assert((kTriangleVertSpv_size % 4) == 0);
 static_assert((kTriangleFragSpv_size % 4) == 0);
@@ -60,7 +57,6 @@ VkInstance instance = VK_NULL_HANDLE;
 VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
 VkDevice device = VK_NULL_HANDLE;
 VkQueue graphicsQueue = VK_NULL_HANDLE;
-VkQueue presentQueue = VK_NULL_HANDLE;
 
 VkSurfaceKHR surface = VK_NULL_HANDLE;
 VkSwapchainKHR swapchain = VK_NULL_HANDLE;
@@ -79,8 +75,6 @@ VkPipeline graphicsPipeline = VK_NULL_HANDLE;
 VkCommandPool commandPool = VK_NULL_HANDLE;
 std::array<VkCommandBuffer, MAX_FRAMES_IN_FLIGHT> commandBuffers{};
 
-std::array<VkSemaphore, MAX_FRAMES_IN_FLIGHT> imageAvailableSemaphores{};
-std::array<VkSemaphore, MAX_FRAMES_IN_FLIGHT> renderFinishedSemaphores{};
 std::array<VkFence, MAX_FRAMES_IN_FLIGHT> inFlightFences{};
 
 void RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex)
@@ -118,50 +112,47 @@ void RecordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex)
 void DrawFrame(uint32_t currentFrame)
 {
     vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
+    vkResetFences(device, 1, &inFlightFences[currentFrame]);
 
     uint32_t imageIndex = 0;
     vkAcquireNextImageKHR(
         device,
         swapchain,
         UINT64_MAX,
-        imageAvailableSemaphores[currentFrame],
+        VK_NULL_HANDLE,
         VK_NULL_HANDLE,
         &imageIndex);
 
-    vkResetFences(device, 1, &inFlightFences[currentFrame]);
     vkResetCommandBuffer(commandBuffers[currentFrame], 0);
 
     RecordCommandBuffer(commandBuffers[currentFrame], imageIndex);
 
-    VkSemaphore waitSemaphores[] = {imageAvailableSemaphores[currentFrame]};
-    VkPipelineStageFlags waitStages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
-    VkSemaphore signalSemaphores[] = {renderFinishedSemaphores[currentFrame]};
-
     VkSubmitInfo submitInfo{
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-        .waitSemaphoreCount = 1,
-        .pWaitSemaphores = waitSemaphores,
-        .pWaitDstStageMask = waitStages,
+        .waitSemaphoreCount = 0,
+        .pWaitSemaphores = nullptr,
+        .pWaitDstStageMask = nullptr,
         .commandBufferCount = 1,
         .pCommandBuffers = &commandBuffers[currentFrame],
-        .signalSemaphoreCount = 1,
-        .pSignalSemaphores = signalSemaphores,
+        .signalSemaphoreCount = 0,
+        .pSignalSemaphores = nullptr,
     };
 
     vkQueueSubmit(graphicsQueue, 1, &submitInfo, inFlightFences[currentFrame]);
+    vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
 
     VkSwapchainKHR swapchains[] = {swapchain};
 
     VkPresentInfoKHR presentInfo{
         .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-        .waitSemaphoreCount = 1,
-        .pWaitSemaphores = signalSemaphores,
+        .waitSemaphoreCount = 0,
+        .pWaitSemaphores = nullptr,
         .swapchainCount = 1,
         .pSwapchains = swapchains,
         .pImageIndices = &imageIndex,
     };
 
-    vkQueuePresentKHR(presentQueue, &presentInfo);
+    vkQueuePresentKHR(graphicsQueue, &presentInfo);
 }
 
 
@@ -265,7 +256,6 @@ auto main() -> int
 
         vkCreateDevice(physicalDevice, &createInfo, nullptr, &device);
         vkGetDeviceQueue(device, 0, 0, &graphicsQueue);
-        vkGetDeviceQueue(device, 0, 0, &presentQueue);
     }
 
     {
@@ -527,10 +517,6 @@ auto main() -> int
     }
 
     {
-        VkSemaphoreCreateInfo semaphoreInfo{
-            .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
-        };
-
         VkFenceCreateInfo fenceInfo{
             .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
             .flags = VK_FENCE_CREATE_SIGNALED_BIT,
@@ -538,8 +524,6 @@ auto main() -> int
 
         for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
         {
-            vkCreateSemaphore(device, &semaphoreInfo, nullptr, &imageAvailableSemaphores[i]);
-            vkCreateSemaphore(device, &semaphoreInfo, nullptr, &renderFinishedSemaphores[i]);
             vkCreateFence(device, &fenceInfo, nullptr, &inFlightFences[i]);
         }
 
@@ -558,8 +542,6 @@ auto main() -> int
     for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
     {
         vkDestroyFence(device, inFlightFences[i], nullptr);
-        vkDestroySemaphore(device, renderFinishedSemaphores[i], nullptr);
-        vkDestroySemaphore(device, imageAvailableSemaphores[i], nullptr);
     }
 
     vkDestroyCommandPool(device, commandPool, nullptr);
