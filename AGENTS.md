@@ -38,12 +38,45 @@ The primary goal is deterministic, explicit behavior with minimal runtime variab
 ## Current Architecture
 - Compute-only pipeline, no graphics pipeline.
 - Direct write to acquired swapchain image from compute shader.
-- One descriptor set with fixed bindings:
+- One descriptor set with fixed bindings.
 - `binding 0`: storage image target (swapchain image view, updated per frame).
 - `binding 1`: storage buffer (`dataBuffer`) for packed scene data.
 - One app-owned GPU data buffer (`dataBuffer` + `dataBufferMemory`) with custom packing.
 - One-time scene upload to `dataBuffer` at init via direct map/write.
 - One command buffer and one fence for explicit frame sequencing.
+
+## Jebrim Alignment Status
+- Current state is partially aligned:
+- Aligned:
+- Branch-minimized shader logic (`step`/`mix` style).
+- Single packed GPU scene buffer (`uint`-oriented storage).
+- Fixed-capacity/static app-side structures.
+- Not yet aligned:
+- CPU blocks twice per frame on fence waits (GPU feed is not continuous).
+- Descriptor `binding 0` is updated every frame for swap image selection.
+- Workgroup size is `1x1x1` (deterministic but low-throughput).
+- Direct storage writes to swapchain images may not be portable across all MoltenVK targets.
+
+## Alignment Plan
+- Goal: keep deterministic behavior while reducing CPU stalls and descriptor churn.
+- Phase 1 (low risk):
+- Move to timeline where CPU does not hard-wait after every submit.
+- Keep fixed resources; no dynamic allocations.
+- Success criteria: frame loop has no per-frame blocking wait unless swapchain requires recovery.
+- Phase 2 (low-medium risk):
+- Remove per-frame image descriptor writes by switching to compute output buffer/image that is bound once.
+- Copy/resolve to acquired swapchain image in transfer pass.
+- Success criteria: no `vkUpdateDescriptorSets` in frame loop.
+- Phase 3 (low risk):
+- Tune workgroup geometry to hardware-friendly fixed tiles (for example `8x8`) while preserving deterministic execution.
+- Success criteria: fixed dispatch math with no data-dependent control flow.
+- Phase 4 (conditional portability fallback):
+- If direct swapchain storage writes fail on any MoltenVK target, use pre-bound offscreen storage target plus explicit copy to present image.
+- Success criteria: same packed-buffer pipeline and deterministic behavior across all supported Apple devices.
+- Guardrails:
+- Preserve one app-owned packed GPU arena buffer as the data source.
+- Keep control flow explicit and mostly branchless in shader and frame code.
+- Do not add broad runtime capability negotiation unless explicitly requested.
 
 ## Code Structure Guidelines
 - Keep initialization linear and local.
