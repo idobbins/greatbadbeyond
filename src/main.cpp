@@ -16,12 +16,15 @@ constexpr uint32_t MAX_INSTANCE_EXTENSIONS = 16;
 constexpr uint32_t MAX_DEVICE_EXTENSIONS = 4;
 constexpr uint32_t MAX_PHYSICAL_DEVICES = 8;
 constexpr uint32_t MAX_SWAPCHAIN_IMAGES = 3;
-constexpr uint32_t CAMERA_SLOT_WORDS = 64;
-constexpr uint32_t DATA_WORD_COUNT = CAMERA_SLOT_WORDS * MAX_FRAMES_IN_FLIGHT;
+constexpr uint32_t SLOT_WORDS = 96;
+constexpr uint32_t BRICK_BASE_WORD = 16;
+constexpr uint32_t BRICK_WORDS = 16;
+constexpr uint32_t DATA_WORD_COUNT = SLOT_WORDS * MAX_FRAMES_IN_FLIGHT;
 constexpr VkDeviceSize DATA_BUFFER_SIZE = static_cast<VkDeviceSize>(DATA_WORD_COUNT) * sizeof(uint32_t);
 
 static_assert(MAX_FRAMES_IN_FLIGHT == 3);
 static_assert(MAX_SWAPCHAIN_IMAGES >= MAX_FRAMES_IN_FLIGHT);
+static_assert((BRICK_BASE_WORD + BRICK_WORDS) <= SLOT_WORDS);
 static_assert((kTriangleCompSpv_size != 0));
 static_assert((kTriangleCompSpv_size % 4) == 0);
 
@@ -196,7 +199,7 @@ void UpdateFlightCamera()
 
 void WriteCameraData(uint32_t currentFrame)
 {
-    const uint32_t base = currentFrame * CAMERA_SLOT_WORDS;
+    const uint32_t base = currentFrame * SLOT_WORDS;
     dataBufferWords[base + 0] = std::bit_cast<uint32_t>(cameraPosX);
     dataBufferWords[base + 1] = std::bit_cast<uint32_t>(cameraPosY);
     dataBufferWords[base + 2] = std::bit_cast<uint32_t>(cameraPosZ);
@@ -204,6 +207,38 @@ void WriteCameraData(uint32_t currentFrame)
     dataBufferWords[base + 4] = std::bit_cast<uint32_t>(cameraPitch);
     dataBufferWords[base + 5] = frameCounter++;
     dataBufferWords[base + 6] = std::bit_cast<uint32_t>(1.0471976f);
+}
+
+void WriteBrickData(uint32_t currentFrame)
+{
+    const uint32_t base = currentFrame * SLOT_WORDS + BRICK_BASE_WORD;
+
+    uint64_t occupancy = 0;
+    for (uint32_t z = 0; z < 4; z++)
+    {
+        for (uint32_t y = 0; y < 4; y++)
+        {
+            for (uint32_t x = 0; x < 4; x++)
+            {
+                const float fx = static_cast<float>(x) - 1.5f;
+                const float fy = static_cast<float>(y) - 1.5f;
+                const float fz = static_cast<float>(z) - 1.5f;
+                const float radius2 = fx * fx + fy * fy + fz * fz;
+                if (radius2 <= 2.6f)
+                {
+                    const uint32_t bitIndex = x + y * 4 + z * 16;
+                    occupancy |= (1ull << bitIndex);
+                }
+            }
+        }
+    }
+
+    dataBufferWords[base + 0] = static_cast<uint32_t>(occupancy & 0xFFFFFFFFull);
+    dataBufferWords[base + 1] = static_cast<uint32_t>(occupancy >> 32);
+    dataBufferWords[base + 2] = std::bit_cast<uint32_t>(-1.0f);
+    dataBufferWords[base + 3] = std::bit_cast<uint32_t>(-1.0f);
+    dataBufferWords[base + 4] = std::bit_cast<uint32_t>(-1.0f);
+    dataBufferWords[base + 5] = std::bit_cast<uint32_t>(0.5f);
 }
 
 void RecordCommandBuffer(VkCommandBuffer commandBuffer, VkDescriptorSet descriptorSet, uint32_t imageIndex)
@@ -531,6 +566,7 @@ auto main() -> int
         for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
         {
             WriteCameraData(i);
+            WriteBrickData(i);
         }
     }
 
@@ -630,8 +666,8 @@ auto main() -> int
         {
             VkDescriptorBufferInfo bufferInfo{
                 .buffer = dataBuffer,
-                .offset = static_cast<VkDeviceSize>(i * CAMERA_SLOT_WORDS * sizeof(uint32_t)),
-                .range = static_cast<VkDeviceSize>(CAMERA_SLOT_WORDS * sizeof(uint32_t)),
+                .offset = static_cast<VkDeviceSize>(i * SLOT_WORDS * sizeof(uint32_t)),
+                .range = static_cast<VkDeviceSize>(SLOT_WORDS * sizeof(uint32_t)),
             };
             VkWriteDescriptorSet bufferWrite{
                 .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
@@ -689,6 +725,10 @@ auto main() -> int
     while (glfwWindowShouldClose(window) == GLFW_FALSE)
     {
         glfwPollEvents();
+        if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
+        {
+            glfwSetWindowShouldClose(window, GLFW_TRUE);
+        }
         DrawFrame(currentFrame);
         currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
     }
