@@ -92,6 +92,8 @@ float cameraPitch = 0.0f;
 double lastMouseX = 0.0;
 double lastMouseY = 0.0;
 bool mouseInitialized = false;
+bool cameraTimeInitialized = false;
+double lastCameraSampleTime = 0.0;
 uint32_t frameCounter = 0;
 
 uint32_t FindMemoryTypeIndex(uint32_t typeBits, VkMemoryPropertyFlags requiredFlags)
@@ -114,9 +116,26 @@ uint32_t FindMemoryTypeIndex(uint32_t typeBits, VkMemoryPropertyFlags requiredFl
 
 void UpdateFlightCamera()
 {
-    constexpr float fixedDeltaTime = 1.0f / 120.0f;
     constexpr float baseMoveSpeed = 3.25f;
     constexpr float lookSensitivity = 0.0024f;
+
+    const double now = glfwGetTime();
+    if (!cameraTimeInitialized)
+    {
+        cameraTimeInitialized = true;
+        lastCameraSampleTime = now;
+    }
+    double deltaTimeSeconds = now - lastCameraSampleTime;
+    lastCameraSampleTime = now;
+    if (deltaTimeSeconds < 0.0)
+    {
+        deltaTimeSeconds = 0.0;
+    }
+    if (deltaTimeSeconds > 0.05)
+    {
+        deltaTimeSeconds = 0.05;
+    }
+    const float deltaTime = static_cast<float>(deltaTimeSeconds);
 
     double mouseX = 0.0;
     double mouseY = 0.0;
@@ -161,7 +180,7 @@ void UpdateFlightCamera()
     const float rightZ = cosYaw;
 
     const float speedBoost = glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ? 3.0f : 1.0f;
-    const float step = baseMoveSpeed * speedBoost * fixedDeltaTime;
+    const float step = baseMoveSpeed * speedBoost * deltaTime;
 
     if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
     {
@@ -316,7 +335,6 @@ void DrawFrame(uint32_t currentFrame)
     vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
     vkResetFences(device, 1, &inFlightFences[currentFrame]);
 
-    UpdateFlightCamera();
     WriteCameraData(currentFrame);
 
     uint32_t imageIndex = 0;
@@ -384,6 +402,10 @@ auto main() -> int
 
     window = glfwCreateWindow(static_cast<int>(WINDOW_WIDTH), static_cast<int>(WINDOW_HEIGHT), "greadbadbeyond", nullptr, nullptr);
     glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+    if (glfwRawMouseMotionSupported() == GLFW_TRUE)
+    {
+        glfwSetInputMode(window, GLFW_RAW_MOUSE_MOTION, GLFW_TRUE);
+    }
 
     {
         uint32_t glfwExtensionCount = 0;
@@ -729,6 +751,7 @@ auto main() -> int
         {
             glfwSetWindowShouldClose(window, GLFW_TRUE);
         }
+        UpdateFlightCamera();
         DrawFrame(currentFrame);
         currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
     }
