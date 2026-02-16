@@ -54,18 +54,15 @@ GLFWwindow *window = nullptr;
 VkInstance instance = VK_NULL_HANDLE;
 VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
 VkDevice device = VK_NULL_HANDLE;
-uint32_t queueFamilyIndex = 0;
 VkQueue graphicsQueue = VK_NULL_HANDLE;
 
 VkSurfaceKHR surface = VK_NULL_HANDLE;
 VkSwapchainKHR swapchain = VK_NULL_HANDLE;
-VkFormat swapFormat = VK_FORMAT_UNDEFINED;
 VkExtent2D swapExtent{};
 uint32_t swapImageCount = 0;
 
 std::array<VkImage, MAX_SWAPCHAIN_IMAGES> swapImages{};
 std::array<VkImageView, MAX_SWAPCHAIN_IMAGES> swapImageViews{};
-std::array<VkImageLayout, MAX_SWAPCHAIN_IMAGES> swapImageLayouts{};
 
 VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE;
 VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
@@ -78,8 +75,6 @@ VkCommandPool commandPool = VK_NULL_HANDLE;
 VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
 
 VkFence inFlightFence = VK_NULL_HANDLE;
-VkSemaphore imageAvailableSemaphore = VK_NULL_HANDLE;
-VkSemaphore renderFinishedSemaphore = VK_NULL_HANDLE;
 
 void RecordCommandBuffer(uint32_t imageIndex)
 {
@@ -96,7 +91,7 @@ void RecordCommandBuffer(uint32_t imageIndex)
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
         .srcAccessMask = 0,
         .dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
-        .oldLayout = swapImageLayouts[imageIndex],
+        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
         .newLayout = VK_IMAGE_LAYOUT_GENERAL,
         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
@@ -149,23 +144,20 @@ void RecordCommandBuffer(uint32_t imageIndex)
         1, &swapToPresent);
 
     vkEndCommandBuffer(commandBuffer);
-
-    swapImageLayouts[imageIndex] = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 }
 
 void DrawFrame()
 {
-    vkWaitForFences(device, 1, &inFlightFence, VK_TRUE, UINT64_MAX);
-    vkResetFences(device, 1, &inFlightFence);
-
     uint32_t imageIndex = 0;
     vkAcquireNextImageKHR(
         device,
         swapchain,
         UINT64_MAX,
-        imageAvailableSemaphore,
         VK_NULL_HANDLE,
+        inFlightFence,
         &imageIndex);
+    vkWaitForFences(device, 1, &inFlightFence, VK_TRUE, UINT64_MAX);
+    vkResetFences(device, 1, &inFlightFence);
 
     VkDescriptorImageInfo imageInfo{
         .imageView = swapImageViews[imageIndex],
@@ -185,24 +177,25 @@ void DrawFrame()
 
     RecordCommandBuffer(imageIndex);
 
-    VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
     VkSubmitInfo submitInfo{
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-        .waitSemaphoreCount = 1,
-        .pWaitSemaphores = &imageAvailableSemaphore,
-        .pWaitDstStageMask = &waitStage,
+        .waitSemaphoreCount = 0,
+        .pWaitSemaphores = nullptr,
+        .pWaitDstStageMask = nullptr,
         .commandBufferCount = 1,
         .pCommandBuffers = &commandBuffer,
-        .signalSemaphoreCount = 1,
-        .pSignalSemaphores = &renderFinishedSemaphore,
+        .signalSemaphoreCount = 0,
+        .pSignalSemaphores = nullptr,
     };
 
     vkQueueSubmit(graphicsQueue, 1, &submitInfo, inFlightFence);
+    vkWaitForFences(device, 1, &inFlightFence, VK_TRUE, UINT64_MAX);
+    vkResetFences(device, 1, &inFlightFence);
 
     VkPresentInfoKHR presentInfo{
         .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-        .waitSemaphoreCount = 1,
-        .pWaitSemaphores = &renderFinishedSemaphore,
+        .waitSemaphoreCount = 0,
+        .pWaitSemaphores = nullptr,
         .swapchainCount = 1,
         .pSwapchains = &swapchain,
         .pImageIndices = &imageIndex,
@@ -277,7 +270,6 @@ auto main() -> int
         vkEnumeratePhysicalDevices(instance, &deviceCount, devices.data());
 
         physicalDevice = devices[0];
-        queueFamilyIndex = 0;
     }
 
     {
@@ -292,7 +284,7 @@ auto main() -> int
         float queuePriority = 1.0f;
         VkDeviceQueueCreateInfo queueCreateInfo{
             .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-            .queueFamilyIndex = queueFamilyIndex,
+            .queueFamilyIndex = 0,
             .queueCount = 1,
             .pQueuePriorities = &queuePriority,
         };
@@ -311,7 +303,7 @@ auto main() -> int
         };
 
         vkCreateDevice(physicalDevice, &createInfo, nullptr, &device);
-        vkGetDeviceQueue(device, queueFamilyIndex, 0, &graphicsQueue);
+        vkGetDeviceQueue(device, 0, 0, &graphicsQueue);
     }
 
     {
@@ -325,13 +317,12 @@ auto main() -> int
         }
 
         swapExtent = surfaceCaps.currentExtent;
-        swapFormat = VK_FORMAT_B8G8R8A8_UNORM;
 
         VkSwapchainCreateInfoKHR createInfo{
             .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
             .surface = surface,
             .minImageCount = imageCount,
-            .imageFormat = swapFormat,
+            .imageFormat = VK_FORMAT_B8G8R8A8_UNORM,
             .imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
             .imageExtent = swapExtent,
             .imageArrayLayers = 1,
@@ -353,13 +344,11 @@ auto main() -> int
 
         for (uint32_t i = 0; i < swapImageCount; i++)
         {
-            swapImageLayouts[i] = VK_IMAGE_LAYOUT_UNDEFINED;
-
             VkImageViewCreateInfo viewInfo{
                 .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
                 .image = swapImages[i],
                 .viewType = VK_IMAGE_VIEW_TYPE_2D,
-                .format = swapFormat,
+                .format = VK_FORMAT_B8G8R8A8_UNORM,
                 .subresourceRange = {
                     .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
                     .baseMipLevel = 0,
@@ -437,27 +426,13 @@ auto main() -> int
             .pSetLayouts = &descriptorSetLayout,
         };
         vkAllocateDescriptorSets(device, &allocInfo, &descriptorSet);
-
-        VkDescriptorImageInfo imageInfo{
-            .imageView = swapImageViews[0],
-            .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-        };
-        VkWriteDescriptorSet write{
-            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .dstSet = descriptorSet,
-            .dstBinding = 0,
-            .descriptorCount = 1,
-            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-            .pImageInfo = &imageInfo,
-        };
-        vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
     }
 
     {
         VkCommandPoolCreateInfo poolInfo{
             .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
             .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
-            .queueFamilyIndex = queueFamilyIndex,
+            .queueFamilyIndex = 0,
         };
 
         vkCreateCommandPool(device, &poolInfo, nullptr, &commandPool);
@@ -475,15 +450,9 @@ auto main() -> int
     {
         VkFenceCreateInfo fenceInfo{
             .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
-            .flags = VK_FENCE_CREATE_SIGNALED_BIT,
+            .flags = 0,
         };
         vkCreateFence(device, &fenceInfo, nullptr, &inFlightFence);
-
-        VkSemaphoreCreateInfo semaphoreInfo{
-            .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
-        };
-        vkCreateSemaphore(device, &semaphoreInfo, nullptr, &imageAvailableSemaphore);
-        vkCreateSemaphore(device, &semaphoreInfo, nullptr, &renderFinishedSemaphore);
     }
 
     while (glfwWindowShouldClose(window) == GLFW_FALSE)
@@ -494,8 +463,6 @@ auto main() -> int
 
     vkDeviceWaitIdle(device);
 
-    vkDestroySemaphore(device, renderFinishedSemaphore, nullptr);
-    vkDestroySemaphore(device, imageAvailableSemaphore, nullptr);
     vkDestroyFence(device, inFlightFence, nullptr);
 
     vkDestroyCommandPool(device, commandPool, nullptr);
