@@ -24,8 +24,8 @@ const uint HDR_BRICK_TABLE_OFFSET_WORDS = 16u;
 const uint HDR_BRICK_POOL_OFFSET_WORDS = 17u;
 const uint BRICK_WORD_STRIDE = 16u;
 const uint EMPTY_BRICK_SLOT = 0xFFFFFFFFu;
-const uint MAX_GLOBAL_STEPS = 96u;
-const uint MAX_LOCAL_STEPS = 64u;
+const uint MAX_GLOBAL_STEPS = 38u;
+const uint MAX_LOCAL_STEPS = 22u;
 
 float LoadF(uint wordIndex)
 {
