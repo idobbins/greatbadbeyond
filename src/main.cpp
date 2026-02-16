@@ -127,6 +127,12 @@ uint32_t swapImageCount = 0;
 
 std::array<VkImage, MAX_SWAPCHAIN_IMAGES> swapImages{};
 std::array<VkImageView, MAX_SWAPCHAIN_IMAGES> swapImageViews{};
+std::array<uint8_t, MAX_SWAPCHAIN_IMAGES> swapImagePresented{};
+
+VkImage renderImage = VK_NULL_HANDLE;
+VkDeviceMemory renderImageMemory = VK_NULL_HANDLE;
+VkImageView renderImageView = VK_NULL_HANDLE;
+bool renderImageInitialized = false;
 
 VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE;
 VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
@@ -481,12 +487,74 @@ void RecordCommandBuffer(VkCommandBuffer commandBuffer, VkDescriptorSet descript
     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipeline);
     vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
 
-    VkImageMemoryBarrier swapToGeneral{
+    if (!renderImageInitialized)
+    {
+        VkImageMemoryBarrier renderToGeneral{
+            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .srcAccessMask = 0,
+            .dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+            .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+            .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image = renderImage,
+            .subresourceRange = {
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+        };
+        vkCmdPipelineBarrier(
+            commandBuffer,
+            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            0,
+            0, nullptr,
+            0, nullptr,
+            1, &renderToGeneral);
+    }
+
+    const uint32_t groupCountX = (swapExtent.width + 7) / 8;
+    const uint32_t groupCountY = (swapExtent.height + 7) / 8;
+    vkCmdDispatch(commandBuffer, groupCountX, groupCountY, 1);
+
+    VkImageMemoryBarrier renderToTransferSrc{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = renderImage,
+        .subresourceRange = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        },
+    };
+    vkCmdPipelineBarrier(
+        commandBuffer,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        0,
+        0, nullptr,
+        0, nullptr,
+        1, &renderToTransferSrc);
+
+    const VkImageLayout oldSwapLayout = (swapImagePresented[imageIndex] != 0u)
+                                            ? VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
+                                            : VK_IMAGE_LAYOUT_UNDEFINED;
+    VkImageMemoryBarrier swapToTransferDst{
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
         .srcAccessMask = 0,
-        .dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
-        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-        .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+        .oldLayout = oldSwapLayout,
+        .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .image = swapImages[imageIndex],
@@ -501,21 +569,43 @@ void RecordCommandBuffer(VkCommandBuffer commandBuffer, VkDescriptorSet descript
     vkCmdPipelineBarrier(
         commandBuffer,
         VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
         0,
         0, nullptr,
         0, nullptr,
-        1, &swapToGeneral);
+        1, &swapToTransferDst);
 
-    const uint32_t groupCountX = (swapExtent.width + 7) / 8;
-    const uint32_t groupCountY = (swapExtent.height + 7) / 8;
-    vkCmdDispatch(commandBuffer, groupCountX, groupCountY, 1);
+    VkImageCopy copyRegion{
+        .srcSubresource = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .mipLevel = 0,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        },
+        .srcOffset = {0, 0, 0},
+        .dstSubresource = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .mipLevel = 0,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        },
+        .dstOffset = {0, 0, 0},
+        .extent = {swapExtent.width, swapExtent.height, 1},
+    };
+    vkCmdCopyImage(
+        commandBuffer,
+        renderImage,
+        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        swapImages[imageIndex],
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        1,
+        &copyRegion);
 
     VkImageMemoryBarrier swapToPresent{
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-        .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+        .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
         .dstAccessMask = 0,
-        .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
         .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
@@ -530,12 +620,38 @@ void RecordCommandBuffer(VkCommandBuffer commandBuffer, VkDescriptorSet descript
     };
     vkCmdPipelineBarrier(
         commandBuffer,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
         VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
         0,
         0, nullptr,
         0, nullptr,
         1, &swapToPresent);
+
+    VkImageMemoryBarrier renderBackToGeneral{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
+        .dstAccessMask = 0,
+        .oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = renderImage,
+        .subresourceRange = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        },
+    };
+    vkCmdPipelineBarrier(
+        commandBuffer,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+        0,
+        0, nullptr,
+        0, nullptr,
+        1, &renderBackToGeneral);
 
     vkEndCommandBuffer(commandBuffer);
 }
@@ -556,28 +672,11 @@ void DrawFrame(uint32_t currentFrame)
         VK_NULL_HANDLE,
         &imageIndex);
 
-    VkDescriptorImageInfo imageInfo{
-        .imageView = swapImageViews[imageIndex],
-        .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-    };
-    VkWriteDescriptorSet write{
-        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-        .dstSet = descriptorSets[currentFrame],
-        .dstBinding = 0,
-        .dstArrayElement = 0,
-        .descriptorCount = 1,
-        .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-        .pImageInfo = &imageInfo,
-        .pBufferInfo = nullptr,
-        .pTexelBufferView = nullptr,
-    };
-    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
-
     vkResetCommandBuffer(commandBuffers[currentFrame], 0);
 
     RecordCommandBuffer(commandBuffers[currentFrame], descriptorSets[currentFrame], imageIndex);
 
-    VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT;
     VkSubmitInfo submitInfo{
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
         .waitSemaphoreCount = 1,
@@ -590,6 +689,7 @@ void DrawFrame(uint32_t currentFrame)
     };
 
     vkQueueSubmit(graphicsQueue, 1, &submitInfo, inFlightFences[currentFrame]);
+    renderImageInitialized = true;
 
     VkPresentInfoKHR presentInfo{
         .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
@@ -601,6 +701,7 @@ void DrawFrame(uint32_t currentFrame)
     };
 
     vkQueuePresentKHR(graphicsQueue, &presentInfo);
+    swapImagePresented[imageIndex] = 1u;
 }
 
 auto main() -> int
@@ -730,7 +831,7 @@ auto main() -> int
             .imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
             .imageExtent = swapExtent,
             .imageArrayLayers = 1,
-            .imageUsage = VK_IMAGE_USAGE_STORAGE_BIT,
+            .imageUsage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
             .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
             .queueFamilyIndexCount = 0,
             .pQueueFamilyIndices = nullptr,
@@ -763,6 +864,55 @@ auto main() -> int
             };
             vkCreateImageView(device, &viewInfo, nullptr, &swapImageViews[i]);
         }
+    }
+
+    {
+        VkImageCreateInfo imageInfo{
+            .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+            .imageType = VK_IMAGE_TYPE_2D,
+            .format = VK_FORMAT_B8G8R8A8_UNORM,
+            .extent = {
+                .width = swapExtent.width,
+                .height = swapExtent.height,
+                .depth = 1,
+            },
+            .mipLevels = 1,
+            .arrayLayers = 1,
+            .samples = VK_SAMPLE_COUNT_1_BIT,
+            .tiling = VK_IMAGE_TILING_OPTIMAL,
+            .usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        };
+        vkCreateImage(device, &imageInfo, nullptr, &renderImage);
+
+        VkMemoryRequirements memReqs{};
+        vkGetImageMemoryRequirements(device, renderImage, &memReqs);
+
+        VkMemoryAllocateInfo allocInfo{
+            .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+            .allocationSize = memReqs.size,
+            .memoryTypeIndex = FindMemoryTypeIndex(
+                memReqs.memoryTypeBits,
+                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT),
+        };
+        vkAllocateMemory(device, &allocInfo, nullptr, &renderImageMemory);
+        vkBindImageMemory(device, renderImage, renderImageMemory, 0);
+
+        VkImageViewCreateInfo viewInfo{
+            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .image = renderImage,
+            .viewType = VK_IMAGE_VIEW_TYPE_2D,
+            .format = VK_FORMAT_B8G8R8A8_UNORM,
+            .subresourceRange = {
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+        };
+        vkCreateImageView(device, &viewInfo, nullptr, &renderImageView);
     }
 
     {
@@ -896,6 +1046,21 @@ auto main() -> int
 
         for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
         {
+            VkDescriptorImageInfo imageInfo{
+                .imageView = renderImageView,
+                .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+            };
+            VkWriteDescriptorSet imageWrite{
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = descriptorSets[i],
+                .dstBinding = 0,
+                .dstArrayElement = 0,
+                .descriptorCount = 1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                .pImageInfo = &imageInfo,
+                .pBufferInfo = nullptr,
+                .pTexelBufferView = nullptr,
+            };
             VkDescriptorBufferInfo bufferInfo{
                 .buffer = dataBuffer,
                 .offset = static_cast<VkDeviceSize>(i * SLOT_WORDS * sizeof(uint32_t)),
@@ -912,7 +1077,11 @@ auto main() -> int
                 .pBufferInfo = &bufferInfo,
                 .pTexelBufferView = nullptr,
             };
-            vkUpdateDescriptorSets(device, 1, &bufferWrite, 0, nullptr);
+            std::array<VkWriteDescriptorSet, 2> writes{
+                imageWrite,
+                bufferWrite,
+            };
+            vkUpdateDescriptorSets(device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
         }
     }
 
@@ -1002,6 +1171,10 @@ auto main() -> int
     {
         vkDestroyImageView(device, swapImageViews[i], nullptr);
     }
+
+    vkDestroyImageView(device, renderImageView, nullptr);
+    vkDestroyImage(device, renderImage, nullptr);
+    vkFreeMemory(device, renderImageMemory, nullptr);
 
     vkUnmapMemory(device, dataBufferMemory);
     vkDestroyBuffer(device, dataBuffer, nullptr);
