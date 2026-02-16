@@ -17,6 +17,8 @@ The primary goal is deterministic, explicit behavior with minimal runtime variab
 - Avoid defensive/runtime safety scaffolding unless explicitly requested.
 - No exception-based flow; no implicit fallback systems.
 - No multi-path feature negotiation unless required by the task.
+- No runtime heap allocation churn in the frame loop.
+- Prefer one app-owned GPU data arena buffer with fixed internal offsets/packing.
 
 ## Vulkan Style Rules
 - Use plain Vulkan handles and explicit lifetime management.
@@ -31,6 +33,17 @@ The primary goal is deterministic, explicit behavior with minimal runtime variab
 - Keep descriptor bindings stable and explicit.
 - Keep workgroup geometry explicit and intentional.
 - Avoid dynamic shader permutation systems.
+- Prefer packed `uint` storage and explicit unpack in shader for scene data.
+
+## Current Architecture
+- Compute-only pipeline, no graphics pipeline.
+- Direct write to acquired swapchain image from compute shader.
+- One descriptor set with fixed bindings:
+- `binding 0`: storage image target (swapchain image view, updated per frame).
+- `binding 1`: storage buffer (`dataBuffer`) for packed scene data.
+- One app-owned GPU data buffer (`dataBuffer` + `dataBufferMemory`) with custom packing.
+- One-time scene upload to `dataBuffer` at init via direct map/write.
+- One command buffer and one fence for explicit frame sequencing.
 
 ## Code Structure Guidelines
 - Keep initialization linear and local.
@@ -43,6 +56,11 @@ The primary goal is deterministic, explicit behavior with minimal runtime variab
 - MSVC designated initializers must follow declaration order for Vulkan structs.
 - Keep initializer ordering compliant with strict compilers.
 - Keep shader embedding and build wiring simple and single-purpose.
+- MoltenVK support is required.
+- Keep `VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR` on Apple.
+- Keep `VK_KHR_portability_enumeration` instance extension on Apple.
+- Keep `VK_KHR_portability_subset` device extension on Apple.
+- If swapchain storage-image writes fail on a target, add fallback only then (do not preemptively add multi-path code).
 
 ## Change Policy
 - New code should preserve the explicit/minimal style.

@@ -5,6 +5,7 @@
 
 #include <array>
 #include <cstdint>
+#include <cstring>
 
 constexpr uint32_t WINDOW_WIDTH = 1280;
 constexpr uint32_t WINDOW_HEIGHT = 720;
@@ -68,6 +69,9 @@ VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE;
 VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
 VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
 
+VkBuffer dataBuffer = VK_NULL_HANDLE;
+VkDeviceMemory dataBufferMemory = VK_NULL_HANDLE;
+
 VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
 VkPipeline computePipeline = VK_NULL_HANDLE;
 
@@ -75,6 +79,31 @@ VkCommandPool commandPool = VK_NULL_HANDLE;
 VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
 
 VkFence inFlightFence = VK_NULL_HANDLE;
+
+uint32_t PackFloat(float value)
+{
+    uint32_t word = 0;
+    std::memcpy(&word, &value, sizeof(word));
+    return word;
+}
+
+uint32_t FindMemoryTypeIndex(uint32_t typeBits, VkMemoryPropertyFlags requiredFlags)
+{
+    VkPhysicalDeviceMemoryProperties memoryProperties{};
+    vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memoryProperties);
+
+    for (uint32_t i = 0; i < memoryProperties.memoryTypeCount; i++)
+    {
+        const uint32_t typeMatch = (typeBits & (1u << i));
+        const uint32_t flagsMatch = (memoryProperties.memoryTypes[i].propertyFlags & requiredFlags) == requiredFlags;
+        if (typeMatch != 0 && flagsMatch != 0)
+        {
+            return i;
+        }
+    }
+
+    return 0;
+}
 
 void RecordCommandBuffer(uint32_t imageIndex)
 {
@@ -167,9 +196,12 @@ void DrawFrame()
         .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
         .dstSet = descriptorSet,
         .dstBinding = 0,
+        .dstArrayElement = 0,
         .descriptorCount = 1,
         .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
         .pImageInfo = &imageInfo,
+        .pBufferInfo = nullptr,
+        .pTexelBufferView = nullptr,
     };
     vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
 
@@ -362,17 +394,74 @@ auto main() -> int
     }
 
     {
-        VkDescriptorSetLayoutBinding layoutBinding{
+        constexpr VkDeviceSize dataBufferSize = 4096;
+
+        VkBufferCreateInfo bufferInfo{
+            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+            .size = dataBufferSize,
+            .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        };
+        vkCreateBuffer(device, &bufferInfo, nullptr, &dataBuffer);
+
+        VkMemoryRequirements memReqs{};
+        vkGetBufferMemoryRequirements(device, dataBuffer, &memReqs);
+
+        VkMemoryAllocateInfo allocInfo{
+            .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+            .allocationSize = memReqs.size,
+            .memoryTypeIndex = FindMemoryTypeIndex(
+                memReqs.memoryTypeBits,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT),
+        };
+        vkAllocateMemory(device, &allocInfo, nullptr, &dataBufferMemory);
+        vkBindBufferMemory(device, dataBuffer, dataBufferMemory, 0);
+
+        std::array<uint32_t, 16> words{};
+        words[0] = 1;
+        words[4] = PackFloat(0.0f);
+        words[5] = PackFloat(-0.6f);
+        words[6] = PackFloat(0.0f);
+        words[7] = PackFloat(1.0f);
+        words[8] = PackFloat(0.6f);
+        words[9] = PackFloat(0.6f);
+        words[10] = PackFloat(0.0f);
+        words[11] = PackFloat(1.0f);
+        words[12] = PackFloat(-0.6f);
+        words[13] = PackFloat(0.6f);
+        words[14] = PackFloat(0.0f);
+        words[15] = PackFloat(1.0f);
+
+        void *mapped = nullptr;
+        vkMapMemory(device, dataBufferMemory, 0, sizeof(words), 0, &mapped);
+        std::memcpy(mapped, words.data(), sizeof(words));
+        vkUnmapMemory(device, dataBufferMemory);
+    }
+
+    {
+        VkDescriptorSetLayoutBinding imageBinding{
             .binding = 0,
             .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
             .descriptorCount = 1,
             .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+            .pImmutableSamplers = nullptr,
+        };
+        VkDescriptorSetLayoutBinding bufferBinding{
+            .binding = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+            .pImmutableSamplers = nullptr,
+        };
+        std::array<VkDescriptorSetLayoutBinding, 2> bindings{
+            imageBinding,
+            bufferBinding,
         };
 
         VkDescriptorSetLayoutCreateInfo layoutInfo{
             .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-            .bindingCount = 1,
-            .pBindings = &layoutBinding,
+            .bindingCount = 2,
+            .pBindings = bindings.data(),
         };
         vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &descriptorSetLayout);
 
@@ -407,15 +496,23 @@ auto main() -> int
 
         vkDestroyShaderModule(device, computeModule, nullptr);
 
-        VkDescriptorPoolSize poolSize{
+        VkDescriptorPoolSize imagePoolSize{
             .type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
             .descriptorCount = 1,
+        };
+        VkDescriptorPoolSize bufferPoolSize{
+            .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorCount = 1,
+        };
+        std::array<VkDescriptorPoolSize, 2> poolSizes{
+            imagePoolSize,
+            bufferPoolSize,
         };
         VkDescriptorPoolCreateInfo poolInfo{
             .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
             .maxSets = 1,
-            .poolSizeCount = 1,
-            .pPoolSizes = &poolSize,
+            .poolSizeCount = 2,
+            .pPoolSizes = poolSizes.data(),
         };
         vkCreateDescriptorPool(device, &poolInfo, nullptr, &descriptorPool);
 
@@ -426,6 +523,24 @@ auto main() -> int
             .pSetLayouts = &descriptorSetLayout,
         };
         vkAllocateDescriptorSets(device, &allocInfo, &descriptorSet);
+
+        VkDescriptorBufferInfo bufferInfo{
+            .buffer = dataBuffer,
+            .offset = 0,
+            .range = VK_WHOLE_SIZE,
+        };
+        VkWriteDescriptorSet bufferWrite{
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = descriptorSet,
+            .dstBinding = 1,
+            .dstArrayElement = 0,
+            .descriptorCount = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .pImageInfo = nullptr,
+            .pBufferInfo = &bufferInfo,
+            .pTexelBufferView = nullptr,
+        };
+        vkUpdateDescriptorSets(device, 1, &bufferWrite, 0, nullptr);
     }
 
     {
@@ -477,6 +592,9 @@ auto main() -> int
     {
         vkDestroyImageView(device, swapImageViews[i], nullptr);
     }
+
+    vkDestroyBuffer(device, dataBuffer, nullptr);
+    vkFreeMemory(device, dataBufferMemory, nullptr);
 
     vkDestroySwapchainKHR(device, swapchain, nullptr);
     vkDestroyDevice(device, nullptr);
