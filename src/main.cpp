@@ -5,8 +5,8 @@
 
 #include <array>
 #include <bit>
+#include <cmath>
 #include <cstdint>
-#include <cstring>
 
 constexpr uint32_t WINDOW_WIDTH = 1280;
 constexpr uint32_t WINDOW_HEIGHT = 720;
@@ -16,6 +16,9 @@ constexpr uint32_t MAX_INSTANCE_EXTENSIONS = 16;
 constexpr uint32_t MAX_DEVICE_EXTENSIONS = 4;
 constexpr uint32_t MAX_PHYSICAL_DEVICES = 8;
 constexpr uint32_t MAX_SWAPCHAIN_IMAGES = 3;
+constexpr uint32_t CAMERA_SLOT_WORDS = 64;
+constexpr uint32_t DATA_WORD_COUNT = CAMERA_SLOT_WORDS * MAX_FRAMES_IN_FLIGHT;
+constexpr VkDeviceSize DATA_BUFFER_SIZE = static_cast<VkDeviceSize>(DATA_WORD_COUNT) * sizeof(uint32_t);
 
 static_assert(MAX_FRAMES_IN_FLIGHT == 3);
 static_assert(MAX_SWAPCHAIN_IMAGES >= MAX_FRAMES_IN_FLIGHT);
@@ -66,6 +69,7 @@ std::array<VkDescriptorSet, MAX_FRAMES_IN_FLIGHT> descriptorSets{};
 
 VkBuffer dataBuffer = VK_NULL_HANDLE;
 VkDeviceMemory dataBufferMemory = VK_NULL_HANDLE;
+uint32_t *dataBufferWords = nullptr;
 
 VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
 VkPipeline computePipeline = VK_NULL_HANDLE;
@@ -76,6 +80,16 @@ std::array<VkCommandBuffer, MAX_FRAMES_IN_FLIGHT> commandBuffers{};
 std::array<VkFence, MAX_FRAMES_IN_FLIGHT> inFlightFences{};
 std::array<VkSemaphore, MAX_FRAMES_IN_FLIGHT> imageAvailableSemaphores{};
 std::array<VkSemaphore, MAX_FRAMES_IN_FLIGHT> renderFinishedSemaphores{};
+
+float cameraPosX = 0.0f;
+float cameraPosY = 0.0f;
+float cameraPosZ = 2.5f;
+float cameraYaw = -1.5707963f;
+float cameraPitch = 0.0f;
+double lastMouseX = 0.0;
+double lastMouseY = 0.0;
+bool mouseInitialized = false;
+uint32_t frameCounter = 0;
 
 uint32_t FindMemoryTypeIndex(uint32_t typeBits, VkMemoryPropertyFlags requiredFlags)
 {
@@ -93,6 +107,103 @@ uint32_t FindMemoryTypeIndex(uint32_t typeBits, VkMemoryPropertyFlags requiredFl
     }
 
     return 0;
+}
+
+void UpdateFlightCamera()
+{
+    constexpr float fixedDeltaTime = 1.0f / 120.0f;
+    constexpr float baseMoveSpeed = 3.25f;
+    constexpr float lookSensitivity = 0.0024f;
+
+    double mouseX = 0.0;
+    double mouseY = 0.0;
+    glfwGetCursorPos(window, &mouseX, &mouseY);
+
+    if (!mouseInitialized)
+    {
+        mouseInitialized = true;
+        lastMouseX = mouseX;
+        lastMouseY = mouseY;
+    }
+
+    const double mouseDeltaX = mouseX - lastMouseX;
+    const double mouseDeltaY = mouseY - lastMouseY;
+    lastMouseX = mouseX;
+    lastMouseY = mouseY;
+
+    cameraYaw += static_cast<float>(mouseDeltaX) * lookSensitivity;
+    cameraPitch -= static_cast<float>(mouseDeltaY) * lookSensitivity;
+
+    constexpr float maxPitch = 1.5533430f;
+    if (cameraPitch > maxPitch)
+    {
+        cameraPitch = maxPitch;
+    }
+    if (cameraPitch < -maxPitch)
+    {
+        cameraPitch = -maxPitch;
+    }
+
+    const float cosPitch = std::cos(cameraPitch);
+    const float sinPitch = std::sin(cameraPitch);
+    const float cosYaw = std::cos(cameraYaw);
+    const float sinYaw = std::sin(cameraYaw);
+
+    const float forwardX = cosPitch * cosYaw;
+    const float forwardY = sinPitch;
+    const float forwardZ = cosPitch * sinYaw;
+
+    const float rightX = -sinYaw;
+    const float rightY = 0.0f;
+    const float rightZ = cosYaw;
+
+    const float speedBoost = glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ? 3.0f : 1.0f;
+    const float step = baseMoveSpeed * speedBoost * fixedDeltaTime;
+
+    if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
+    {
+        cameraPosX += forwardX * step;
+        cameraPosY += forwardY * step;
+        cameraPosZ += forwardZ * step;
+    }
+    if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS)
+    {
+        cameraPosX -= forwardX * step;
+        cameraPosY -= forwardY * step;
+        cameraPosZ -= forwardZ * step;
+    }
+    if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)
+    {
+        cameraPosX += rightX * step;
+        cameraPosY += rightY * step;
+        cameraPosZ += rightZ * step;
+    }
+    if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS)
+    {
+        cameraPosX -= rightX * step;
+        cameraPosY -= rightY * step;
+        cameraPosZ -= rightZ * step;
+    }
+    if (glfwGetKey(window, GLFW_KEY_E) == GLFW_PRESS)
+    {
+        cameraPosY += step;
+    }
+    if (glfwGetKey(window, GLFW_KEY_Q) == GLFW_PRESS)
+    {
+        cameraPosY -= step;
+    }
+}
+
+void WriteCameraData(uint32_t currentFrame)
+{
+    const uint32_t base = currentFrame * CAMERA_SLOT_WORDS;
+    dataBufferWords[base + 0] = std::bit_cast<uint32_t>(cameraPosX);
+    dataBufferWords[base + 1] = std::bit_cast<uint32_t>(cameraPosY);
+    dataBufferWords[base + 2] = std::bit_cast<uint32_t>(cameraPosZ);
+    dataBufferWords[base + 3] = std::bit_cast<uint32_t>(cameraYaw);
+    dataBufferWords[base + 4] = std::bit_cast<uint32_t>(cameraPitch);
+    dataBufferWords[base + 5] = frameCounter++;
+    dataBufferWords[base + 6] = std::bit_cast<uint32_t>(1.0471976f);
 }
 
 void RecordCommandBuffer(VkCommandBuffer commandBuffer, VkDescriptorSet descriptorSet, uint32_t imageIndex)
@@ -132,8 +243,8 @@ void RecordCommandBuffer(VkCommandBuffer commandBuffer, VkDescriptorSet descript
         0, nullptr,
         1, &swapToGeneral);
 
-    const uint32_t groupCountX = swapExtent.width;
-    const uint32_t groupCountY = swapExtent.height;
+    const uint32_t groupCountX = (swapExtent.width + 7) / 8;
+    const uint32_t groupCountY = (swapExtent.height + 7) / 8;
     vkCmdDispatch(commandBuffer, groupCountX, groupCountY, 1);
 
     VkImageMemoryBarrier swapToPresent{
@@ -169,6 +280,9 @@ void DrawFrame(uint32_t currentFrame)
 {
     vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
     vkResetFences(device, 1, &inFlightFences[currentFrame]);
+
+    UpdateFlightCamera();
+    WriteCameraData(currentFrame);
 
     uint32_t imageIndex = 0;
     vkAcquireNextImageKHR(
@@ -234,6 +348,7 @@ auto main() -> int
     glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
 
     window = glfwCreateWindow(static_cast<int>(WINDOW_WIDTH), static_cast<int>(WINDOW_HEIGHT), "greadbadbeyond", nullptr, nullptr);
+    glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
 
     {
         uint32_t glfwExtensionCount = 0;
@@ -384,11 +499,9 @@ auto main() -> int
     }
 
     {
-        constexpr VkDeviceSize dataBufferSize = 4096;
-
         VkBufferCreateInfo bufferInfo{
             .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-            .size = dataBufferSize,
+            .size = DATA_BUFFER_SIZE,
             .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
             .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
         };
@@ -406,26 +519,19 @@ auto main() -> int
         };
         vkAllocateMemory(device, &allocInfo, nullptr, &dataBufferMemory);
         vkBindBufferMemory(device, dataBuffer, dataBufferMemory, 0);
-
-        std::array<uint32_t, 16> words{};
-        words[0] = 1;
-        words[4] = std::bit_cast<uint32_t>(0.0f);
-        words[5] = std::bit_cast<uint32_t>(-0.6f);
-        words[6] = std::bit_cast<uint32_t>(0.0f);
-        words[7] = std::bit_cast<uint32_t>(1.0f);
-        words[8] = std::bit_cast<uint32_t>(0.6f);
-        words[9] = std::bit_cast<uint32_t>(0.6f);
-        words[10] = std::bit_cast<uint32_t>(0.0f);
-        words[11] = std::bit_cast<uint32_t>(1.0f);
-        words[12] = std::bit_cast<uint32_t>(-0.6f);
-        words[13] = std::bit_cast<uint32_t>(0.6f);
-        words[14] = std::bit_cast<uint32_t>(0.0f);
-        words[15] = std::bit_cast<uint32_t>(1.0f);
-
         void *mapped = nullptr;
-        vkMapMemory(device, dataBufferMemory, 0, sizeof(words), 0, &mapped);
-        std::memcpy(mapped, words.data(), sizeof(words));
-        vkUnmapMemory(device, dataBufferMemory);
+        vkMapMemory(device, dataBufferMemory, 0, DATA_BUFFER_SIZE, 0, &mapped);
+        dataBufferWords = static_cast<uint32_t *>(mapped);
+
+        for (uint32_t i = 0; i < DATA_WORD_COUNT; i++)
+        {
+            dataBufferWords[i] = 0;
+        }
+
+        for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+        {
+            WriteCameraData(i);
+        }
     }
 
     {
@@ -520,13 +626,13 @@ auto main() -> int
         };
         vkAllocateDescriptorSets(device, &allocInfo, descriptorSets.data());
 
-        VkDescriptorBufferInfo bufferInfo{
-            .buffer = dataBuffer,
-            .offset = 0,
-            .range = VK_WHOLE_SIZE,
-        };
         for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
         {
+            VkDescriptorBufferInfo bufferInfo{
+                .buffer = dataBuffer,
+                .offset = static_cast<VkDeviceSize>(i * CAMERA_SLOT_WORDS * sizeof(uint32_t)),
+                .range = static_cast<VkDeviceSize>(CAMERA_SLOT_WORDS * sizeof(uint32_t)),
+            };
             VkWriteDescriptorSet bufferWrite{
                 .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
                 .dstSet = descriptorSets[i],
@@ -609,6 +715,7 @@ auto main() -> int
         vkDestroyImageView(device, swapImageViews[i], nullptr);
     }
 
+    vkUnmapMemory(device, dataBufferMemory);
     vkDestroyBuffer(device, dataBuffer, nullptr);
     vkFreeMemory(device, dataBufferMemory, nullptr);
 
