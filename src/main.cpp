@@ -201,12 +201,12 @@ auto main() -> int
 
         VkInstanceCreateInfo createInfo{
             .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
-            .pApplicationInfo = &appInfo,
             .flags = instanceCreateFlags,
-            .enabledExtensionCount = instanceExtensionCount,
-            .ppEnabledExtensionNames = instanceExtensions.data(),
+            .pApplicationInfo = &appInfo,
             .enabledLayerCount = 0,
             .ppEnabledLayerNames = nullptr,
+            .enabledExtensionCount = instanceExtensionCount,
+            .ppEnabledExtensionNames = instanceExtensions.data(),
         };
 
         vkCreateInstance(&createInfo, nullptr, &instance);
@@ -339,8 +339,8 @@ auto main() -> int
             .srcSubpass = VK_SUBPASS_EXTERNAL,
             .dstSubpass = 0,
             .srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-            .srcAccessMask = 0,
             .dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            .srcAccessMask = 0,
             .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
         };
 
@@ -434,8 +434,8 @@ auto main() -> int
 
         VkPipelineMultisampleStateCreateInfo multisampling{
             .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-            .sampleShadingEnable = VK_FALSE,
             .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+            .sampleShadingEnable = VK_FALSE,
         };
 
         VkPipelineColorBlendAttachmentState colorBlendAttachment{
