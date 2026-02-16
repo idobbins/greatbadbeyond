@@ -16,15 +16,55 @@ constexpr uint32_t MAX_INSTANCE_EXTENSIONS = 16;
 constexpr uint32_t MAX_DEVICE_EXTENSIONS = 4;
 constexpr uint32_t MAX_PHYSICAL_DEVICES = 8;
 constexpr uint32_t MAX_SWAPCHAIN_IMAGES = 3;
-constexpr uint32_t SLOT_WORDS = 96;
-constexpr uint32_t BRICK_BASE_WORD = 16;
+constexpr uint32_t ARENA_HEADER_WORDS = 32;
 constexpr uint32_t BRICK_WORDS = 16;
+constexpr uint32_t BRICK_POOL_CAPACITY = 4;
+constexpr uint32_t ARENA_BRICK_TABLE_BASE_WORD = ARENA_HEADER_WORDS;
+constexpr uint32_t ARENA_BRICK_POOL_BASE_WORD = ARENA_HEADER_WORDS;
+constexpr uint32_t SLOT_WORDS = ARENA_HEADER_WORDS + BRICK_WORDS * BRICK_POOL_CAPACITY;
+
+constexpr uint32_t HDR_CAM_POS_X = 0;
+constexpr uint32_t HDR_CAM_POS_Y = 1;
+constexpr uint32_t HDR_CAM_POS_Z = 2;
+constexpr uint32_t HDR_CAM_YAW = 3;
+constexpr uint32_t HDR_CAM_PITCH = 4;
+constexpr uint32_t HDR_CAM_MOVE_SPEED = 5;
+constexpr uint32_t HDR_CAM_MOUSE_SENSITIVITY = 6;
+constexpr uint32_t HDR_CAM_FRAME_INDEX = 7;
+constexpr uint32_t HDR_CAM_FOV_Y = 8;
+constexpr uint32_t HDR_GRID_MIN_X = 9;
+constexpr uint32_t HDR_GRID_MIN_Y = 10;
+constexpr uint32_t HDR_GRID_MIN_Z = 11;
+constexpr uint32_t HDR_GRID_DIM_X = 12;
+constexpr uint32_t HDR_GRID_DIM_Y = 13;
+constexpr uint32_t HDR_GRID_DIM_Z = 14;
+constexpr uint32_t HDR_BRICK_COUNT = 15;
+constexpr uint32_t HDR_BRICK_TABLE_OFFSET_WORDS = 16;
+constexpr uint32_t HDR_BRICK_POOL_OFFSET_WORDS = 17;
+
+constexpr float CAMERA_MOVE_SPEED = 3.25f;
+constexpr float CAMERA_MOUSE_SENSITIVITY = 0.0024f;
+constexpr float CAMERA_FOV_Y = 1.0471976f;
+constexpr float CAMERA_SPEED_BOOST_MULTIPLIER = 3.0f;
+constexpr float TEST_BRICK_MIN_X = -1.0f;
+constexpr float TEST_BRICK_MIN_Y = -1.0f;
+constexpr float TEST_BRICK_MIN_Z = -1.0f;
+constexpr float TEST_BRICK_VOXEL_SIZE = 0.5f;
+constexpr float SCENE_GRID_MIN_X = -1.0f;
+constexpr float SCENE_GRID_MIN_Y = -1.0f;
+constexpr float SCENE_GRID_MIN_Z = -1.0f;
+constexpr uint32_t SCENE_GRID_DIM_X = 1;
+constexpr uint32_t SCENE_GRID_DIM_Y = 1;
+constexpr uint32_t SCENE_GRID_DIM_Z = 1;
+constexpr uint32_t SCENE_BRICK_COUNT = 1;
+
 constexpr uint32_t DATA_WORD_COUNT = SLOT_WORDS * MAX_FRAMES_IN_FLIGHT;
 constexpr VkDeviceSize DATA_BUFFER_SIZE = static_cast<VkDeviceSize>(DATA_WORD_COUNT) * sizeof(uint32_t);
 
 static_assert(MAX_FRAMES_IN_FLIGHT == 3);
 static_assert(MAX_SWAPCHAIN_IMAGES >= MAX_FRAMES_IN_FLIGHT);
-static_assert((BRICK_BASE_WORD + BRICK_WORDS) <= SLOT_WORDS);
+static_assert(HDR_BRICK_POOL_OFFSET_WORDS < ARENA_HEADER_WORDS);
+static_assert((ARENA_BRICK_POOL_BASE_WORD + BRICK_WORDS) <= SLOT_WORDS);
 static_assert((kTriangleCompSpv_size != 0));
 static_assert((kTriangleCompSpv_size % 4) == 0);
 
@@ -116,9 +156,6 @@ uint32_t FindMemoryTypeIndex(uint32_t typeBits, VkMemoryPropertyFlags requiredFl
 
 void UpdateFlightCamera()
 {
-    constexpr float baseMoveSpeed = 3.25f;
-    constexpr float lookSensitivity = 0.0024f;
-
     const double now = glfwGetTime();
     if (!cameraTimeInitialized)
     {
@@ -153,8 +190,8 @@ void UpdateFlightCamera()
     lastMouseX = mouseX;
     lastMouseY = mouseY;
 
-    cameraYaw += static_cast<float>(mouseDeltaX) * lookSensitivity;
-    cameraPitch -= static_cast<float>(mouseDeltaY) * lookSensitivity;
+    cameraYaw += static_cast<float>(mouseDeltaX) * CAMERA_MOUSE_SENSITIVITY;
+    cameraPitch -= static_cast<float>(mouseDeltaY) * CAMERA_MOUSE_SENSITIVITY;
 
     constexpr float maxPitch = 1.5533430f;
     if (cameraPitch > maxPitch)
@@ -179,8 +216,8 @@ void UpdateFlightCamera()
     const float rightY = 0.0f;
     const float rightZ = cosYaw;
 
-    const float speedBoost = glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ? 3.0f : 1.0f;
-    const float step = baseMoveSpeed * speedBoost * deltaTime;
+    const float speedBoost = glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ? CAMERA_SPEED_BOOST_MULTIPLIER : 1.0f;
+    const float step = CAMERA_MOVE_SPEED * speedBoost * deltaTime;
 
     if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
     {
@@ -216,21 +253,33 @@ void UpdateFlightCamera()
     }
 }
 
-void WriteCameraData(uint32_t currentFrame)
+void WriteArenaHeaderData(uint32_t currentFrame)
 {
     const uint32_t base = currentFrame * SLOT_WORDS;
-    dataBufferWords[base + 0] = std::bit_cast<uint32_t>(cameraPosX);
-    dataBufferWords[base + 1] = std::bit_cast<uint32_t>(cameraPosY);
-    dataBufferWords[base + 2] = std::bit_cast<uint32_t>(cameraPosZ);
-    dataBufferWords[base + 3] = std::bit_cast<uint32_t>(cameraYaw);
-    dataBufferWords[base + 4] = std::bit_cast<uint32_t>(cameraPitch);
-    dataBufferWords[base + 5] = frameCounter++;
-    dataBufferWords[base + 6] = std::bit_cast<uint32_t>(1.0471976f);
+    dataBufferWords[base + HDR_CAM_POS_X] = std::bit_cast<uint32_t>(cameraPosX);
+    dataBufferWords[base + HDR_CAM_POS_Y] = std::bit_cast<uint32_t>(cameraPosY);
+    dataBufferWords[base + HDR_CAM_POS_Z] = std::bit_cast<uint32_t>(cameraPosZ);
+    dataBufferWords[base + HDR_CAM_YAW] = std::bit_cast<uint32_t>(cameraYaw);
+    dataBufferWords[base + HDR_CAM_PITCH] = std::bit_cast<uint32_t>(cameraPitch);
+    dataBufferWords[base + HDR_CAM_MOVE_SPEED] = std::bit_cast<uint32_t>(CAMERA_MOVE_SPEED);
+    dataBufferWords[base + HDR_CAM_MOUSE_SENSITIVITY] = std::bit_cast<uint32_t>(CAMERA_MOUSE_SENSITIVITY);
+    dataBufferWords[base + HDR_CAM_FRAME_INDEX] = frameCounter++;
+    dataBufferWords[base + HDR_CAM_FOV_Y] = std::bit_cast<uint32_t>(CAMERA_FOV_Y);
+
+    dataBufferWords[base + HDR_GRID_MIN_X] = std::bit_cast<uint32_t>(SCENE_GRID_MIN_X);
+    dataBufferWords[base + HDR_GRID_MIN_Y] = std::bit_cast<uint32_t>(SCENE_GRID_MIN_Y);
+    dataBufferWords[base + HDR_GRID_MIN_Z] = std::bit_cast<uint32_t>(SCENE_GRID_MIN_Z);
+    dataBufferWords[base + HDR_GRID_DIM_X] = SCENE_GRID_DIM_X;
+    dataBufferWords[base + HDR_GRID_DIM_Y] = SCENE_GRID_DIM_Y;
+    dataBufferWords[base + HDR_GRID_DIM_Z] = SCENE_GRID_DIM_Z;
+    dataBufferWords[base + HDR_BRICK_COUNT] = SCENE_BRICK_COUNT;
+    dataBufferWords[base + HDR_BRICK_TABLE_OFFSET_WORDS] = ARENA_BRICK_TABLE_BASE_WORD;
+    dataBufferWords[base + HDR_BRICK_POOL_OFFSET_WORDS] = ARENA_BRICK_POOL_BASE_WORD;
 }
 
 void WriteBrickData(uint32_t currentFrame)
 {
-    const uint32_t base = currentFrame * SLOT_WORDS + BRICK_BASE_WORD;
+    const uint32_t base = currentFrame * SLOT_WORDS + ARENA_BRICK_POOL_BASE_WORD;
 
     uint64_t occupancy = 0;
     for (uint32_t z = 0; z < 4; z++)
@@ -254,10 +303,10 @@ void WriteBrickData(uint32_t currentFrame)
 
     dataBufferWords[base + 0] = static_cast<uint32_t>(occupancy & 0xFFFFFFFFull);
     dataBufferWords[base + 1] = static_cast<uint32_t>(occupancy >> 32);
-    dataBufferWords[base + 2] = std::bit_cast<uint32_t>(-1.0f);
-    dataBufferWords[base + 3] = std::bit_cast<uint32_t>(-1.0f);
-    dataBufferWords[base + 4] = std::bit_cast<uint32_t>(-1.0f);
-    dataBufferWords[base + 5] = std::bit_cast<uint32_t>(0.5f);
+    dataBufferWords[base + 2] = std::bit_cast<uint32_t>(TEST_BRICK_MIN_X);
+    dataBufferWords[base + 3] = std::bit_cast<uint32_t>(TEST_BRICK_MIN_Y);
+    dataBufferWords[base + 4] = std::bit_cast<uint32_t>(TEST_BRICK_MIN_Z);
+    dataBufferWords[base + 5] = std::bit_cast<uint32_t>(TEST_BRICK_VOXEL_SIZE);
 }
 
 void RecordCommandBuffer(VkCommandBuffer commandBuffer, VkDescriptorSet descriptorSet, uint32_t imageIndex)
@@ -335,7 +384,7 @@ void DrawFrame(uint32_t currentFrame)
     vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
     vkResetFences(device, 1, &inFlightFences[currentFrame]);
 
-    WriteCameraData(currentFrame);
+    WriteArenaHeaderData(currentFrame);
 
     uint32_t imageIndex = 0;
     vkAcquireNextImageKHR(
@@ -587,7 +636,7 @@ auto main() -> int
 
         for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
         {
-            WriteCameraData(i);
+            WriteArenaHeaderData(i);
             WriteBrickData(i);
         }
     }

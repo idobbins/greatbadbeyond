@@ -7,7 +7,14 @@ layout(std430, binding = 1) readonly buffer DataBuffer
     uint words[];
 } scene;
 
-const uint BRICK_BASE_WORD = 16u;
+const uint HDR_CAM_POS_X = 0u;
+const uint HDR_CAM_POS_Y = 1u;
+const uint HDR_CAM_POS_Z = 2u;
+const uint HDR_CAM_YAW = 3u;
+const uint HDR_CAM_PITCH = 4u;
+const uint HDR_CAM_FOV_Y = 8u;
+const uint HDR_BRICK_COUNT = 15u;
+const uint HDR_BRICK_POOL_OFFSET_WORDS = 17u;
 
 float LoadF(uint wordIndex)
 {
@@ -45,18 +52,20 @@ void main()
         return;
     }
 
-    vec3 cameraPos = vec3(LoadF(0u), LoadF(1u), LoadF(2u));
-    float yaw = LoadF(3u);
-    float pitch = LoadF(4u);
-    float fovY = LoadF(6u);
+    vec3 cameraPos = vec3(LoadF(HDR_CAM_POS_X), LoadF(HDR_CAM_POS_Y), LoadF(HDR_CAM_POS_Z));
+    float yaw = LoadF(HDR_CAM_YAW);
+    float pitch = LoadF(HDR_CAM_PITCH);
+    float fovY = LoadF(HDR_CAM_FOV_Y);
 
-    uint occLo = scene.words[BRICK_BASE_WORD + 0u];
-    uint occHi = scene.words[BRICK_BASE_WORD + 1u];
+    uint brickCount = scene.words[HDR_BRICK_COUNT];
+    uint brickBaseWord = scene.words[HDR_BRICK_POOL_OFFSET_WORDS];
+    uint occLo = scene.words[brickBaseWord + 0u];
+    uint occHi = scene.words[brickBaseWord + 1u];
     vec3 brickMin = vec3(
-        LoadF(BRICK_BASE_WORD + 2u),
-        LoadF(BRICK_BASE_WORD + 3u),
-        LoadF(BRICK_BASE_WORD + 4u));
-    float voxelSize = LoadF(BRICK_BASE_WORD + 5u);
+        LoadF(brickBaseWord + 2u),
+        LoadF(brickBaseWord + 3u),
+        LoadF(brickBaseWord + 4u));
+    float voxelSize = LoadF(brickBaseWord + 5u);
     vec3 brickMax = brickMin + vec3(voxelSize * 4.0);
 
     float cosPitch = cos(pitch);
@@ -93,7 +102,7 @@ void main()
     bool hit = false;
     ivec3 hitCell = ivec3(0);
 
-    if (tExit >= max(tEnter, 0.0))
+    if (brickCount != 0u && tExit >= max(tEnter, 0.0))
     {
         float t = max(tEnter, 0.0) + 1e-4;
         vec3 p = cameraPos + rayDir * t;
