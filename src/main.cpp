@@ -6,6 +6,7 @@
 #include <array>
 #include <bit>
 #include <cmath>
+#include <cstdio>
 #include <cstdint>
 
 constexpr uint32_t WINDOW_WIDTH = 1280;
@@ -829,6 +830,8 @@ auto main() -> int
     }
 
     uint32_t currentFrame = 0;
+    uint32_t fpsFrameCount = 0;
+    double fpsWindowStart = glfwGetTime();
     while (glfwWindowShouldClose(window) == GLFW_FALSE)
     {
         glfwPollEvents();
@@ -839,6 +842,19 @@ auto main() -> int
         UpdateFlightCamera();
         DrawFrame(currentFrame);
         currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
+
+        fpsFrameCount++;
+        const double now = glfwGetTime();
+        const double elapsed = now - fpsWindowStart;
+        if (elapsed >= 1.0)
+        {
+            const double fps = static_cast<double>(fpsFrameCount) / elapsed;
+            char title[64]{};
+            std::snprintf(title, sizeof(title), "greadbadbeyond | %.1f FPS", fps);
+            glfwSetWindowTitle(window, title);
+            fpsFrameCount = 0;
+            fpsWindowStart = now;
+        }
     }
 
     vkDeviceWaitIdle(device);
