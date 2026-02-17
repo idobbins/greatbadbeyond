@@ -8,8 +8,11 @@
 #define VK_PORTABLE 0u
 #endif
 
+
 static const char *APPLICATION_NAME = "greatbadbeyond";
-static const char *INSTANCE_EXTENSIONS[8] = { VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME };
+
+#define MAX_INSTANCE_EXTENSIONS 8u
+static const char *INSTANCE_EXTENSIONS[MAX_INSTANCE_EXTENSIONS] = { VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME };
 
 static VkInstance instance = VK_NULL_HANDLE;
 
@@ -18,10 +21,18 @@ VkSurfaceKHR surface = VK_NULL_HANDLE;
 
 VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
 
-static const char *DEVICE_EXTENSIONS[8] = { VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME };
+#define MAX_DEVICE_EXTENSIONS 8u
+static const char *DEVICE_EXTENSIONS[MAX_DEVICE_EXTENSIONS] = { VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME };
 
 VkDevice device = VK_NULL_HANDLE;
 VkQueue queue = VK_NULL_HANDLE;
+
+VkSwapchainKHR swapchain = VK_NULL_HANDLE;
+
+#define MAX_SWAPCHAIN_IMAGES 8u
+VkImage swapImages[MAX_SWAPCHAIN_IMAGES];
+VkImageView swapImageViews[MAX_SWAPCHAIN_IMAGES];
+uint32_t swapImageCount = 0;
 
 int main(void)
 {
@@ -77,6 +88,50 @@ int main(void)
     }, NULL, &device);
     vkGetDeviceQueue(device, 0, 0, &queue);
 
+    VkSurfaceCapabilitiesKHR surfaceCaps = { 0 };
+    vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice, surface, &surfaceCaps);
+
+    swapImageCount = surfaceCaps.minImageCount + (surfaceCaps.minImageCount < 2u);
+
+    vkCreateSwapchainKHR(device, &(VkSwapchainCreateInfoKHR){
+        .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
+        .surface = surface,
+        .minImageCount = swapImageCount,
+        .imageFormat = VK_FORMAT_B8G8R8A8_UNORM,
+        .imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
+        .imageExtent = surfaceCaps.currentExtent,
+        .imageArrayLayers = 1,
+        .imageUsage = VK_IMAGE_USAGE_STORAGE_BIT,
+        .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .queueFamilyIndexCount = 0,
+        .pQueueFamilyIndices = NULL,
+        .preTransform = surfaceCaps.currentTransform,
+        .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+        .presentMode = VK_PRESENT_MODE_FIFO_KHR,
+        .clipped = VK_TRUE,
+        .oldSwapchain = VK_NULL_HANDLE,
+    }, NULL, &swapchain);
+
+    swapImageCount = MAX_SWAPCHAIN_IMAGES;
+    vkGetSwapchainImagesKHR(device, swapchain, &swapImageCount, swapImages);
+
+    for (uint32_t i = 0; i < swapImageCount; i++)
+    {
+        vkCreateImageView(device, &(VkImageViewCreateInfo){
+            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .image = swapImages[i],
+            .viewType = VK_IMAGE_VIEW_TYPE_2D,
+            .format = VK_FORMAT_B8G8R8A8_UNORM,
+            .subresourceRange = (VkImageSubresourceRange){
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+        }, NULL, &swapImageViews[i]);
+    }
+
     while (glfwWindowShouldClose(window) == GLFW_FALSE)
     {
         glfwPollEvents();
@@ -86,7 +141,13 @@ int main(void)
         }
     }
 
+    for (uint32_t i = 0; i < swapImageCount; i++)
+    {
+        vkDestroyImageView(device, swapImageViews[i], NULL);
+    }
+    vkDestroySwapchainKHR(device, swapchain, NULL);
     vkDestroyDevice(device, NULL);
+    vkDestroySurfaceKHR(instance, surface, NULL);
     vkDestroyInstance(instance, NULL);
     glfwDestroyWindow(window);
     window = NULL;
