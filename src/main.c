@@ -21,6 +21,7 @@ VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
 static const char *DEVICE_EXTENSIONS[8] = { VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME };
 
 VkDevice device = VK_NULL_HANDLE;
+VkQueue queue = VK_NULL_HANDLE;
 
 int main(void)
 {
@@ -74,6 +75,7 @@ int main(void)
         .enabledExtensionCount = 1u + VK_PORTABLE,
         .ppEnabledExtensionNames = DEVICE_EXTENSIONS,
     }, NULL, &device);
+    vkGetDeviceQueue(device, 0, 0, &queue);
 
     while (glfwWindowShouldClose(window) == GLFW_FALSE)
     {
@@ -84,7 +86,6 @@ int main(void)
         }
     }
 
-    vkDestroyDevice(device, NULL);
     vkDestroyDevice(device, NULL);
     vkDestroyInstance(instance, NULL);
     glfwDestroyWindow(window);
