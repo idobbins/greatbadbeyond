@@ -1,9 +1,9 @@
 #define VK_ENABLE_BETA_EXTENSIONS
 #include <vulkan/vulkan.h>
-#include <GLFW/glfw3.h>
 #include <stdint.h>
 
 #include "gradient_comp_spv.h"
+#include "platform.h"
 
 #if defined(__APPLE__)
 #define VK_PORTABLE 1u
@@ -11,17 +11,14 @@
 #define VK_PORTABLE 0u
 #endif
 
-#define MAX_INSTANCE_EXTENSIONS 8u
 #define MAX_DEVICE_EXTENSIONS 8u
 #define FRAME_COUNT 3u
 #define COMPUTE_TILE_SIZE 8u
 
 static const char* APPLICATION_NAME = "greatbadbeyond";
-static const char* INSTANCE_EXTENSIONS[MAX_INSTANCE_EXTENSIONS] = {VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME};
 static const char* DEVICE_EXTENSIONS[MAX_DEVICE_EXTENSIONS] = {VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME};
 
 static VkInstance instance = VK_NULL_HANDLE;
-static GLFWwindow* window = NULL;
 static VkSurfaceKHR surface = VK_NULL_HANDLE;
 static VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
 static VkDevice device = VK_NULL_HANDLE;
@@ -87,22 +84,19 @@ static void recordCommandBuffer(VkCommandBuffer cb, VkDescriptorSet ds, VkImage 
 
 int main(void)
 {
-    glfwInit();
-    glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-    glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
-    window = glfwCreateWindow(1280, 720, APPLICATION_NAME, NULL, NULL);
-
-    uint32_t glfwExtensionCount = 0u;
-    const char** glfwExtensions = glfwGetRequiredInstanceExtensions(&glfwExtensionCount);
-
-    for (uint32_t i = 0u; i < glfwExtensionCount; i++)
+    if (gbbInitWindow(1280u, 720u, APPLICATION_NAME) != 0)
     {
-        INSTANCE_EXTENSIONS[VK_PORTABLE + i] = glfwExtensions[i];
+        return 1;
     }
+
+    const char** instanceExtensions = NULL;
+    uint32_t instanceExtensionCount = 0u;
+    VkInstanceCreateFlags instanceCreateFlags = 0u;
+    gbbGetInstanceExtensions(&instanceExtensions, &instanceExtensionCount, &instanceCreateFlags);
 
     vkCreateInstance(&(VkInstanceCreateInfo){
         .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
-        .flags = VK_PORTABLE * VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR,
+        .flags = instanceCreateFlags,
         .pApplicationInfo = &(VkApplicationInfo){
             .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
             .pApplicationName = APPLICATION_NAME,
@@ -111,11 +105,16 @@ int main(void)
             .engineVersion = VK_MAKE_API_VERSION(0, 0, 1, 0),
             .apiVersion = VK_API_VERSION_1_3,
         },
-        .enabledExtensionCount = VK_PORTABLE + glfwExtensionCount,
-        .ppEnabledExtensionNames = INSTANCE_EXTENSIONS,
+        .enabledExtensionCount = instanceExtensionCount,
+        .ppEnabledExtensionNames = instanceExtensions,
     }, NULL, &instance);
 
-    glfwCreateWindowSurface(instance, window, NULL, &surface);
+    if (gbbCreateSurface(instance, &surface) != VK_SUCCESS)
+    {
+        vkDestroyInstance(instance, NULL);
+        gbbShutdownWindow();
+        return 1;
+    }
 
     uint32_t deviceCount = 1u;
     vkEnumeratePhysicalDevices(instance, &deviceCount, &physicalDevice);
@@ -271,14 +270,8 @@ int main(void)
 
     const VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
     uint32_t frameIndex = 0u;
-    while (glfwWindowShouldClose(window) == GLFW_FALSE)
+    while (gbbPumpEventsOnce() == 0)
     {
-        glfwPollEvents();
-        if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
-        {
-            glfwSetWindowShouldClose(window, GLFW_TRUE);
-        }
-
         uint32_t fi = frameIndex;
         vkWaitForFences(device, 1u, &inFlightFences[fi], VK_TRUE, UINT64_MAX);
         vkResetFences(device, 1u, &inFlightFences[fi]);
@@ -327,7 +320,6 @@ int main(void)
     vkDestroyDevice(device, NULL);
     vkDestroySurfaceKHR(instance, surface, NULL);
     vkDestroyInstance(instance, NULL);
-    glfwDestroyWindow(window);
-    glfwTerminate();
+    gbbShutdownWindow();
     return 0;
 }

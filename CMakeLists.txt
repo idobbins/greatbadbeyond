@@ -7,19 +7,11 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-include(FetchContent)
-
-set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
-set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
-
-FetchContent_Declare(
-    glfw
-    GIT_REPOSITORY https://github.com/glfw/glfw.git
-    GIT_TAG 3.4
-)
-FetchContent_MakeAvailable(glfw)
+if(APPLE)
+    enable_language(OBJC)
+else()
+    message(FATAL_ERROR "This GLFW-free build currently targets macOS only.")
+endif()
 
 find_package(Vulkan REQUIRED)
 
@@ -69,11 +61,16 @@ add_custom_target(embedded_shaders
 
 add_executable(${PROJECT_NAME}
     src/main.c
+    src/macos_platform.m
 )
 
 add_dependencies(${PROJECT_NAME} embedded_shaders)
 target_include_directories(${PROJECT_NAME} PRIVATE ${SHADER_GENERATED_DIR})
-target_link_libraries(${PROJECT_NAME} PRIVATE glfw Vulkan::Vulkan)
+target_link_libraries(${PROJECT_NAME} PRIVATE
+    Vulkan::Vulkan
+    "-framework AppKit"
+    "-framework QuartzCore"
+)
 
 if(MSVC)
     target_compile_options(${PROJECT_NAME} PRIVATE /W4)
