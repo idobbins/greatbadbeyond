@@ -1,3 +1,4 @@
+#define VK_ENABLE_BETA_EXTENSIONS
 #include <vulkan/vulkan.h>
 #include <GLFW/glfw3.h>
 
@@ -14,6 +15,10 @@ static VkInstance instance = VK_NULL_HANDLE;
 
 GLFWwindow *window = NULL;
 VkSurfaceKHR surface = VK_NULL_HANDLE;
+
+VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
+
+static const char *DEVICE_EXTENSIONS[8] = { VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME };
 
 int main(void)
 {
@@ -34,7 +39,7 @@ int main(void)
 
     vkCreateInstance(&(VkInstanceCreateInfo){
         .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
-        .flags = VK_PORTABLE * (1u << 0),
+        .flags = VK_PORTABLE * VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR,
         .pApplicationInfo = &(VkApplicationInfo){
             .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
             .pApplicationName = APPLICATION_NAME,
@@ -48,6 +53,11 @@ int main(void)
     }, NULL, &instance);
 
     glfwCreateWindowSurface(instance, window, NULL, &surface);
+
+    // If your first physical device sucks, oh well.
+    uint32_t physicalDeviceCount = 1;
+    vkEnumeratePhysicalDevices(instance, &physicalDeviceCount, &physicalDevice);
+    DEVICE_EXTENSIONS[VK_PORTABLE] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
 
     while (glfwWindowShouldClose(window) == GLFW_FALSE)
     {
