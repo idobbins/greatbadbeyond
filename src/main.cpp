@@ -19,14 +19,14 @@ constexpr uint32_t MAX_PHYSICAL_DEVICES = 8;
 constexpr uint32_t MAX_SWAPCHAIN_IMAGES = 3;
 constexpr uint32_t ARENA_HEADER_WORDS = 32;
 constexpr uint32_t BRICK_WORDS = 2;
-constexpr float TEST_BRICK_VOXEL_SIZE = 0.5f;
+constexpr float TEST_BRICK_VOXEL_SIZE = 0.25f;
 constexpr float BRICK_WORLD_SIZE = TEST_BRICK_VOXEL_SIZE * 4.0f;
 constexpr float SCENE_GRID_MIN_X = -64.0f;
 constexpr float SCENE_GRID_MIN_Y = -12.0f;
 constexpr float SCENE_GRID_MIN_Z = -64.0f;
-constexpr uint32_t SCENE_GRID_DIM_X = 64;
-constexpr uint32_t SCENE_GRID_DIM_Y = 12;
-constexpr uint32_t SCENE_GRID_DIM_Z = 64;
+constexpr uint32_t SCENE_GRID_DIM_X = 128;
+constexpr uint32_t SCENE_GRID_DIM_Y = 24;
+constexpr uint32_t SCENE_GRID_DIM_Z = 128;
 constexpr uint32_t SCENE_GRID_CELL_COUNT = SCENE_GRID_DIM_X * SCENE_GRID_DIM_Y * SCENE_GRID_DIM_Z;
 constexpr uint32_t MACRO_BRICK_DIM = 4;
 constexpr uint32_t MACRO_GRID_DIM_X = (SCENE_GRID_DIM_X + (MACRO_BRICK_DIM - 1)) / MACRO_BRICK_DIM;
@@ -73,10 +73,15 @@ constexpr uint32_t HDR_CAM_TAN_HALF_FOV_Y = 27;
 constexpr uint32_t HDR_BRICK_VOXEL_SIZE = 28;
 constexpr uint32_t HDR_MACRO_MASK_OFFSET_WORDS = 29;
 
-constexpr float CAMERA_MOVE_SPEED = 3.25f;
-constexpr float CAMERA_MOUSE_SENSITIVITY = 0.0024f;
-constexpr float CAMERA_FOV_Y = 1.0471976f;
-constexpr float CAMERA_SPEED_BOOST_MULTIPLIER = 3.0f;
+constexpr float CAMERA_MOVE_SPEED = 12.0f;
+constexpr float CAMERA_MOUSE_SENSITIVITY = 0.0f;
+constexpr float CAMERA_FOV_Y = 0.29670597f;
+constexpr float CAMERA_YAW = 0.78539816f;
+constexpr float CAMERA_PITCH = -1.0471976f;
+constexpr float CAMERA_SPEED_BOOST_MULTIPLIER = 2.5f;
+constexpr float CAMERA_ZOOM_UNITS_PER_WHEEL_STEP = 3.0f;
+constexpr float CAMERA_MIN_HEIGHT = 8.0f;
+constexpr float CAMERA_MAX_HEIGHT = 72.0f;
 constexpr double CAMERA_FIXED_STEP_SECONDS = 1.0 / 120.0;
 constexpr double CAMERA_MAX_FRAME_DELTA_SECONDS = 0.05;
 constexpr uint32_t CAMERA_MAX_FIXED_STEPS = 8;
@@ -163,19 +168,21 @@ std::array<VkFence, MAX_FRAMES_IN_FLIGHT> inFlightFences{};
 std::array<VkSemaphore, MAX_FRAMES_IN_FLIGHT> imageAvailableSemaphores{};
 std::array<VkSemaphore, MAX_FRAMES_IN_FLIGHT> renderFinishedSemaphores{};
 
-float cameraPosX = 0.0f;
-float cameraPosY = 9.0f;
-float cameraPosZ = 0.0f;
-float cameraYaw = -1.5707963f;
-float cameraPitch = 0.0f;
-double lastMouseX = 0.0;
-double lastMouseY = 0.0;
-bool mouseInitialized = false;
+float cameraPosX = -48.0f;
+float cameraPosY = 28.0f;
+float cameraPosZ = -48.0f;
+float cameraSimPosX = cameraPosX;
+float cameraSimPosY = cameraPosY;
+float cameraSimPosZ = cameraPosZ;
+float cameraPrevPosX = cameraPosX;
+float cameraPrevPosY = cameraPosY;
+float cameraPrevPosZ = cameraPosZ;
+float cameraYaw = CAMERA_YAW;
+float cameraPitch = CAMERA_PITCH;
 bool cameraTimeInitialized = false;
 double lastCameraSampleTime = 0.0;
 double cameraFixedAccumulatorSeconds = 0.0;
-double accumulatedMouseDeltaX = 0.0;
-double accumulatedMouseDeltaY = 0.0;
+double pendingZoomSteps = 0.0;
 uint32_t frameCounter = 0;
 uint32_t sceneBrickCount = 0;
 
@@ -308,7 +315,15 @@ uint64_t BuildTerrainBrickMask(float brickMinX, float brickMinY, float brickMinZ
     return occupancy;
 }
 
-void UpdateFlightCamera()
+void ScrollCallback(GLFWwindow *windowHandle, double xoffset, double yoffset)
+{
+    (void)windowHandle;
+    (void)xoffset;
+    pendingZoomSteps += yoffset;
+    pendingZoomSteps = std::fmax(-64.0, std::fmin(pendingZoomSteps, 64.0));
+}
+
+void UpdateRtsCamera()
 {
     const double now = glfwGetTime();
     if (!cameraTimeInitialized)
@@ -320,24 +335,8 @@ void UpdateFlightCamera()
     lastCameraSampleTime = now;
     deltaTimeSeconds = std::fmax(0.0, std::fmin(deltaTimeSeconds, CAMERA_MAX_FRAME_DELTA_SECONDS));
 
-    double mouseX = 0.0;
-    double mouseY = 0.0;
-    glfwGetCursorPos(window, &mouseX, &mouseY);
-
-    if (!mouseInitialized)
-    {
-        mouseInitialized = true;
-        lastMouseX = mouseX;
-        lastMouseY = mouseY;
-    }
-
-    const double mouseDeltaX = mouseX - lastMouseX;
-    const double mouseDeltaY = mouseY - lastMouseY;
-    lastMouseX = mouseX;
-    lastMouseY = mouseY;
-
-    accumulatedMouseDeltaX += mouseDeltaX;
-    accumulatedMouseDeltaY += mouseDeltaY;
+    cameraYaw = CAMERA_YAW;
+    cameraPitch = CAMERA_PITCH;
 
     cameraFixedAccumulatorSeconds += deltaTimeSeconds;
 
@@ -345,55 +344,57 @@ void UpdateFlightCamera()
     stepsToRun = stepsToRun > CAMERA_MAX_FIXED_STEPS ? CAMERA_MAX_FIXED_STEPS : stepsToRun;
     const uint32_t safeSteps = stepsToRun == 0u ? 1u : stepsToRun;
     const double invSteps = 1.0 / static_cast<double>(safeSteps);
-    const float mouseStepX = static_cast<float>(accumulatedMouseDeltaX * invSteps);
-    const float mouseStepY = static_cast<float>(accumulatedMouseDeltaY * invSteps);
+    const float zoomStep = static_cast<float>(pendingZoomSteps * invSteps);
     const double consumeMask = stepsToRun == 0u ? 0.0 : 1.0;
-    accumulatedMouseDeltaX *= (1.0 - consumeMask);
-    accumulatedMouseDeltaY *= (1.0 - consumeMask);
+    pendingZoomSteps *= (1.0 - consumeMask);
 
     const float moveForward = glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS ? 1.0f : 0.0f;
     const float moveBack = glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS ? 1.0f : 0.0f;
     const float moveRight = glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS ? 1.0f : 0.0f;
     const float moveLeft = glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS ? 1.0f : 0.0f;
-    const float moveUp = glfwGetKey(window, GLFW_KEY_E) == GLFW_PRESS ? 1.0f : 0.0f;
-    const float moveDown = glfwGetKey(window, GLFW_KEY_Q) == GLFW_PRESS ? 1.0f : 0.0f;
     const bool speedBoostHeld = glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS;
     const float moveFB = moveForward - moveBack;
     const float moveRL = moveRight - moveLeft;
-    const float moveUD = moveUp - moveDown;
 
     const float speedBoost = speedBoostHeld ? CAMERA_SPEED_BOOST_MULTIPLIER : 1.0f;
     const float step = CAMERA_MOVE_SPEED * speedBoost * static_cast<float>(CAMERA_FIXED_STEP_SECONDS);
-
-    constexpr float maxPitch = 1.5533430f;
+    const float cosYaw = std::cos(cameraYaw);
+    const float sinYaw = std::sin(cameraYaw);
+    const float planarForwardX = cosYaw;
+    const float planarForwardZ = sinYaw;
+    const float planarRightX = -sinYaw;
+    const float planarRightZ = cosYaw;
+    const float cosPitch = std::cos(cameraPitch);
+    const float sinPitch = std::sin(cameraPitch);
+    const float forwardX = cosPitch * cosYaw;
+    const float forwardY = sinPitch;
+    const float forwardZ = cosPitch * sinYaw;
+    const float zoomDistance = zoomStep * CAMERA_ZOOM_UNITS_PER_WHEEL_STEP;
 
     for (uint32_t i = 0; i < stepsToRun; i++)
     {
-        cameraYaw += mouseStepX * CAMERA_MOUSE_SENSITIVITY;
-        cameraPitch -= mouseStepY * CAMERA_MOUSE_SENSITIVITY;
-        cameraPitch = std::fmax(-maxPitch, std::fmin(cameraPitch, maxPitch));
+        cameraPrevPosX = cameraSimPosX;
+        cameraPrevPosY = cameraSimPosY;
+        cameraPrevPosZ = cameraSimPosZ;
 
-        const float cosPitch = std::cos(cameraPitch);
-        const float sinPitch = std::sin(cameraPitch);
-        const float cosYaw = std::cos(cameraYaw);
-        const float sinYaw = std::sin(cameraYaw);
+        cameraSimPosX += (planarForwardX * moveFB + planarRightX * moveRL) * step;
+        cameraSimPosZ += (planarForwardZ * moveFB + planarRightZ * moveRL) * step;
 
-        const float forwardX = cosPitch * cosYaw;
-        const float forwardY = sinPitch;
-        const float forwardZ = cosPitch * sinYaw;
-
-        const float rightX = -sinYaw;
-        const float rightY = 0.0f;
-        const float rightZ = cosYaw;
-
-        cameraPosX += (forwardX * moveFB + rightX * moveRL) * step;
-        cameraPosY += (forwardY * moveFB + rightY * moveRL + moveUD) * step;
-        cameraPosZ += (forwardZ * moveFB + rightZ * moveRL) * step;
+        cameraSimPosX += forwardX * zoomDistance;
+        cameraSimPosY += forwardY * zoomDistance;
+        cameraSimPosZ += forwardZ * zoomDistance;
+        cameraSimPosY = std::fmax(CAMERA_MIN_HEIGHT, std::fmin(cameraSimPosY, CAMERA_MAX_HEIGHT));
     }
 
     cameraFixedAccumulatorSeconds -= static_cast<double>(stepsToRun) * CAMERA_FIXED_STEP_SECONDS;
     const double maxAccumulator = CAMERA_FIXED_STEP_SECONDS * static_cast<double>(CAMERA_MAX_FIXED_STEPS);
     cameraFixedAccumulatorSeconds = std::fmax(0.0, std::fmin(cameraFixedAccumulatorSeconds, maxAccumulator));
+
+    const float alpha = static_cast<float>(cameraFixedAccumulatorSeconds / CAMERA_FIXED_STEP_SECONDS);
+    const float clampedAlpha = std::fmax(0.0f, std::fmin(alpha, 1.0f));
+    cameraPosX = cameraPrevPosX + (cameraSimPosX - cameraPrevPosX) * clampedAlpha;
+    cameraPosY = cameraPrevPosY + (cameraSimPosY - cameraPrevPosY) * clampedAlpha;
+    cameraPosZ = cameraPrevPosZ + (cameraSimPosZ - cameraPrevPosZ) * clampedAlpha;
 }
 
 void WriteArenaHeaderData(uint32_t currentFrame)
@@ -756,11 +757,8 @@ auto main() -> int
     glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
 
     window = glfwCreateWindow(static_cast<int>(WINDOW_WIDTH), static_cast<int>(WINDOW_HEIGHT), "greadbadbeyond", nullptr, nullptr);
-    glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-    if (glfwRawMouseMotionSupported() == GLFW_TRUE)
-    {
-        glfwSetInputMode(window, GLFW_RAW_MOUSE_MOTION, GLFW_TRUE);
-    }
+    glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+    glfwSetScrollCallback(window, ScrollCallback);
 
     {
         uint32_t glfwExtensionCount = 0;
@@ -1183,7 +1181,7 @@ auto main() -> int
         {
             glfwSetWindowShouldClose(window, GLFW_TRUE);
         }
-        UpdateFlightCamera();
+        UpdateRtsCamera();
         DrawFrame(currentFrame);
         currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
 

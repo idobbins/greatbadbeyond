@@ -50,22 +50,35 @@ float LoadHdrF(uint wordIndex)
     return uintBitsToFloat(pc.hdr[wordIndex]);
 }
 
-int SelectInt(int a, int b, bool selectB)
+const vec3 GROUND_PALETTE[10] = vec3[](
+    vec3(0.905882, 1.000000, 0.800000),
+    vec3(0.776471, 0.964706, 0.525490),
+    vec3(0.709804, 0.894118, 0.458824),
+    vec3(0.643137, 0.823529, 0.388235),
+    vec3(0.576471, 0.756863, 0.317647),
+    vec3(0.509804, 0.690196, 0.231373),
+    vec3(0.396078, 0.568627, 0.000000),
+    vec3(0.274510, 0.403922, 0.000000),
+    vec3(0.160784, 0.243137, 0.000000),
+    vec3(0.066667, 0.113725, 0.000000));
+
+uint HashMix32(uint x)
 {
-    return selectB ? b : a;
+    x ^= x >> 16u;
+    x *= 0x7feb352du;
+    x ^= x >> 15u;
+    x *= 0x846ca68bu;
+    x ^= x >> 16u;
+    return x;
 }
 
-uint SelectUInt(uint a, uint b, bool selectB)
+uint HashGridCell(ivec3 cell)
 {
-    return selectB ? b : a;
-}
-
-ivec3 SelectIVec3(ivec3 a, ivec3 b, bool selectB)
-{
-    return ivec3(
-        SelectInt(a.x, b.x, selectB),
-        SelectInt(a.y, b.y, selectB),
-        SelectInt(a.z, b.z, selectB));
+    uvec3 c = uvec3(cell);
+    uint h = c.x * 0x1f123bb5u;
+    h ^= c.y * 0x9e3779b9u;
+    h ^= c.z * 0x85ebca6bu;
+    return HashMix32(h);
 }
 
 vec3 GradeColor(vec3 c)
@@ -113,11 +126,13 @@ bool TraceBrickSegment(
     float voxelSize,
     float segmentEnterT,
     float segmentExitT,
-    out ivec3 hitCell)
+    out ivec3 hitCell,
+    out ivec3 hitNormal)
 {
     if (segmentExitT < segmentEnterT)
     {
         hitCell = ivec3(0);
+        hitNormal = ivec3(0, 1, 0);
         return false;
     }
 
@@ -125,16 +140,26 @@ bool TraceBrickSegment(
     if (tStart > segmentExitT)
     {
         hitCell = ivec3(0);
+        hitNormal = ivec3(0, 1, 0);
         return false;
     }
 
     vec3 p = rayOrigin + rayDir * tStart;
     float tLimit = max(segmentExitT - tStart, 0.0);
     hitCell = ivec3(0);
+    hitNormal = ivec3(0, 1, 0);
 
     vec3 local = clamp((p - brickMin) / voxelSize, vec3(0.0), vec3(3.9999));
     ivec3 cell = ivec3(floor(local));
     ivec3 stepDir = ivec3(sign(rayDir));
+    vec3 absDir = abs(rayDir);
+    bool majorX = (absDir.x >= absDir.y) && (absDir.x >= absDir.z);
+    bool majorY = (!majorX) && (absDir.y >= absDir.z);
+    bool majorZ = (!majorX) && (!majorY);
+    ivec3 enterNormal = ivec3(
+        majorX ? -stepDir.x : 0,
+        majorY ? -stepDir.y : 0,
+        majorZ ? -stepDir.z : 0);
     vec3 cellMin = brickMin + vec3(cell) * voxelSize;
     vec3 cellMax = cellMin + vec3(voxelSize);
     vec3 nextPlane = mix(cellMin, cellMax, greaterThan(rayDir, vec3(0.0)));
@@ -154,6 +179,7 @@ bool TraceBrickSegment(
         if (IsMaskSet4x4x4(occLo, occHi, cell))
         {
             hitCell = cell;
+            hitNormal = enterNormal;
             return true;
         }
 
@@ -162,6 +188,7 @@ bool TraceBrickSegment(
         bool stepZ = (!stepX) && (!stepY);
 
         ivec3 axisStep = ivec3(stepX ? 1 : 0, stepY ? 1 : 0, stepZ ? 1 : 0);
+        ivec3 nextEnterNormal = -axisStep * stepDir;
         float tNext = stepX ? tMaxAxis.x : (stepY ? tMaxAxis.y : tMaxAxis.z);
         if (tNext > tLimit)
         {
@@ -170,6 +197,7 @@ bool TraceBrickSegment(
 
         cell += axisStep * stepDir;
         tMaxAxis += vec3(stepX ? 1.0 : 0.0, stepY ? 1.0 : 0.0, stepZ ? 1.0 : 0.0) * tDelta;
+        enterNormal = nextEnterNormal;
     }
 
     return false;
@@ -192,12 +220,16 @@ bool TraceMacroSegment(
     uint brickTableBaseWord,
     uint brickPoolBaseWord,
     out ivec3 hitCell,
-    out uint hitBrickSlot)
+    out uint hitBrickSlot,
+    out ivec3 hitGridCell,
+    out ivec3 hitNormal)
 {
     if (segmentExitT < segmentEnterT)
     {
         hitCell = ivec3(0);
         hitBrickSlot = 0u;
+        hitGridCell = ivec3(0);
+        hitNormal = ivec3(0, 1, 0);
         return false;
     }
 
@@ -206,6 +238,8 @@ bool TraceMacroSegment(
     {
         hitCell = ivec3(0);
         hitBrickSlot = 0u;
+        hitGridCell = ivec3(0);
+        hitNormal = ivec3(0, 1, 0);
         return false;
     }
 
@@ -214,6 +248,8 @@ bool TraceMacroSegment(
     float tLimit = max(segmentExitT - tStart, 0.0);
     hitCell = ivec3(0);
     hitBrickSlot = 0u;
+    hitGridCell = ivec3(0);
+    hitNormal = ivec3(0, 1, 0);
 
     vec3 local = clamp((p - macroMin) / brickWorldSize, vec3(0.0), vec3(3.9999));
     ivec3 localCell = ivec3(floor(local));
@@ -255,6 +291,7 @@ bool TraceMacroSegment(
                     uint occHi = scene.words[brickBaseWord + 1u];
                     vec3 brickMin = gridMin + vec3(gridCell) * brickWorldSize;
                     ivec3 localHitCell = ivec3(0);
+                    ivec3 localHitNormal = ivec3(0, 1, 0);
                     bool localHit = TraceBrickSegment(
                         rayOrigin,
                         rayDir,
@@ -265,11 +302,14 @@ bool TraceMacroSegment(
                         voxelSize,
                         localCellEnterT,
                         localCellExitT,
-                        localHitCell);
+                        localHitCell,
+                        localHitNormal);
                     if (localHit)
                     {
                         hitCell = localHitCell;
                         hitBrickSlot = brickSlot;
+                        hitGridCell = gridCell;
+                        hitNormal = localHitNormal;
                         return true;
                     }
                 }
@@ -352,6 +392,8 @@ void main()
 
     bool hit = false;
     ivec3 hitCell = ivec3(0);
+    ivec3 hitGridCell = ivec3(0);
+    ivec3 hitNormal = ivec3(0, 1, 0);
     uint hitBrickSlot = 0u;
     ivec3 macroDim = max((safeGridDim + ivec3(int(MACRO_BRICK_DIM - 1u))) / int(MACRO_BRICK_DIM), ivec3(1));
 
@@ -393,6 +435,8 @@ void main()
             uint macroOccHi = scene.words[macroWordBase + 1u];
             bool hasMacroData = (macroOccLo | macroOccHi) != 0u;
             ivec3 localHitCell = ivec3(0);
+            ivec3 localHitGridCell = ivec3(0);
+            ivec3 localHitNormal = ivec3(0, 1, 0);
             uint localHitBrickSlot = 0u;
             bool localHit = false;
 
@@ -415,13 +459,19 @@ void main()
                     brickTableBaseWord,
                     brickPoolBaseWord,
                     localHitCell,
-                    localHitBrickSlot);
+                    localHitBrickSlot,
+                    localHitGridCell,
+                    localHitNormal);
             }
 
-            bool acceptHit = localHit && !hit;
-            hit = hit || localHit;
-            hitCell = SelectIVec3(hitCell, localHitCell, acceptHit);
-            hitBrickSlot = SelectUInt(hitBrickSlot, localHitBrickSlot, acceptHit);
+            if (localHit && !hit)
+            {
+                hit = true;
+                hitCell = localHitCell;
+                hitGridCell = localHitGridCell;
+                hitNormal = localHitNormal;
+                hitBrickSlot = localHitBrickSlot;
+            }
             if (hit)
             {
                 break;
@@ -438,14 +488,24 @@ void main()
         }
     }
 
-    vec3 cellColor = (vec3(hitCell) + vec3(0.5)) / 4.0;
-    vec3 slotColor = vec3(
-        float((hitBrickSlot * 73u + 41u) & 255u),
-        float((hitBrickSlot * 131u + 29u) & 255u),
-        float((hitBrickSlot * 197u + 11u) & 255u)) / 255.0;
-    vec3 hitColor = mix(vec3(0.08, 0.10, 0.14), cellColor * 0.6 + slotColor * 0.9, 0.9);
-    float hitMask = hit ? 1.0 : 0.0;
-    vec3 color = mix(sky, hitColor, hitMask);
+    vec3 color = sky;
+    if (hit)
+    {
+        ivec3 hitVoxelCell = hitGridCell * 4 + hitCell;
+        uint colorHash = HashGridCell(hitVoxelCell);
+        uint paletteIndex = colorHash % 10u;
+        vec3 albedo = GROUND_PALETTE[paletteIndex];
+        float paletteJitter = float((colorHash >> 8u) & 15u) * (1.0 / 15.0);
+        albedo *= mix(0.94, 1.08, paletteJitter);
+
+        vec3 normal = normalize(vec3(hitNormal));
+        vec3 lightDir = normalize(vec3(0.36, 0.82, 0.44));
+        float ndotl = max(dot(normal, lightDir), 0.0);
+        float hemi = clamp(normal.y * 0.5 + 0.5, 0.0, 1.0);
+        float lighting = 0.26 + ndotl * 0.58 + hemi * 0.16;
+        float altitude = float(hitVoxelCell.y) / max(float(gridDim.y * 4 - 1), 1.0);
+        color = albedo * lighting * mix(0.92, 1.05, altitude);
+    }
 
     color = GradeColor(color);
     imageStore(outImage, pixel, vec4(color, 1.0));
