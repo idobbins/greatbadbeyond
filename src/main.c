@@ -13,7 +13,7 @@
 
 #define MAX_INSTANCE_EXTENSIONS 8u
 #define MAX_DEVICE_EXTENSIONS 8u
-#define FRAME_COUNT 2u
+#define FRAME_COUNT 3u
 #define COMPUTE_TILE_SIZE 8u
 
 static const char *APPLICATION_NAME = "greatbadbeyond";
@@ -424,7 +424,7 @@ int main(void)
             .pResults = NULL,
         };
         vkQueuePresentKHR(queue, &presentInfo);
-        frameIndex = (frameIndex + 1u) & (FRAME_COUNT - 1u);
+        frameIndex = (frameIndex + 1u) % FRAME_COUNT;
     }
 
     vkDeviceWaitIdle(device);
