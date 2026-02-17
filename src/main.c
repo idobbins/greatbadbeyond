@@ -13,8 +13,7 @@
 
 #define MAX_INSTANCE_EXTENSIONS 8u
 #define MAX_DEVICE_EXTENSIONS 8u
-#define MAX_SWAPCHAIN_IMAGES 8u
-#define MAX_FRAMES_IN_FLIGHT 2u
+#define FRAME_COUNT 2u
 #define COMPUTE_TILE_SIZE 8u
 
 static const char *APPLICATION_NAME = "greatbadbeyond";
@@ -33,30 +32,26 @@ static VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
 static VkDevice device = VK_NULL_HANDLE;
 static VkQueue queue = VK_NULL_HANDLE;
 static VkSwapchainKHR swapchain = VK_NULL_HANDLE;
-static VkImage swapImages[MAX_SWAPCHAIN_IMAGES];
-static VkImageView swapImageViews[MAX_SWAPCHAIN_IMAGES];
-static uint32_t swapImageCount = 0;
+static VkImage swapImages[FRAME_COUNT];
+static VkImageView swapImageViews[FRAME_COUNT];
 static VkExtent2D swapExtent = { 0u, 0u };
 
 static VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE;
 static VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
-static VkDescriptorSet descriptorSets[MAX_SWAPCHAIN_IMAGES];
+static VkDescriptorSet descriptorSets[FRAME_COUNT];
 
 static VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
 static VkPipeline pipeline = VK_NULL_HANDLE;
 
 static VkCommandPool commandPool = VK_NULL_HANDLE;
-static VkCommandBuffer cmdNormal[MAX_SWAPCHAIN_IMAGES];
-static VkCommandBuffer cmdFirst[MAX_SWAPCHAIN_IMAGES];
-static uint8_t firstUse[MAX_SWAPCHAIN_IMAGES];
+static VkCommandBuffer commandBuffers[FRAME_COUNT];
 
-static VkSemaphore imageAvailableSemaphore[MAX_FRAMES_IN_FLIGHT];
-static VkSemaphore renderFinishedSemaphore[MAX_FRAMES_IN_FLIGHT];
-static VkSemaphore frameDone = VK_NULL_HANDLE;
-static uint64_t frameValue = 0;
+static VkSemaphore imageAvailableSemaphore[FRAME_COUNT];
+static VkSemaphore renderFinishedSemaphore[FRAME_COUNT];
+static VkFence inFlightFences[FRAME_COUNT];
 static uint32_t frameIndex = 0u;
 
-static void recordCommandBuffer(VkCommandBuffer commandBuffer, VkDescriptorSet descriptorSet, VkImage swapImage, VkImageLayout oldLayout)
+static void recordCommandBuffer(VkCommandBuffer commandBuffer, VkDescriptorSet descriptorSet, VkImage swapImage)
 {
     vkBeginCommandBuffer(commandBuffer, &(VkCommandBufferBeginInfo){
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -72,7 +67,7 @@ static void recordCommandBuffer(VkCommandBuffer commandBuffer, VkDescriptorSet d
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
         .srcAccessMask = 0,
         .dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
-        .oldLayout = oldLayout,
+        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
         .newLayout = VK_IMAGE_LAYOUT_GENERAL,
         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
@@ -127,7 +122,7 @@ int main(void)
     glfwInit();
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
-    window = glfwCreateWindow(1920, 1080, APPLICATION_NAME, NULL, NULL);
+    window = glfwCreateWindow(1280, 720, APPLICATION_NAME, NULL, NULL);
 
     uint32_t glfwExtensionCount = 0;
     const char **glfwExtensions = glfwGetRequiredInstanceExtensions(&glfwExtensionCount);
@@ -195,18 +190,13 @@ int main(void)
     vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice, surface, &surfaceCaps);
 
     swapExtent = surfaceCaps.currentExtent;
-    swapImageCount = surfaceCaps.minImageCount + (surfaceCaps.minImageCount < 2u);
-    if ((surfaceCaps.maxImageCount > 0u) && (swapImageCount > surfaceCaps.maxImageCount))
-    {
-        swapImageCount = surfaceCaps.maxImageCount;
-    }
 
     VkSwapchainCreateInfoKHR swapchainCreateInfo = {
         .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
         .pNext = NULL,
         .flags = 0,
         .surface = surface,
-        .minImageCount = swapImageCount,
+        .minImageCount = FRAME_COUNT,
         .imageFormat = VK_FORMAT_B8G8R8A8_UNORM,
         .imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
         .imageExtent = swapExtent,
@@ -223,12 +213,10 @@ int main(void)
     };
     vkCreateSwapchainKHR(device, &swapchainCreateInfo, NULL, &swapchain);
 
-    uint32_t actualSwapImages = 0u;
-    vkGetSwapchainImagesKHR(device, swapchain, &actualSwapImages, NULL);
-    swapImageCount = actualSwapImages > MAX_SWAPCHAIN_IMAGES ? MAX_SWAPCHAIN_IMAGES : actualSwapImages;
+    uint32_t swapImageCount = FRAME_COUNT;
     vkGetSwapchainImagesKHR(device, swapchain, &swapImageCount, swapImages);
 
-    for (uint32_t i = 0; i < swapImageCount; i++)
+    for (uint32_t i = 0; i < FRAME_COUNT; i++)
     {
         vkCreateImageView(device, &(VkImageViewCreateInfo){
             .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
@@ -264,21 +252,21 @@ int main(void)
 
     VkDescriptorPoolSize descriptorPoolSize = {
         .type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-        .descriptorCount = swapImageCount,
+        .descriptorCount = FRAME_COUNT,
     };
 
     VkDescriptorPoolCreateInfo descriptorPoolCreateInfo = {
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
         .pNext = NULL,
         .flags = 0,
-        .maxSets = swapImageCount,
+        .maxSets = FRAME_COUNT,
         .poolSizeCount = 1u,
         .pPoolSizes = &descriptorPoolSize,
     };
     vkCreateDescriptorPool(device, &descriptorPoolCreateInfo, NULL, &descriptorPool);
 
-    VkDescriptorSetLayout descriptorSetLayouts[MAX_SWAPCHAIN_IMAGES];
-    for (uint32_t i = 0; i < swapImageCount; i++)
+    VkDescriptorSetLayout descriptorSetLayouts[FRAME_COUNT];
+    for (uint32_t i = 0; i < FRAME_COUNT; i++)
     {
         descriptorSetLayouts[i] = descriptorSetLayout;
     }
@@ -287,12 +275,12 @@ int main(void)
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
         .pNext = NULL,
         .descriptorPool = descriptorPool,
-        .descriptorSetCount = swapImageCount,
+        .descriptorSetCount = FRAME_COUNT,
         .pSetLayouts = descriptorSetLayouts,
     };
     vkAllocateDescriptorSets(device, &descriptorSetAllocateInfo, descriptorSets);
 
-    for (uint32_t i = 0; i < swapImageCount; i++)
+    for (uint32_t i = 0; i < FRAME_COUNT; i++)
     {
         VkDescriptorImageInfo descriptorImageInfo = {
             .sampler = VK_NULL_HANDLE,
@@ -370,22 +358,12 @@ int main(void)
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
         .commandPool = commandPool,
         .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-        .commandBufferCount = swapImageCount,
-    }, cmdNormal);
+        .commandBufferCount = FRAME_COUNT,
+    }, commandBuffers);
 
-    vkAllocateCommandBuffers(device, &(VkCommandBufferAllocateInfo){
-        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-        .commandPool = commandPool,
-        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-        .commandBufferCount = swapImageCount,
-    }, cmdFirst);
-
-    for (uint32_t i = 0; i < swapImageCount; i++)
+    for (uint32_t i = 0; i < FRAME_COUNT; i++)
     {
-        firstUse[i] = 1u;
-
-        recordCommandBuffer(cmdFirst[i], descriptorSets[i], swapImages[i], VK_IMAGE_LAYOUT_UNDEFINED);
-        recordCommandBuffer(cmdNormal[i], descriptorSets[i], swapImages[i], VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+        recordCommandBuffer(commandBuffers[i], descriptorSets[i], swapImages[i]);
     }
 
     VkSemaphoreCreateInfo semaphoreCreateInfo = {
@@ -393,21 +371,15 @@ int main(void)
         .pNext = NULL,
         .flags = 0,
     };
-    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+    for (uint32_t i = 0; i < FRAME_COUNT; i++)
     {
         vkCreateSemaphore(device, &semaphoreCreateInfo, NULL, &imageAvailableSemaphore[i]);
         vkCreateSemaphore(device, &semaphoreCreateInfo, NULL, &renderFinishedSemaphore[i]);
+        vkCreateFence(device, &(VkFenceCreateInfo){
+            .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+            .flags = VK_FENCE_CREATE_SIGNALED_BIT,
+        }, NULL, &inFlightFences[i]);
     }
-
-    VkSemaphoreTypeCreateInfo semType = {
-        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
-        .semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE,
-        .initialValue = 0u,
-    };
-    vkCreateSemaphore(device, &(VkSemaphoreCreateInfo){
-        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
-        .pNext = &semType,
-    }, NULL, &frameDone);
 
     while (glfwWindowShouldClose(window) == GLFW_FALSE)
     {
@@ -417,53 +389,29 @@ int main(void)
             glfwSetWindowShouldClose(window, GLFW_TRUE);
         }
 
-        uint64_t back = (uint64_t)(MAX_FRAMES_IN_FLIGHT - 1u);
-        uint64_t waitValue = (frameValue > back) ? (frameValue - back) : 0u;
         uint32_t fi = frameIndex;
-
-        vkWaitSemaphores(device, &(VkSemaphoreWaitInfo){
-            .sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
-            .semaphoreCount = 1u,
-            .pSemaphores = &frameDone,
-            .pValues = &waitValue,
-        }, UINT64_MAX);
+        vkWaitForFences(device, 1u, &inFlightFences[fi], VK_TRUE, UINT64_MAX);
+        vkResetFences(device, 1u, &inFlightFences[fi]);
 
         uint32_t imageIndex = 0u;
         vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, imageAvailableSemaphore[fi], VK_NULL_HANDLE, &imageIndex);
 
-        uint32_t sel = (uint32_t)firstUse[imageIndex];
-        firstUse[imageIndex] = 0u;
-
-        uint64_t signalValue = ++frameValue;
-        // Value arrays are positional: they must match semaphore array order.
-        VkSemaphore waitSems[] = { imageAvailableSemaphore[fi] };
-        VkSemaphore signalSems[] = { renderFinishedSemaphore[fi], frameDone };
-        uint64_t waitValues[] = { 0u };
-        uint64_t signalValues[] = { 0u, signalValue };
-
-        VkTimelineSemaphoreSubmitInfo tls = {
-            .sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
-            .waitSemaphoreValueCount = 1u,
-            .pWaitSemaphoreValues = waitValues,
-            .signalSemaphoreValueCount = 2u,
-            .pSignalSemaphoreValues = signalValues,
-        };
-
         VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
-        VkCommandBuffer *cmds = sel ? cmdFirst : cmdNormal;
+        VkSemaphore waitSems[] = { imageAvailableSemaphore[fi] };
+        VkSemaphore signalSems[] = { renderFinishedSemaphore[fi] };
 
         VkSubmitInfo submitInfo = {
             .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-            .pNext = &tls,
+            .pNext = NULL,
             .waitSemaphoreCount = 1u,
             .pWaitSemaphores = waitSems,
             .pWaitDstStageMask = &waitStage,
             .commandBufferCount = 1u,
-            .pCommandBuffers = &cmds[imageIndex],
-            .signalSemaphoreCount = 2u,
+            .pCommandBuffers = &commandBuffers[imageIndex],
+            .signalSemaphoreCount = 1u,
             .pSignalSemaphores = signalSems,
         };
-        vkQueueSubmit(queue, 1u, &submitInfo, VK_NULL_HANDLE);
+        vkQueueSubmit(queue, 1u, &submitInfo, inFlightFences[fi]);
 
         VkPresentInfoKHR presentInfo = {
             .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
@@ -476,14 +424,14 @@ int main(void)
             .pResults = NULL,
         };
         vkQueuePresentKHR(queue, &presentInfo);
-        frameIndex = (frameIndex + 1u) & 1u;
+        frameIndex = (frameIndex + 1u) & (FRAME_COUNT - 1u);
     }
 
     vkDeviceWaitIdle(device);
 
-    vkDestroySemaphore(device, frameDone, NULL);
-    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+    for (uint32_t i = 0; i < FRAME_COUNT; i++)
     {
+        vkDestroyFence(device, inFlightFences[i], NULL);
         vkDestroySemaphore(device, renderFinishedSemaphore[i], NULL);
         vkDestroySemaphore(device, imageAvailableSemaphore[i], NULL);
     }
@@ -494,7 +442,7 @@ int main(void)
     vkDestroyDescriptorPool(device, descriptorPool, NULL);
     vkDestroyDescriptorSetLayout(device, descriptorSetLayout, NULL);
 
-    for (uint32_t i = 0; i < swapImageCount; i++)
+    for (uint32_t i = 0; i < FRAME_COUNT; i++)
     {
         vkDestroyImageView(device, swapImageViews[i], NULL);
     }
