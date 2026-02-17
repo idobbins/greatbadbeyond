@@ -47,8 +47,6 @@ int main(void)
         .ppEnabledExtensionNames = INSTANCE_EXTENSIONS,
     }, NULL, &instance);
 
-
-
     glfwCreateWindowSurface(instance, window, NULL, &surface);
 
     while (glfwWindowShouldClose(window) == GLFW_FALSE)
