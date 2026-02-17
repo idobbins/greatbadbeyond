@@ -6,6 +6,10 @@ layout(std430, binding = 1) readonly buffer DataBuffer
 {
     uint words[];
 } scene;
+layout(push_constant) uniform HeaderPush
+{
+    uint hdr[32];
+} pc;
 
 const uint HDR_CAM_POS_X = 0u;
 const uint HDR_CAM_POS_Y = 1u;
@@ -33,14 +37,17 @@ const uint HDR_CAM_UP_Y = 25u;
 const uint HDR_CAM_UP_Z = 26u;
 const uint HDR_CAM_TAN_HALF_FOV_Y = 27u;
 const uint HDR_BRICK_VOXEL_SIZE = 28u;
-const uint BRICK_WORD_STRIDE = 16u;
+const uint HDR_MACRO_MASK_OFFSET_WORDS = 29u;
+const uint BRICK_WORD_STRIDE = 2u;
+const uint MACRO_BRICK_DIM = 4u;
 const uint EMPTY_BRICK_SLOT = 0xFFFFFFFFu;
-const uint MAX_GLOBAL_STEPS = 176u;
-const uint MAX_LOCAL_STEPS = 16u;
+const uint MAX_MACRO_STEPS = 96u;
+const uint MAX_MACRO_LOCAL_STEPS = 20u;
+const uint MAX_LOCAL_STEPS = 12u;
 
-float LoadF(uint wordIndex)
+float LoadHdrF(uint wordIndex)
 {
-    return uintBitsToFloat(scene.words[wordIndex]);
+    return uintBitsToFloat(pc.hdr[wordIndex]);
 }
 
 int SelectInt(int a, int b, bool selectB)
@@ -75,7 +82,7 @@ vec3 GradeColor(vec3 c)
     return c;
 }
 
-bool IsVoxelSet(uint occLo, uint occHi, ivec3 cell)
+bool IsMaskSet4x4x4(uint occLo, uint occHi, ivec3 cell)
 {
     // 2-bit Morton packing for x/y/z in [0,3], yielding bit index [0,63].
     uint x = uint(cell.x);
@@ -96,22 +103,35 @@ uint GridLinearIndex(ivec3 cell, ivec3 dim)
     return uint(cell.x + cell.y * dim.x + cell.z * dim.x * dim.y);
 }
 
-bool TraceBrick(vec3 rayOrigin, vec3 rayDir, vec3 safeDir, vec3 invDir, uint occLo, uint occHi, vec3 brickMin, float voxelSize, out ivec3 hitCell)
+bool TraceBrickSegment(
+    vec3 rayOrigin,
+    vec3 rayDir,
+    vec3 safeDir,
+    uint occLo,
+    uint occHi,
+    vec3 brickMin,
+    float voxelSize,
+    float segmentEnterT,
+    float segmentExitT,
+    out ivec3 hitCell)
 {
-    vec3 brickMax = brickMin + vec3(voxelSize * 4.0);
-    vec3 t0 = (brickMin - rayOrigin) * invDir;
-    vec3 t1 = (brickMax - rayOrigin) * invDir;
-    vec3 tMin3 = min(t0, t1);
-    vec3 tMax3 = max(t0, t1);
-    float tEnter = max(max(tMin3.x, tMin3.y), tMin3.z);
-    float tExit = min(min(tMax3.x, tMax3.y), tMax3.z);
+    if (segmentExitT < segmentEnterT)
+    {
+        hitCell = ivec3(0);
+        return false;
+    }
 
-    bool localActive = tExit >= max(tEnter, 0.0);
-    bool hit = false;
+    float tStart = segmentEnterT + 1e-4;
+    if (tStart > segmentExitT)
+    {
+        hitCell = ivec3(0);
+        return false;
+    }
+
+    vec3 p = rayOrigin + rayDir * tStart;
+    float tLimit = max(segmentExitT - tStart, 0.0);
     hitCell = ivec3(0);
 
-    float t = max(tEnter, 0.0) + 1e-4;
-    vec3 p = rayOrigin + rayDir * t;
     vec3 local = clamp((p - brickMin) / voxelSize, vec3(0.0), vec3(3.9999));
     ivec3 cell = ivec3(floor(local));
     ivec3 stepDir = ivec3(sign(rayDir));
@@ -123,57 +143,185 @@ bool TraceBrick(vec3 rayOrigin, vec3 rayDir, vec3 safeDir, vec3 invDir, uint occ
 
     for (uint i = 0u; i < MAX_LOCAL_STEPS; i++)
     {
-        bool inside = localActive &&
-                      cell.x >= 0 && cell.x < 4 &&
+        bool inside = cell.x >= 0 && cell.x < 4 &&
                       cell.y >= 0 && cell.y < 4 &&
                       cell.z >= 0 && cell.z < 4;
-        bool hitNow = inside && IsVoxelSet(occLo, occHi, cell);
-        bool writeHit = hitNow && !hit;
-        hitCell = SelectIVec3(hitCell, cell, writeHit);
-        hit = hit || hitNow;
+        if (!inside)
+        {
+            break;
+        }
 
-        bool continueLocal = inside && !hitNow;
-        bool stepX = continueLocal && (tMaxAxis.x <= tMaxAxis.y) && (tMaxAxis.x <= tMaxAxis.z);
-        bool stepY = continueLocal && (!stepX) && (tMaxAxis.y <= tMaxAxis.z);
-        bool stepZ = continueLocal && (!stepX) && (!stepY);
+        if (IsMaskSet4x4x4(occLo, occHi, cell))
+        {
+            hitCell = cell;
+            return true;
+        }
+
+        bool stepX = (tMaxAxis.x <= tMaxAxis.y) && (tMaxAxis.x <= tMaxAxis.z);
+        bool stepY = (!stepX) && (tMaxAxis.y <= tMaxAxis.z);
+        bool stepZ = (!stepX) && (!stepY);
 
         ivec3 axisStep = ivec3(stepX ? 1 : 0, stepY ? 1 : 0, stepZ ? 1 : 0);
+        float tNext = stepX ? tMaxAxis.x : (stepY ? tMaxAxis.y : tMaxAxis.z);
+        if (tNext > tLimit)
+        {
+            break;
+        }
+
         cell += axisStep * stepDir;
-
-        vec3 stepMask = vec3(stepX ? 1.0 : 0.0, stepY ? 1.0 : 0.0, stepZ ? 1.0 : 0.0);
-        tMaxAxis += stepMask * tDelta;
-
-        localActive = continueLocal;
+        tMaxAxis += vec3(stepX ? 1.0 : 0.0, stepY ? 1.0 : 0.0, stepZ ? 1.0 : 0.0) * tDelta;
     }
 
-    return hit;
+    return false;
+}
+
+bool TraceMacroSegment(
+    vec3 rayOrigin,
+    vec3 rayDir,
+    vec3 safeDir,
+    uint macroOccLo,
+    uint macroOccHi,
+    ivec3 macroCell,
+    ivec3 gridDim,
+    vec3 gridMin,
+    float brickWorldSize,
+    float voxelSize,
+    float segmentEnterT,
+    float segmentExitT,
+    uint brickCount,
+    uint brickTableBaseWord,
+    uint brickPoolBaseWord,
+    out ivec3 hitCell,
+    out uint hitBrickSlot)
+{
+    if (segmentExitT < segmentEnterT)
+    {
+        hitCell = ivec3(0);
+        hitBrickSlot = 0u;
+        return false;
+    }
+
+    float tStart = segmentEnterT + 1e-4;
+    if (tStart > segmentExitT)
+    {
+        hitCell = ivec3(0);
+        hitBrickSlot = 0u;
+        return false;
+    }
+
+    vec3 macroMin = gridMin + vec3(macroCell * int(MACRO_BRICK_DIM)) * brickWorldSize;
+    vec3 p = rayOrigin + rayDir * tStart;
+    float tLimit = max(segmentExitT - tStart, 0.0);
+    hitCell = ivec3(0);
+    hitBrickSlot = 0u;
+
+    vec3 local = clamp((p - macroMin) / brickWorldSize, vec3(0.0), vec3(3.9999));
+    ivec3 localCell = ivec3(floor(local));
+    ivec3 stepDir = ivec3(sign(rayDir));
+    vec3 cellMin = macroMin + vec3(localCell) * brickWorldSize;
+    vec3 cellMax = cellMin + vec3(brickWorldSize);
+    vec3 nextPlane = mix(cellMin, cellMax, greaterThan(rayDir, vec3(0.0)));
+    vec3 tMaxAxis = abs((nextPlane - p) / safeDir);
+    vec3 tDelta = abs(vec3(brickWorldSize) / safeDir);
+    float localCellEnterT = tStart;
+
+    for (uint i = 0u; i < MAX_MACRO_LOCAL_STEPS; i++)
+    {
+        bool insideMacro = localCell.x >= 0 && localCell.x < 4 &&
+                           localCell.y >= 0 && localCell.y < 4 &&
+                           localCell.z >= 0 && localCell.z < 4;
+        if (!insideMacro)
+        {
+            break;
+        }
+
+        float localCellExitT = min(segmentExitT, tStart + min(min(tMaxAxis.x, tMaxAxis.y), tMaxAxis.z));
+        bool macroBitSet = IsMaskSet4x4x4(macroOccLo, macroOccHi, localCell);
+        if (macroBitSet)
+        {
+            ivec3 gridCell = macroCell * int(MACRO_BRICK_DIM) + localCell;
+            bool insideGrid = gridCell.x >= 0 && gridCell.x < gridDim.x &&
+                              gridCell.y >= 0 && gridCell.y < gridDim.y &&
+                              gridCell.z >= 0 && gridCell.z < gridDim.z;
+            if (insideGrid)
+            {
+                uint gridIndex = GridLinearIndex(gridCell, gridDim);
+                uint brickSlot = scene.words[brickTableBaseWord + gridIndex];
+                bool hasBrick = (brickSlot != EMPTY_BRICK_SLOT) && (brickSlot < brickCount);
+                if (hasBrick)
+                {
+                    uint brickBaseWord = brickPoolBaseWord + brickSlot * BRICK_WORD_STRIDE;
+                    uint occLo = scene.words[brickBaseWord + 0u];
+                    uint occHi = scene.words[brickBaseWord + 1u];
+                    vec3 brickMin = gridMin + vec3(gridCell) * brickWorldSize;
+                    ivec3 localHitCell = ivec3(0);
+                    bool localHit = TraceBrickSegment(
+                        rayOrigin,
+                        rayDir,
+                        safeDir,
+                        occLo,
+                        occHi,
+                        brickMin,
+                        voxelSize,
+                        localCellEnterT,
+                        localCellExitT,
+                        localHitCell);
+                    if (localHit)
+                    {
+                        hitCell = localHitCell;
+                        hitBrickSlot = brickSlot;
+                        return true;
+                    }
+                }
+            }
+        }
+
+        bool stepX = (tMaxAxis.x <= tMaxAxis.y) && (tMaxAxis.x <= tMaxAxis.z);
+        bool stepY = (!stepX) && (tMaxAxis.y <= tMaxAxis.z);
+        bool stepZ = (!stepX) && (!stepY);
+
+        ivec3 axisStep = ivec3(stepX ? 1 : 0, stepY ? 1 : 0, stepZ ? 1 : 0);
+        float tNext = stepX ? tMaxAxis.x : (stepY ? tMaxAxis.y : tMaxAxis.z);
+        if (tNext > tLimit)
+        {
+            break;
+        }
+
+        localCell += axisStep * stepDir;
+        tMaxAxis += vec3(stepX ? 1.0 : 0.0, stepY ? 1.0 : 0.0, stepZ ? 1.0 : 0.0) * tDelta;
+        localCellEnterT = localCellExitT;
+    }
+
+    return false;
 }
 
 void main()
 {
     ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
     ivec2 imageSizePx = imageSize(outImage);
-    bool inBounds = pixel.x < imageSizePx.x && pixel.y < imageSizePx.y;
-    ivec2 imageMax = max(imageSizePx - ivec2(1), ivec2(0));
-    ivec2 safePixel = clamp(pixel, ivec2(0), imageMax);
+    if (pixel.x >= imageSizePx.x || pixel.y >= imageSizePx.y)
+    {
+        return;
+    }
 
-    vec3 cameraPos = vec3(LoadF(HDR_CAM_POS_X), LoadF(HDR_CAM_POS_Y), LoadF(HDR_CAM_POS_Z));
-    vec3 forward = vec3(LoadF(HDR_CAM_FORWARD_X), LoadF(HDR_CAM_FORWARD_Y), LoadF(HDR_CAM_FORWARD_Z));
-    vec3 right = vec3(LoadF(HDR_CAM_RIGHT_X), LoadF(HDR_CAM_RIGHT_Y), LoadF(HDR_CAM_RIGHT_Z));
-    vec3 up = vec3(LoadF(HDR_CAM_UP_X), LoadF(HDR_CAM_UP_Y), LoadF(HDR_CAM_UP_Z));
-    float tanHalfFov = LoadF(HDR_CAM_TAN_HALF_FOV_Y);
-    vec3 gridMin = vec3(LoadF(HDR_GRID_MIN_X), LoadF(HDR_GRID_MIN_Y), LoadF(HDR_GRID_MIN_Z));
+    vec3 cameraPos = vec3(LoadHdrF(HDR_CAM_POS_X), LoadHdrF(HDR_CAM_POS_Y), LoadHdrF(HDR_CAM_POS_Z));
+    vec3 forward = vec3(LoadHdrF(HDR_CAM_FORWARD_X), LoadHdrF(HDR_CAM_FORWARD_Y), LoadHdrF(HDR_CAM_FORWARD_Z));
+    vec3 right = vec3(LoadHdrF(HDR_CAM_RIGHT_X), LoadHdrF(HDR_CAM_RIGHT_Y), LoadHdrF(HDR_CAM_RIGHT_Z));
+    vec3 up = vec3(LoadHdrF(HDR_CAM_UP_X), LoadHdrF(HDR_CAM_UP_Y), LoadHdrF(HDR_CAM_UP_Z));
+    float tanHalfFov = LoadHdrF(HDR_CAM_TAN_HALF_FOV_Y);
+    vec3 gridMin = vec3(LoadHdrF(HDR_GRID_MIN_X), LoadHdrF(HDR_GRID_MIN_Y), LoadHdrF(HDR_GRID_MIN_Z));
     ivec3 gridDim = ivec3(
-        int(scene.words[HDR_GRID_DIM_X]),
-        int(scene.words[HDR_GRID_DIM_Y]),
-        int(scene.words[HDR_GRID_DIM_Z]));
+        int(pc.hdr[HDR_GRID_DIM_X]),
+        int(pc.hdr[HDR_GRID_DIM_Y]),
+        int(pc.hdr[HDR_GRID_DIM_Z]));
     ivec3 safeGridDim = max(gridDim, ivec3(1));
 
-    uint brickCount = scene.words[HDR_BRICK_COUNT];
-    uint brickTableBaseWord = scene.words[HDR_BRICK_TABLE_OFFSET_WORDS];
-    uint brickPoolBaseWord = scene.words[HDR_BRICK_POOL_OFFSET_WORDS];
+    uint brickCount = pc.hdr[HDR_BRICK_COUNT];
+    uint brickTableBaseWord = pc.hdr[HDR_BRICK_TABLE_OFFSET_WORDS];
+    uint brickPoolBaseWord = pc.hdr[HDR_BRICK_POOL_OFFSET_WORDS];
+    uint macroMaskBaseWord = pc.hdr[HDR_MACRO_MASK_OFFSET_WORDS];
 
-    vec2 uv = (vec2(safePixel) + vec2(0.5)) / max(vec2(imageSizePx), vec2(1.0));
+    vec2 uv = (vec2(pixel) + vec2(0.5)) / max(vec2(imageSizePx), vec2(1.0));
     vec2 ndc = uv * 2.0 - 1.0;
     ndc.y = -ndc.y;
 
@@ -185,10 +333,15 @@ void main()
     float skyT = clamp(rayDir.y * 0.5 + 0.5, 0.0, 1.0);
     vec3 sky = mix(skyHorizon, skyTop, skyT);
 
-    float brickWorldSize = max(LoadF(HDR_BRICK_VOXEL_SIZE) * 4.0, 1e-6);
+    float brickWorldSize = max(LoadHdrF(HDR_BRICK_VOXEL_SIZE) * 4.0, 1e-6);
+    float voxelSize = brickWorldSize * 0.25;
+    float macroWorldSize = brickWorldSize * float(MACRO_BRICK_DIM);
     vec3 gridMax = gridMin + vec3(safeGridDim) * brickWorldSize;
 
-    vec3 safeDir = mix(rayDir, vec3(1e-6), lessThan(abs(rayDir), vec3(1e-6)));
+    const float eps = 1e-6;
+    vec3 dirSign = sign(rayDir);
+    dirSign = mix(vec3(1.0), dirSign, notEqual(dirSign, vec3(0.0)));
+    vec3 safeDir = mix(dirSign * vec3(eps), rayDir, greaterThanEqual(abs(rayDir), vec3(eps)));
     vec3 invDir = 1.0 / safeDir;
     vec3 t0 = (gridMin - cameraPos) * invDir;
     vec3 t1 = (gridMax - cameraPos) * invDir;
@@ -200,67 +353,89 @@ void main()
     bool hit = false;
     ivec3 hitCell = ivec3(0);
     uint hitBrickSlot = 0u;
+    ivec3 macroDim = max((safeGridDim + ivec3(int(MACRO_BRICK_DIM - 1u))) / int(MACRO_BRICK_DIM), ivec3(1));
 
     bool hasValidGrid = all(greaterThan(gridDim, ivec3(0)));
-    bool globalActive = hasValidGrid && (brickCount != 0u) && (tExit >= max(tEnter, 0.0));
-    float t = max(tEnter, 0.0) + 1e-4;
-    vec3 p = cameraPos + rayDir * t;
-    vec3 local = clamp((p - gridMin) / brickWorldSize, vec3(0.0), vec3(safeGridDim) - vec3(0.0001));
-    ivec3 gridCell = ivec3(floor(local));
-    ivec3 stepDir = ivec3(sign(rayDir));
-    vec3 cellMin = gridMin + vec3(gridCell) * brickWorldSize;
-    vec3 cellMax = cellMin + vec3(brickWorldSize);
-    vec3 nextPlane = mix(cellMin, cellMax, greaterThan(rayDir, vec3(0.0)));
-    vec3 tMaxAxis = abs((nextPlane - p) / safeDir);
-    vec3 tDelta = abs(vec3(brickWorldSize) / safeDir);
-
-    for (uint i = 0u; i < MAX_GLOBAL_STEPS; i++)
+    bool canTraceGlobal = hasValidGrid && (brickCount != 0u) && (tExit >= max(tEnter, 0.0));
+    if (canTraceGlobal)
     {
-        bool insideGrid = globalActive &&
-                          gridCell.x >= 0 && gridCell.x < safeGridDim.x &&
-                          gridCell.y >= 0 && gridCell.y < safeGridDim.y &&
-                          gridCell.z >= 0 && gridCell.z < safeGridDim.z;
-        bool continueGlobal = false;
+        float t = max(tEnter, 0.0) + 1e-4;
+        vec3 p = cameraPos + rayDir * t;
+        vec3 local = clamp((p - gridMin) / macroWorldSize, vec3(0.0), vec3(macroDim) - vec3(0.0001));
+        ivec3 macroCell = ivec3(floor(local));
+        ivec3 stepDir = ivec3(sign(rayDir));
+        vec3 cellMin = gridMin + vec3(macroCell) * macroWorldSize;
+        vec3 cellMax = cellMin + vec3(macroWorldSize);
+        vec3 nextPlane = mix(cellMin, cellMax, greaterThan(rayDir, vec3(0.0)));
+        vec3 tMaxAxis = abs((nextPlane - p) / safeDir);
+        vec3 tDelta = abs(vec3(macroWorldSize) / safeDir);
+        float macroCellEnterT = t;
 
-        if (insideGrid)
+        for (uint i = 0u; i < MAX_MACRO_STEPS; i++)
         {
-            uint gridIndex = GridLinearIndex(gridCell, safeGridDim);
-            uint brickSlot = scene.words[brickTableBaseWord + gridIndex];
-            bool hasBrick = (brickSlot != EMPTY_BRICK_SLOT) && (brickSlot < brickCount);
-            bool localHit = false;
-            ivec3 localHitCell = ivec3(0);
-
-            if (hasBrick)
+            if (macroCellEnterT > tExit)
             {
-                uint brickBaseWord = brickPoolBaseWord + brickSlot * BRICK_WORD_STRIDE;
-                uint occLo = scene.words[brickBaseWord + 0u];
-                uint occHi = scene.words[brickBaseWord + 1u];
-                vec3 brickMin = vec3(
-                    LoadF(brickBaseWord + 2u),
-                    LoadF(brickBaseWord + 3u),
-                    LoadF(brickBaseWord + 4u));
-                float voxelSize = LoadF(brickBaseWord + 5u);
-                localHit = TraceBrick(cameraPos, rayDir, safeDir, invDir, occLo, occHi, brickMin, voxelSize, localHitCell);
+                break;
             }
 
-            bool acceptHit = hasBrick && localHit && !hit;
-            hit = hit || (hasBrick && localHit);
-            hitCell = SelectIVec3(hitCell, localHitCell, acceptHit);
-            hitBrickSlot = SelectUInt(hitBrickSlot, brickSlot, acceptHit);
+            bool insideMacroGrid = macroCell.x >= 0 && macroCell.x < macroDim.x &&
+                                   macroCell.y >= 0 && macroCell.y < macroDim.y &&
+                                   macroCell.z >= 0 && macroCell.z < macroDim.z;
+            if (!insideMacroGrid)
+            {
+                break;
+            }
 
-            continueGlobal = !hit;
-            bool stepX = continueGlobal && (tMaxAxis.x <= tMaxAxis.y) && (tMaxAxis.x <= tMaxAxis.z);
-            bool stepY = continueGlobal && (!stepX) && (tMaxAxis.y <= tMaxAxis.z);
-            bool stepZ = continueGlobal && (!stepX) && (!stepY);
+            float macroCellExitT = min(tExit, t + min(min(tMaxAxis.x, tMaxAxis.y), tMaxAxis.z));
+            uint macroIndex = GridLinearIndex(macroCell, macroDim);
+            uint macroWordBase = macroMaskBaseWord + macroIndex * BRICK_WORD_STRIDE;
+            uint macroOccLo = scene.words[macroWordBase + 0u];
+            uint macroOccHi = scene.words[macroWordBase + 1u];
+            bool hasMacroData = (macroOccLo | macroOccHi) != 0u;
+            ivec3 localHitCell = ivec3(0);
+            uint localHitBrickSlot = 0u;
+            bool localHit = false;
+
+            if (hasMacroData)
+            {
+                localHit = TraceMacroSegment(
+                    cameraPos,
+                    rayDir,
+                    safeDir,
+                    macroOccLo,
+                    macroOccHi,
+                    macroCell,
+                    safeGridDim,
+                    gridMin,
+                    brickWorldSize,
+                    voxelSize,
+                    macroCellEnterT,
+                    macroCellExitT,
+                    brickCount,
+                    brickTableBaseWord,
+                    brickPoolBaseWord,
+                    localHitCell,
+                    localHitBrickSlot);
+            }
+
+            bool acceptHit = localHit && !hit;
+            hit = hit || localHit;
+            hitCell = SelectIVec3(hitCell, localHitCell, acceptHit);
+            hitBrickSlot = SelectUInt(hitBrickSlot, localHitBrickSlot, acceptHit);
+            if (hit)
+            {
+                break;
+            }
+
+            bool stepX = (tMaxAxis.x <= tMaxAxis.y) && (tMaxAxis.x <= tMaxAxis.z);
+            bool stepY = (!stepX) && (tMaxAxis.y <= tMaxAxis.z);
+            bool stepZ = (!stepX) && (!stepY);
 
             ivec3 axisStep = ivec3(stepX ? 1 : 0, stepY ? 1 : 0, stepZ ? 1 : 0);
-            gridCell += axisStep * stepDir;
-
-            vec3 stepMask = vec3(stepX ? 1.0 : 0.0, stepY ? 1.0 : 0.0, stepZ ? 1.0 : 0.0);
-            tMaxAxis += stepMask * tDelta;
+            macroCell += axisStep * stepDir;
+            tMaxAxis += vec3(stepX ? 1.0 : 0.0, stepY ? 1.0 : 0.0, stepZ ? 1.0 : 0.0) * tDelta;
+            macroCellEnterT = macroCellExitT;
         }
-
-        globalActive = insideGrid && continueGlobal;
     }
 
     vec3 cellColor = (vec3(hitCell) + vec3(0.5)) / 4.0;
@@ -273,8 +448,5 @@ void main()
     vec3 color = mix(sky, hitColor, hitMask);
 
     color = GradeColor(color);
-    if (inBounds)
-    {
-        imageStore(outImage, pixel, vec4(color, 1.0));
-    }
+    imageStore(outImage, pixel, vec4(color, 1.0));
 }

@@ -18,7 +18,7 @@ constexpr uint32_t MAX_DEVICE_EXTENSIONS = 4;
 constexpr uint32_t MAX_PHYSICAL_DEVICES = 8;
 constexpr uint32_t MAX_SWAPCHAIN_IMAGES = 3;
 constexpr uint32_t ARENA_HEADER_WORDS = 32;
-constexpr uint32_t BRICK_WORDS = 16;
+constexpr uint32_t BRICK_WORDS = 2;
 constexpr float TEST_BRICK_VOXEL_SIZE = 0.5f;
 constexpr float BRICK_WORLD_SIZE = TEST_BRICK_VOXEL_SIZE * 4.0f;
 constexpr float SCENE_GRID_MIN_X = -64.0f;
@@ -28,11 +28,18 @@ constexpr uint32_t SCENE_GRID_DIM_X = 64;
 constexpr uint32_t SCENE_GRID_DIM_Y = 12;
 constexpr uint32_t SCENE_GRID_DIM_Z = 64;
 constexpr uint32_t SCENE_GRID_CELL_COUNT = SCENE_GRID_DIM_X * SCENE_GRID_DIM_Y * SCENE_GRID_DIM_Z;
+constexpr uint32_t MACRO_BRICK_DIM = 4;
+constexpr uint32_t MACRO_GRID_DIM_X = (SCENE_GRID_DIM_X + (MACRO_BRICK_DIM - 1)) / MACRO_BRICK_DIM;
+constexpr uint32_t MACRO_GRID_DIM_Y = (SCENE_GRID_DIM_Y + (MACRO_BRICK_DIM - 1)) / MACRO_BRICK_DIM;
+constexpr uint32_t MACRO_GRID_DIM_Z = (SCENE_GRID_DIM_Z + (MACRO_BRICK_DIM - 1)) / MACRO_BRICK_DIM;
+constexpr uint32_t MACRO_GRID_CELL_COUNT = MACRO_GRID_DIM_X * MACRO_GRID_DIM_Y * MACRO_GRID_DIM_Z;
 constexpr uint32_t BRICK_TABLE_WORDS = SCENE_GRID_CELL_COUNT;
+constexpr uint32_t MACRO_MASK_WORDS = MACRO_GRID_CELL_COUNT * BRICK_WORDS;
 constexpr uint32_t BRICK_POOL_CAPACITY = SCENE_GRID_CELL_COUNT;
 constexpr uint32_t ARENA_BRICK_TABLE_BASE_WORD = ARENA_HEADER_WORDS;
-constexpr uint32_t ARENA_BRICK_POOL_BASE_WORD = ARENA_BRICK_TABLE_BASE_WORD + BRICK_TABLE_WORDS;
-constexpr uint32_t SLOT_WORDS = ARENA_HEADER_WORDS + BRICK_TABLE_WORDS + BRICK_WORDS * BRICK_POOL_CAPACITY;
+constexpr uint32_t ARENA_MACRO_MASK_BASE_WORD = ARENA_BRICK_TABLE_BASE_WORD + BRICK_TABLE_WORDS;
+constexpr uint32_t ARENA_BRICK_POOL_BASE_WORD = ARENA_MACRO_MASK_BASE_WORD + MACRO_MASK_WORDS;
+constexpr uint32_t SLOT_WORDS = ARENA_HEADER_WORDS + BRICK_TABLE_WORDS + MACRO_MASK_WORDS + BRICK_WORDS * BRICK_POOL_CAPACITY;
 constexpr uint32_t EMPTY_BRICK_SLOT = 0xFFFFFFFFu;
 
 constexpr uint32_t HDR_CAM_POS_X = 0;
@@ -64,6 +71,7 @@ constexpr uint32_t HDR_CAM_UP_Y = 25;
 constexpr uint32_t HDR_CAM_UP_Z = 26;
 constexpr uint32_t HDR_CAM_TAN_HALF_FOV_Y = 27;
 constexpr uint32_t HDR_BRICK_VOXEL_SIZE = 28;
+constexpr uint32_t HDR_MACRO_MASK_OFFSET_WORDS = 29;
 
 constexpr float CAMERA_MOVE_SPEED = 3.25f;
 constexpr float CAMERA_MOUSE_SENSITIVITY = 0.0024f;
@@ -86,6 +94,9 @@ static_assert(MAX_SWAPCHAIN_IMAGES >= MAX_FRAMES_IN_FLIGHT);
 static_assert(SCENE_GRID_CELL_COUNT <= BRICK_TABLE_WORDS);
 static_assert(HDR_BRICK_POOL_OFFSET_WORDS < ARENA_HEADER_WORDS);
 static_assert(HDR_BRICK_VOXEL_SIZE < ARENA_HEADER_WORDS);
+static_assert(HDR_MACRO_MASK_OFFSET_WORDS < ARENA_HEADER_WORDS);
+static_assert((ARENA_HEADER_WORDS * sizeof(uint32_t)) <= 128);
+static_assert((ARENA_MACRO_MASK_BASE_WORD + MACRO_MASK_WORDS) <= ARENA_BRICK_POOL_BASE_WORD);
 static_assert((ARENA_BRICK_POOL_BASE_WORD + BRICK_WORDS * BRICK_POOL_CAPACITY) <= SLOT_WORDS);
 static_assert((kTriangleCompSpv_size != 0));
 static_assert((kTriangleCompSpv_size % 4) == 0);
@@ -189,6 +200,11 @@ uint32_t FindMemoryTypeIndex(uint32_t typeBits, VkMemoryPropertyFlags requiredFl
 constexpr uint32_t GridLinearIndex(uint32_t x, uint32_t y, uint32_t z)
 {
     return x + y * SCENE_GRID_DIM_X + z * SCENE_GRID_DIM_X * SCENE_GRID_DIM_Y;
+}
+
+constexpr uint32_t MacroLinearIndex(uint32_t x, uint32_t y, uint32_t z)
+{
+    return x + y * MACRO_GRID_DIM_X + z * MACRO_GRID_DIM_X * MACRO_GRID_DIM_Y;
 }
 
 // 2-bit Morton packing for x/y/z in [0,3], yielding bit index [0,63].
@@ -428,17 +444,23 @@ void WriteArenaHeaderData(uint32_t currentFrame)
     dataBufferWords[base + HDR_CAM_UP_Z] = std::bit_cast<uint32_t>(upZ);
     dataBufferWords[base + HDR_CAM_TAN_HALF_FOV_Y] = std::bit_cast<uint32_t>(tanHalfFovY);
     dataBufferWords[base + HDR_BRICK_VOXEL_SIZE] = std::bit_cast<uint32_t>(TEST_BRICK_VOXEL_SIZE);
+    dataBufferWords[base + HDR_MACRO_MASK_OFFSET_WORDS] = ARENA_MACRO_MASK_BASE_WORD;
 }
 
 void WriteBrickData(uint32_t currentFrame)
 {
     const uint32_t frameBase = currentFrame * SLOT_WORDS;
     const uint32_t tableBase = frameBase + ARENA_BRICK_TABLE_BASE_WORD;
+    const uint32_t macroBase = frameBase + ARENA_MACRO_MASK_BASE_WORD;
     const uint32_t poolBase = frameBase + ARENA_BRICK_POOL_BASE_WORD;
 
     for (uint32_t i = 0; i < BRICK_TABLE_WORDS; i++)
     {
         dataBufferWords[tableBase + i] = EMPTY_BRICK_SLOT;
+    }
+    for (uint32_t i = 0; i < MACRO_MASK_WORDS; i++)
+    {
+        dataBufferWords[macroBase + i] = 0u;
     }
 
     uint32_t brickIndex = 0;
@@ -464,10 +486,24 @@ void WriteBrickData(uint32_t currentFrame)
                 const uint32_t brickBase = poolBase + brickIndex * BRICK_WORDS;
                 dataBufferWords[brickBase + 0] = static_cast<uint32_t>(occupancy & 0xFFFFFFFFull);
                 dataBufferWords[brickBase + 1] = static_cast<uint32_t>(occupancy >> 32);
-                dataBufferWords[brickBase + 2] = std::bit_cast<uint32_t>(brickMinX);
-                dataBufferWords[brickBase + 3] = std::bit_cast<uint32_t>(brickMinY);
-                dataBufferWords[brickBase + 4] = std::bit_cast<uint32_t>(brickMinZ);
-                dataBufferWords[brickBase + 5] = std::bit_cast<uint32_t>(TEST_BRICK_VOXEL_SIZE);
+
+                const uint32_t mx = gx / MACRO_BRICK_DIM;
+                const uint32_t my = gy / MACRO_BRICK_DIM;
+                const uint32_t mz = gz / MACRO_BRICK_DIM;
+                const uint32_t macroIndex = MacroLinearIndex(mx, my, mz);
+                const uint32_t localX = gx & (MACRO_BRICK_DIM - 1u);
+                const uint32_t localY = gy & (MACRO_BRICK_DIM - 1u);
+                const uint32_t localZ = gz & (MACRO_BRICK_DIM - 1u);
+                const uint32_t macroBitIndex = BrickBitIndex(localX, localY, localZ);
+                const uint32_t macroWordBase = macroBase + macroIndex * BRICK_WORDS;
+                if (macroBitIndex < 32u)
+                {
+                    dataBufferWords[macroWordBase + 0] |= (1u << macroBitIndex);
+                }
+                else
+                {
+                    dataBufferWords[macroWordBase + 1] |= (1u << (macroBitIndex - 32u));
+                }
                 brickIndex++;
             }
         }
@@ -476,7 +512,7 @@ void WriteBrickData(uint32_t currentFrame)
     sceneBrickCount = brickIndex;
 }
 
-void RecordCommandBuffer(VkCommandBuffer commandBuffer, VkDescriptorSet descriptorSet, uint32_t imageIndex)
+void RecordCommandBuffer(VkCommandBuffer commandBuffer, VkDescriptorSet descriptorSet, uint32_t imageIndex, uint32_t currentFrame)
 {
     VkCommandBufferBeginInfo beginInfo{
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -486,6 +522,14 @@ void RecordCommandBuffer(VkCommandBuffer commandBuffer, VkDescriptorSet descript
 
     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, computePipeline);
     vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
+    const uint32_t headerBaseWord = currentFrame * SLOT_WORDS;
+    vkCmdPushConstants(
+        commandBuffer,
+        pipelineLayout,
+        VK_SHADER_STAGE_COMPUTE_BIT,
+        0,
+        ARENA_HEADER_WORDS * sizeof(uint32_t),
+        dataBufferWords + headerBaseWord);
 
     if (!renderImageInitialized)
     {
@@ -674,7 +718,7 @@ void DrawFrame(uint32_t currentFrame)
 
     vkResetCommandBuffer(commandBuffers[currentFrame], 0);
 
-    RecordCommandBuffer(commandBuffers[currentFrame], descriptorSets[currentFrame], imageIndex);
+    RecordCommandBuffer(commandBuffers[currentFrame], descriptorSets[currentFrame], imageIndex, currentFrame);
 
     VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT;
     VkSubmitInfo submitInfo{
@@ -831,7 +875,7 @@ auto main() -> int
             .imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
             .imageExtent = swapExtent,
             .imageArrayLayers = 1,
-            .imageUsage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+            .imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT,
             .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
             .queueFamilyIndexCount = 0,
             .pQueueFamilyIndices = nullptr,
@@ -979,10 +1023,17 @@ auto main() -> int
         };
         vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &descriptorSetLayout);
 
+        VkPushConstantRange pushConstantRange{
+            .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+            .offset = 0,
+            .size = ARENA_HEADER_WORDS * static_cast<uint32_t>(sizeof(uint32_t)),
+        };
         VkPipelineLayoutCreateInfo pipelineLayoutInfo{
             .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
             .setLayoutCount = 1,
             .pSetLayouts = &descriptorSetLayout,
+            .pushConstantRangeCount = 1,
+            .pPushConstantRanges = &pushConstantRange,
         };
         vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayout);
 
