@@ -20,6 +20,8 @@ VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
 
 static const char *DEVICE_EXTENSIONS[8] = { VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME };
 
+VkDevice device = VK_NULL_HANDLE;
+
 int main(void)
 {
     glfwInit();
@@ -59,6 +61,20 @@ int main(void)
     vkEnumeratePhysicalDevices(instance, &physicalDeviceCount, &physicalDevice);
     DEVICE_EXTENSIONS[VK_PORTABLE] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
 
+    float queuePriority = 1.0f;
+    vkCreateDevice(physicalDevice, &(VkDeviceCreateInfo){
+        .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+        .queueCreateInfoCount = 1,
+        .pQueueCreateInfos = &(VkDeviceQueueCreateInfo){
+            .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+            .queueFamilyIndex = 0,
+            .queueCount = 1,
+            .pQueuePriorities = &queuePriority,
+        },
+        .enabledExtensionCount = 1u + VK_PORTABLE,
+        .ppEnabledExtensionNames = DEVICE_EXTENSIONS,
+    }, NULL, &device);
+
     while (glfwWindowShouldClose(window) == GLFW_FALSE)
     {
         glfwPollEvents();
@@ -68,6 +84,8 @@ int main(void)
         }
     }
 
+    vkDestroyDevice(device, NULL);
+    vkDestroyDevice(device, NULL);
     vkDestroyInstance(instance, NULL);
     glfwDestroyWindow(window);
     window = NULL;
