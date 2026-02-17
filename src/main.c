@@ -430,11 +430,15 @@ int main(void)
         firstUse[imageIndex] = 0u;
 
         uint64_t signalValue = ++frameValue;
+        uint64_t waitValues[] = { 0u };
+        uint64_t signalValues[] = { 0u, signalValue };
 
         VkTimelineSemaphoreSubmitInfo tls = {
             .sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
-            .signalSemaphoreValueCount = 1u,
-            .pSignalSemaphoreValues = &signalValue,
+            .waitSemaphoreValueCount = 1u,
+            .pWaitSemaphoreValues = waitValues,
+            .signalSemaphoreValueCount = 2u,
+            .pSignalSemaphoreValues = signalValues,
         };
 
         VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
