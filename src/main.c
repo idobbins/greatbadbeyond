@@ -50,10 +50,11 @@ static VkCommandBuffer cmdNormal[MAX_SWAPCHAIN_IMAGES];
 static VkCommandBuffer cmdFirst[MAX_SWAPCHAIN_IMAGES];
 static uint8_t firstUse[MAX_SWAPCHAIN_IMAGES];
 
-static VkSemaphore imageAvailableSemaphore = VK_NULL_HANDLE;
-static VkSemaphore renderFinishedSemaphore = VK_NULL_HANDLE;
+static VkSemaphore imageAvailableSemaphore[MAX_FRAMES_IN_FLIGHT];
+static VkSemaphore renderFinishedSemaphore[MAX_FRAMES_IN_FLIGHT];
 static VkSemaphore frameDone = VK_NULL_HANDLE;
 static uint64_t frameValue = 0;
+static uint32_t frameIndex = 0u;
 
 static void recordCommandBuffer(VkCommandBuffer commandBuffer, VkDescriptorSet descriptorSet, VkImage swapImage, VkImageLayout oldLayout)
 {
@@ -392,8 +393,11 @@ int main(void)
         .pNext = NULL,
         .flags = 0,
     };
-    vkCreateSemaphore(device, &semaphoreCreateInfo, NULL, &imageAvailableSemaphore);
-    vkCreateSemaphore(device, &semaphoreCreateInfo, NULL, &renderFinishedSemaphore);
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+    {
+        vkCreateSemaphore(device, &semaphoreCreateInfo, NULL, &imageAvailableSemaphore[i]);
+        vkCreateSemaphore(device, &semaphoreCreateInfo, NULL, &renderFinishedSemaphore[i]);
+    }
 
     VkSemaphoreTypeCreateInfo semType = {
         .sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
@@ -415,6 +419,7 @@ int main(void)
 
         uint64_t back = (uint64_t)(MAX_FRAMES_IN_FLIGHT - 1u);
         uint64_t waitValue = (frameValue > back) ? (frameValue - back) : 0u;
+        uint32_t fi = frameIndex;
 
         vkWaitSemaphores(device, &(VkSemaphoreWaitInfo){
             .sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO,
@@ -424,12 +429,15 @@ int main(void)
         }, UINT64_MAX);
 
         uint32_t imageIndex = 0u;
-        vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, imageAvailableSemaphore, VK_NULL_HANDLE, &imageIndex);
+        vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, imageAvailableSemaphore[fi], VK_NULL_HANDLE, &imageIndex);
 
         uint32_t sel = (uint32_t)firstUse[imageIndex];
         firstUse[imageIndex] = 0u;
 
         uint64_t signalValue = ++frameValue;
+        // Value arrays are positional: they must match semaphore array order.
+        VkSemaphore waitSems[] = { imageAvailableSemaphore[fi] };
+        VkSemaphore signalSems[] = { renderFinishedSemaphore[fi], frameDone };
         uint64_t waitValues[] = { 0u };
         uint64_t signalValues[] = { 0u, signalValue };
 
@@ -442,9 +450,7 @@ int main(void)
         };
 
         VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
-        VkSemaphore waitSems[] = { imageAvailableSemaphore };
-        VkSemaphore signalSems[] = { renderFinishedSemaphore, frameDone };
-        VkCommandBuffer *cmdVariants[2] = { cmdNormal, cmdFirst };
+        VkCommandBuffer *cmds = sel ? cmdFirst : cmdNormal;
 
         VkSubmitInfo submitInfo = {
             .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
@@ -453,7 +459,7 @@ int main(void)
             .pWaitSemaphores = waitSems,
             .pWaitDstStageMask = &waitStage,
             .commandBufferCount = 1u,
-            .pCommandBuffers = &cmdVariants[sel][imageIndex],
+            .pCommandBuffers = &cmds[imageIndex],
             .signalSemaphoreCount = 2u,
             .pSignalSemaphores = signalSems,
         };
@@ -463,20 +469,24 @@ int main(void)
             .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
             .pNext = NULL,
             .waitSemaphoreCount = 1u,
-            .pWaitSemaphores = &renderFinishedSemaphore,
+            .pWaitSemaphores = &renderFinishedSemaphore[fi],
             .swapchainCount = 1u,
             .pSwapchains = &swapchain,
             .pImageIndices = &imageIndex,
             .pResults = NULL,
         };
         vkQueuePresentKHR(queue, &presentInfo);
+        frameIndex = (frameIndex + 1u) & 1u;
     }
 
     vkDeviceWaitIdle(device);
 
     vkDestroySemaphore(device, frameDone, NULL);
-    vkDestroySemaphore(device, renderFinishedSemaphore, NULL);
-    vkDestroySemaphore(device, imageAvailableSemaphore, NULL);
+    for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+    {
+        vkDestroySemaphore(device, renderFinishedSemaphore[i], NULL);
+        vkDestroySemaphore(device, imageAvailableSemaphore[i], NULL);
+    }
 
     vkDestroyCommandPool(device, commandPool, NULL);
     vkDestroyPipeline(device, pipeline, NULL);
