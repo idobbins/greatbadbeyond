@@ -1,10 +1,6 @@
 #import <AppKit/AppKit.h>
 #import <QuartzCore/CAMetalLayer.h>
 
-#define VK_ENABLE_BETA_EXTENSIONS
-#define VK_USE_PLATFORM_METAL_EXT
-#include <vulkan/vulkan.h>
-
 #include "platform.h"
 
 static NSWindow* g_win = nil;
