@@ -8,13 +8,8 @@
 #include "platform.h"
 
 static NSWindow* g_win = nil;
-static CAMetalLayer* g_layer = nil;
+void *layer = NULL;
 static int g_exit = 0;
-static const char* k_instanceExtensions[] = {
-    VK_KHR_SURFACE_EXTENSION_NAME,
-    VK_EXT_METAL_SURFACE_EXTENSION_NAME,
-    VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME
-};
 
 int gbbInitWindow(uint32_t w, uint32_t h, const char* title)
 {
@@ -27,19 +22,20 @@ int gbbInitWindow(uint32_t w, uint32_t h, const char* title)
                                              styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable)
                                                backing:NSBackingStoreBuffered
                                                  defer:NO];
+        [g_win center];
 
         NSView* view = [g_win contentView];
-        g_layer = [CAMetalLayer layer];
-        if (!(g_win && view && g_layer)) return 1;
+        layer = (void *)[CAMetalLayer layer];
+        if (!(g_win && view && layer)) return 1;
 
         [g_win setReleasedWhenClosed:NO];
         [g_win setTitle:title ? [NSString stringWithUTF8String:title] : @""];
         [view setWantsLayer:YES];
-        [g_layer setOpaque:YES];
+        [(CAMetalLayer*)layer setOpaque:YES];
         const CGFloat scale = [g_win backingScaleFactor];
-        [g_layer setContentsScale:scale];
-        [g_layer setDrawableSize:CGSizeMake((CGFloat)w * scale, (CGFloat)h * scale)];
-        [view setLayer:g_layer];
+        [(CAMetalLayer*)layer setContentsScale:scale];
+        [(CAMetalLayer*)layer setDrawableSize:CGSizeMake((CGFloat)w * scale, (CGFloat)h * scale)];
+        [view setLayer:(CAMetalLayer*)layer];
         [g_win makeKeyAndOrderFront:nil];
         [NSApp activateIgnoringOtherApps:YES];
         g_exit = 0;
@@ -51,6 +47,7 @@ void gbbShutdownWindow(void)
 {
     @autoreleasepool {
         [g_win close];
+        layer = NULL;
         g_exit = 1;
     }
 }
@@ -74,22 +71,4 @@ int gbbPumpEventsOnce(void)
         g_exit |= ![g_win isVisible];
     }
     return g_exit;
-}
-
-void gbbGetInstanceExtensions(const char*** extensions, uint32_t* extensionCount, VkInstanceCreateFlags* instanceFlags)
-{
-    *extensions = k_instanceExtensions;
-    *extensionCount = (uint32_t)(sizeof(k_instanceExtensions) / sizeof(k_instanceExtensions[0]));
-    *instanceFlags = VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
-}
-
-VkResult gbbCreateSurface(VkInstance inst, VkSurfaceKHR* surf)
-{
-    if (!g_layer) return VK_ERROR_INITIALIZATION_FAILED;
-    PFN_vkCreateMetalSurfaceEXT fn = (PFN_vkCreateMetalSurfaceEXT)vkGetInstanceProcAddr(inst, "vkCreateMetalSurfaceEXT");
-    if (!fn) return VK_ERROR_EXTENSION_NOT_PRESENT;
-    VkMetalSurfaceCreateInfoEXT ci = {0};
-    ci.sType = VK_STRUCTURE_TYPE_METAL_SURFACE_CREATE_INFO_EXT;
-    ci.pLayer = g_layer;
-    return fn(inst, &ci, NULL, surf);
 }

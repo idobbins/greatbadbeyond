@@ -1,3 +1,8 @@
+
+
+#if defined(__APPLE__)
+#define VK_USE_PLATFORM_METAL_EXT
+#endif
 #define VK_ENABLE_BETA_EXTENSIONS
 #include <vulkan/vulkan.h>
 #include <stdint.h>
@@ -16,6 +21,14 @@
 #define COMPUTE_TILE_SIZE 8u
 
 static const char* APPLICATION_NAME = "greatbadbeyond";
+#if defined(__APPLE__)
+static const char* INSTANCE_EXTENSIONS[] = {
+    VK_KHR_SURFACE_EXTENSION_NAME,
+    VK_EXT_METAL_SURFACE_EXTENSION_NAME,
+    VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME,
+};
+#endif
+
 static const char* DEVICE_EXTENSIONS[MAX_DEVICE_EXTENSIONS] = {VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME};
 
 static VkInstance instance = VK_NULL_HANDLE;
@@ -84,15 +97,10 @@ static void recordCommandBuffer(VkCommandBuffer cb, VkDescriptorSet ds, VkImage 
 
 int main(void)
 {
-    if (gbbInitWindow(1280u, 720u, APPLICATION_NAME) != 0)
-    {
-        return 1;
-    }
+    gbbInitWindow(1280u, 720u, APPLICATION_NAME);
 
-    const char** instanceExtensions = NULL;
-    uint32_t instanceExtensionCount = 0u;
-    VkInstanceCreateFlags instanceCreateFlags = 0u;
-    gbbGetInstanceExtensions(&instanceExtensions, &instanceExtensionCount, &instanceCreateFlags);
+    VkInstanceCreateFlags instanceCreateFlags = VK_PORTABLE ? VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR : 0u;
+    uint32_t instanceExtensionCount = (uint32_t)(sizeof(INSTANCE_EXTENSIONS) / sizeof(INSTANCE_EXTENSIONS[0]));
 
     vkCreateInstance(&(VkInstanceCreateInfo){
         .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
@@ -106,15 +114,15 @@ int main(void)
             .apiVersion = VK_API_VERSION_1_3,
         },
         .enabledExtensionCount = instanceExtensionCount,
-        .ppEnabledExtensionNames = instanceExtensions,
+        .ppEnabledExtensionNames = INSTANCE_EXTENSIONS,
     }, NULL, &instance);
 
-    if (gbbCreateSurface(instance, &surface) != VK_SUCCESS)
-    {
-        vkDestroyInstance(instance, NULL);
-        gbbShutdownWindow();
-        return 1;
-    }
+#if defined(__APPLE__)
+    vkCreateMetalSurfaceEXT(instance, &(VkMetalSurfaceCreateInfoEXT){
+        .sType = VK_STRUCTURE_TYPE_METAL_SURFACE_CREATE_INFO_EXT,
+        .pLayer = layer,
+    }, NULL, &surface);
+#endif
 
     uint32_t deviceCount = 1u;
     vkEnumeratePhysicalDevices(instance, &deviceCount, &physicalDevice);
