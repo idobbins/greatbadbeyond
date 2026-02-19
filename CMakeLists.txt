@@ -9,8 +9,9 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 if(APPLE)
     enable_language(OBJC)
+elseif(WIN32)
 else()
-    message(FATAL_ERROR "This GLFW-free build currently targets macOS only.")
+    message(FATAL_ERROR "This GLFW-free build currently targets macOS and Windows only.")
 endif()
 
 find_package(Vulkan REQUIRED)
@@ -59,18 +60,30 @@ add_custom_target(embedded_shaders
     DEPENDS ${GRADIENT_COMP_HEADER}
 )
 
+set(PLATFORM_SOURCES)
+if(APPLE)
+    list(APPEND PLATFORM_SOURCES src/macos_platform.m)
+elseif(WIN32)
+    list(APPEND PLATFORM_SOURCES src/windows_platform.c)
+endif()
+
 add_executable(${PROJECT_NAME}
     src/main.c
-    src/macos_platform.m
+    ${PLATFORM_SOURCES}
 )
 
 add_dependencies(${PROJECT_NAME} embedded_shaders)
 target_include_directories(${PROJECT_NAME} PRIVATE ${SHADER_GENERATED_DIR})
-target_link_libraries(${PROJECT_NAME} PRIVATE
-    Vulkan::Vulkan
-    "-framework AppKit"
-    "-framework QuartzCore"
-)
+target_link_libraries(${PROJECT_NAME} PRIVATE Vulkan::Vulkan)
+
+if(APPLE)
+    target_link_libraries(${PROJECT_NAME} PRIVATE
+        "-framework AppKit"
+        "-framework QuartzCore"
+    )
+elseif(WIN32)
+    target_link_libraries(${PROJECT_NAME} PRIVATE user32)
+endif()
 
 if(MSVC)
     target_compile_options(${PROJECT_NAME} PRIVATE /W4)
