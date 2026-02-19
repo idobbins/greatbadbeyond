@@ -1,5 +1,3 @@
-
-
 #if defined(__APPLE__)
 #define VK_USE_PLATFORM_METAL_EXT
 #endif
