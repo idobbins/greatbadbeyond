@@ -1,4 +1,7 @@
-#if defined(__APPLE__)
+#if defined(_WIN32)
+#define VK_USE_PLATFORM_WIN32_KHR
+#include <windows.h>
+#elif defined(__APPLE__)
 #define VK_USE_PLATFORM_METAL_EXT
 #endif
 #define VK_ENABLE_BETA_EXTENSIONS
@@ -8,26 +11,34 @@
 #include "gradient_comp_spv.h"
 #include "platform.h"
 
-#if defined(__APPLE__)
-#define VK_PORTABLE 1u
-#else
-#define VK_PORTABLE 0u
-#endif
-
-#define MAX_DEVICE_EXTENSIONS 8u
 #define FRAME_COUNT 3u
 #define COMPUTE_TILE_SIZE 8u
 
 static const char* APPLICATION_NAME = "greatbadbeyond";
-#if defined(__APPLE__)
-static const char* INSTANCE_EXTENSIONS[] = {
+
+#if defined(_WIN32)
+static const char* const INSTANCE_EXTS[] = {
+    VK_KHR_SURFACE_EXTENSION_NAME,
+    VK_KHR_WIN32_SURFACE_EXTENSION_NAME,
+};
+static const VkInstanceCreateFlags INSTANCE_FLAGS = 0u;
+static const char* const DEVICE_EXTS[] = {
+    VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+};
+#elif defined(__APPLE__)
+static const char* const INSTANCE_EXTS[] = {
     VK_KHR_SURFACE_EXTENSION_NAME,
     VK_EXT_METAL_SURFACE_EXTENSION_NAME,
     VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME,
 };
+static const VkInstanceCreateFlags INSTANCE_FLAGS = VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+static const char* const DEVICE_EXTS[] = {
+    VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+    VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME,
+};
+#else
+#error Unsupported platform
 #endif
-
-static const char* DEVICE_EXTENSIONS[MAX_DEVICE_EXTENSIONS] = {VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME};
 
 static VkInstance instance = VK_NULL_HANDLE;
 static VkSurfaceKHR surface = VK_NULL_HANDLE;
@@ -97,12 +108,9 @@ int main(void)
 {
     gbbInitWindow(1280u, 720u, APPLICATION_NAME);
 
-    VkInstanceCreateFlags instanceCreateFlags = VK_PORTABLE ? VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR : 0u;
-    uint32_t instanceExtensionCount = (uint32_t)(sizeof(INSTANCE_EXTENSIONS) / sizeof(INSTANCE_EXTENSIONS[0]));
-
     vkCreateInstance(&(VkInstanceCreateInfo){
         .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
-        .flags = instanceCreateFlags,
+        .flags = INSTANCE_FLAGS,
         .pApplicationInfo = &(VkApplicationInfo){
             .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
             .pApplicationName = APPLICATION_NAME,
@@ -111,11 +119,17 @@ int main(void)
             .engineVersion = VK_MAKE_API_VERSION(0, 0, 1, 0),
             .apiVersion = VK_API_VERSION_1_3,
         },
-        .enabledExtensionCount = instanceExtensionCount,
-        .ppEnabledExtensionNames = INSTANCE_EXTENSIONS,
+        .enabledExtensionCount = (uint32_t)(sizeof(INSTANCE_EXTS) / sizeof(*INSTANCE_EXTS)),
+        .ppEnabledExtensionNames = INSTANCE_EXTS,
     }, NULL, &instance);
 
-#if defined(__APPLE__)
+#if defined(_WIN32)
+    vkCreateWin32SurfaceKHR(instance, &(VkWin32SurfaceCreateInfoKHR){
+        .sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR,
+        .hinstance = GetModuleHandleA(NULL),
+        .hwnd = (HWND)hwnd,
+    }, NULL, &surface);
+#elif defined(__APPLE__)
     vkCreateMetalSurfaceEXT(instance, &(VkMetalSurfaceCreateInfoEXT){
         .sType = VK_STRUCTURE_TYPE_METAL_SURFACE_CREATE_INFO_EXT,
         .pLayer = layer,
@@ -124,7 +138,6 @@ int main(void)
 
     uint32_t deviceCount = 1u;
     vkEnumeratePhysicalDevices(instance, &deviceCount, &physicalDevice);
-    DEVICE_EXTENSIONS[VK_PORTABLE] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
 
     float priority = 1.0f;
     vkCreateDevice(physicalDevice, &(VkDeviceCreateInfo){
@@ -136,8 +149,8 @@ int main(void)
             .queueCount = 1u,
             .pQueuePriorities = &priority,
         },
-        .enabledExtensionCount = 1u + VK_PORTABLE,
-        .ppEnabledExtensionNames = DEVICE_EXTENSIONS,
+        .enabledExtensionCount = (uint32_t)(sizeof(DEVICE_EXTS) / sizeof(*DEVICE_EXTS)),
+        .ppEnabledExtensionNames = DEVICE_EXTS,
     }, NULL, &device);
 
     vkGetDeviceQueue(device, 0u, 0u, &queue);
@@ -201,7 +214,8 @@ int main(void)
         },
     }, NULL, &descriptorPool);
 
-    VkDescriptorSetLayout setLayouts[FRAME_COUNT] = {descriptorSetLayout, descriptorSetLayout, descriptorSetLayout};
+    VkDescriptorSetLayout setLayouts[FRAME_COUNT];
+    for (uint32_t i = 0u; i < FRAME_COUNT; i++) setLayouts[i] = descriptorSetLayout;
     vkAllocateDescriptorSets(device, &(VkDescriptorSetAllocateInfo){
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
         .descriptorPool = descriptorPool,
