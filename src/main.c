@@ -174,17 +174,10 @@ int main(void)
         .pSetLayouts = setLayouts,
     }, descriptorSets);
 
-    VkPushConstantRange pushConstantRange = {
-        .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-        .offset = 0u,
-        .size = sizeof(float) * 4u,
-    };
     vkCreatePipelineLayout(device, &(VkPipelineLayoutCreateInfo){
         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
         .setLayoutCount = 1u,
         .pSetLayouts = &descriptorSetLayout,
-        .pushConstantRangeCount = 1u,
-        .pPushConstantRanges = &pushConstantRange,
     }, NULL, &pipelineLayout);
 
     VkShaderModule shaderModule = VK_NULL_HANDLE;
@@ -294,8 +287,6 @@ int main(void)
 
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
         vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 0u, 1u, &descriptorSets[imageIndex], 0u, NULL);
-        float pushData[4] = {(float)imageIndex, 0.0f, 0.0f, 0.0f};
-        vkCmdPushConstants(commandBuffer, pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0u, sizeof(pushData), pushData);
         vkCmdDispatch(commandBuffer, (swapExtent.width + COMPUTE_TILE_SIZE - 1u) / COMPUTE_TILE_SIZE,
                       (swapExtent.height + COMPUTE_TILE_SIZE - 1u) / COMPUTE_TILE_SIZE, 1u);
 
