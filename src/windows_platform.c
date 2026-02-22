@@ -55,11 +55,9 @@ int gbbInitWindow(uint32_t width, uint32_t height, const char* title)
     window_class.hInstance     = instance_handle;
     window_class.lpszClassName = WINDOW_CLASS_NAME;
 
-    if (!RegisterClassA(&window_class) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
-        return 1;
+    if (!RegisterClassA(&window_class) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return 1;
 
-    if (!AdjustWindowRect(&rect, window_style, FALSE))
-        return 1;
+    if (!AdjustWindowRect(&rect, window_style, FALSE)) return 1;
 
     window_handle = (void*)CreateWindowExA(0, WINDOW_CLASS_NAME, title_text,
                                            window_style, CW_USEDEFAULT, CW_USEDEFAULT,
