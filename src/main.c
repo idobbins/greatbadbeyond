@@ -4,7 +4,6 @@
 #elif defined(__APPLE__)
 #define VK_USE_PLATFORM_METAL_EXT
 #endif
-#define VK_ENABLE_BETA_EXTENSIONS
 #include <vulkan/vulkan.h>
 #include <stdint.h>
 
@@ -35,7 +34,7 @@ static const char* const INSTANCE_EXTS[] = {
 static const VkInstanceCreateFlags INSTANCE_FLAGS = VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
 static const char* const DEVICE_EXTS[] = {
     VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-    VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME,
+    "VK_KHR_portability_subset",
 };
 #else
 #error Unsupported platform
@@ -56,7 +55,7 @@ static VkDescriptorSet descriptorSets[MAX_SWAP_IMAGES];
 static VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
 static VkPipeline pipeline = VK_NULL_HANDLE;
 static VkCommandPool commandPool = VK_NULL_HANDLE;
-static VkCommandBuffer commandBuffers[MAX_SWAP_IMAGES];
+static VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
 static VkSemaphore imageAvailableSemaphore = VK_NULL_HANDLE;
 static VkSemaphore renderFinishedSemaphore = VK_NULL_HANDLE;
 static VkFence inFlightFence = VK_NULL_HANDLE;
@@ -115,7 +114,7 @@ int main(void)
     VkSurfaceCapabilitiesKHR caps;
     vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice, surface, &caps);
     swapExtent = caps.currentExtent;
-    uint32_t swapchainMinImageCount = MAX_SWAP_IMAGES;
+    uint32_t swapchainMinImageCount = 2u;
     if (swapchainMinImageCount < caps.minImageCount) swapchainMinImageCount = caps.minImageCount;
     if ((caps.maxImageCount != 0u) && (swapchainMinImageCount > caps.maxImageCount)) swapchainMinImageCount = caps.maxImageCount;
 
@@ -138,7 +137,7 @@ int main(void)
     uint32_t swapImageCount = 0u;
     vkGetSwapchainImagesKHR(device, swapchain, &swapImageCount, NULL);
 
-    if ((swapImageCount < 2u) || (swapImageCount > MAX_SWAP_IMAGES)) return 1;
+    if (swapImageCount > MAX_SWAP_IMAGES) return 1;
 
     vkGetSwapchainImagesKHR(device, swapchain, &swapImageCount, swapImages);
 
@@ -175,10 +174,17 @@ int main(void)
         .pSetLayouts = setLayouts,
     }, descriptorSets);
 
+    VkPushConstantRange pushConstantRange = {
+        .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+        .offset = 0u,
+        .size = sizeof(float) * 4u,
+    };
     vkCreatePipelineLayout(device, &(VkPipelineLayoutCreateInfo){
         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
         .setLayoutCount = 1u,
         .pSetLayouts = &descriptorSetLayout,
+        .pushConstantRangeCount = 1u,
+        .pPushConstantRanges = &pushConstantRange,
     }, NULL, &pipelineLayout);
 
     VkShaderModule shaderModule = VK_NULL_HANDLE;
@@ -204,6 +210,7 @@ int main(void)
 
     vkCreateCommandPool(device, &(VkCommandPoolCreateInfo){
         .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+        .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
         .queueFamilyIndex = 0u,
     }, NULL, &commandPool);
 
@@ -211,8 +218,8 @@ int main(void)
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
         .commandPool = commandPool,
         .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-        .commandBufferCount = swapImageCount,
-    }, commandBuffers);
+        .commandBufferCount = 1u,
+    }, &commandBuffer);
 
     VkImageSubresourceRange imageRange = {
         .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
@@ -245,41 +252,6 @@ int main(void)
                 .imageLayout = VK_IMAGE_LAYOUT_GENERAL
             },
         }, 0u, NULL);
-
-        vkBeginCommandBuffer(commandBuffers[i], &(VkCommandBufferBeginInfo){
-            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO
-        });
-
-        vkCmdPipelineBarrier(commandBuffers[i], VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0u,
-                             0u, NULL, 0u, NULL, 1u, &(VkImageMemoryBarrier){
-            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-            .dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
-            .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-            .newLayout = VK_IMAGE_LAYOUT_GENERAL,
-            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-            .image = swapImages[i],
-            .subresourceRange = imageRange
-        });
-
-        vkCmdBindPipeline(commandBuffers[i], VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
-        vkCmdBindDescriptorSets(commandBuffers[i], VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 0u, 1u, &descriptorSets[i], 0u, NULL);
-        vkCmdDispatch(commandBuffers[i], (swapExtent.width + COMPUTE_TILE_SIZE - 1u) / COMPUTE_TILE_SIZE,
-                      (swapExtent.height + COMPUTE_TILE_SIZE - 1u) / COMPUTE_TILE_SIZE, 1u);
-
-        vkCmdPipelineBarrier(commandBuffers[i], VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0u,
-                             0u, NULL, 0u, NULL, 1u, &(VkImageMemoryBarrier){
-            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-            .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
-            .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
-            .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-            .image = swapImages[i],
-            .subresourceRange = imageRange
-        });
-
-        vkEndCommandBuffer(commandBuffers[i]);
     }
 
     vkCreateSemaphore(device, &(VkSemaphoreCreateInfo){
@@ -303,13 +275,51 @@ int main(void)
         uint32_t imageIndex = 0u;
         vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, imageAvailableSemaphore, VK_NULL_HANDLE, &imageIndex);
 
+        vkResetCommandBuffer(commandBuffer, 0u);
+        vkBeginCommandBuffer(commandBuffer, &(VkCommandBufferBeginInfo){
+            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO
+        });
+
+        vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0u,
+                             0u, NULL, 0u, NULL, 1u, &(VkImageMemoryBarrier){
+            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+            .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+            .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image = swapImages[imageIndex],
+            .subresourceRange = imageRange
+        });
+
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+        vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 0u, 1u, &descriptorSets[imageIndex], 0u, NULL);
+        float pushData[4] = {(float)imageIndex, 0.0f, 0.0f, 0.0f};
+        vkCmdPushConstants(commandBuffer, pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0u, sizeof(pushData), pushData);
+        vkCmdDispatch(commandBuffer, (swapExtent.width + COMPUTE_TILE_SIZE - 1u) / COMPUTE_TILE_SIZE,
+                      (swapExtent.height + COMPUTE_TILE_SIZE - 1u) / COMPUTE_TILE_SIZE, 1u);
+
+        vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0u,
+                             0u, NULL, 0u, NULL, 1u, &(VkImageMemoryBarrier){
+            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
+            .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
+            .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image = swapImages[imageIndex],
+            .subresourceRange = imageRange
+        });
+
+        vkEndCommandBuffer(commandBuffer);
+
         vkQueueSubmit(queue, 1u, &(VkSubmitInfo){
             .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
             .waitSemaphoreCount = 1u,
             .pWaitSemaphores = &imageAvailableSemaphore,
             .pWaitDstStageMask = &waitStage,
             .commandBufferCount = 1u,
-            .pCommandBuffers = &commandBuffers[imageIndex],
+            .pCommandBuffers = &commandBuffer,
             .signalSemaphoreCount = 1u,
             .pSignalSemaphores = &renderFinishedSemaphore,
         }, inFlightFence);
