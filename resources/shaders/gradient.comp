@@ -6,15 +6,12 @@ layout(binding = 0, rgba8) uniform writeonly image2D outImage;
 
 void main()
 {
-    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 p  = ivec2(gl_GlobalInvocationID.xy);
     ivec2 sz = imageSize(outImage);
 
-    if (p.x >= sz.x || p.y >= sz.y)
-    {
-        return;
-    }
+    vec2 uv  = (vec2(p) + 0.5) / vec2(sz);
+    vec4 col = vec4(uv.x, uv.y, 0.25, 1.0);
 
-    vec2 uv = (vec2(p) + 0.5) / vec2(sz);
-    vec3 col = vec3(uv.x, uv.y, 0.25);
-    imageStore(outImage, p, vec4(col, 1.0));
+    float valid = float(all(lessThan(p, sz)));   // 1.0 or 0.0
+    imageStore(outImage, p, col * valid);
 }
