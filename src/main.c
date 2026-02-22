@@ -232,14 +232,16 @@ int main(void)
             },
         }, NULL, &swapImageViews[i]);
 
-        VkDescriptorImageInfo imageInfo = {.imageView = swapImageViews[i], .imageLayout = VK_IMAGE_LAYOUT_GENERAL};
         vkUpdateDescriptorSets(device, 1u, &(VkWriteDescriptorSet){
             .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
             .dstSet = descriptorSets[i],
             .dstBinding = 0u,
             .descriptorCount = 1u,
             .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-            .pImageInfo = &imageInfo,
+            .pImageInfo = &(VkDescriptorImageInfo){
+                .imageView = swapImageViews[i],
+                .imageLayout = VK_IMAGE_LAYOUT_GENERAL
+            },
         }, 0u, NULL);
     }
 
