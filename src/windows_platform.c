@@ -74,16 +74,6 @@ int gbbInitWindow(uint32_t width, uint32_t height, const char* title)
 
 void gbbShutdownWindow(void)
 {
-    if (window_handle)
-    {
-        DestroyWindow((HWND)window_handle);
-        window_handle = NULL;
-    }
-    if (instance_handle)
-    {
-        UnregisterClassA(WINDOW_CLASS_NAME, instance_handle);
-        instance_handle = NULL;
-    }
     should_quit = 1u;
 }
 
