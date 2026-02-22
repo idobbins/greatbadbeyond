@@ -8,9 +8,9 @@ extern "C" {
 #endif
 
 #if defined(_WIN32)
-extern void *hwnd;
+extern void *window_handle;
 #elif defined(__APPLE__)
-extern void *layer;
+extern void *surface_layer;
 #endif
 
 int gbbInitWindow(uint32_t width, uint32_t height, const char* title);

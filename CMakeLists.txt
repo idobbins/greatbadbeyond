@@ -49,7 +49,7 @@ add_custom_command(
     COMMAND ${CMAKE_COMMAND}
         -DINPUT_FILE=${GRADIENT_COMP_SPV}
         -DOUTPUT_FILE=${GRADIENT_COMP_HEADER}
-        -DSYMBOL_NAME=kGradientCompSpv
+        -DSYMBOL_NAME=gradientCompSpv
         -P ${SHADER_EMBED_SCRIPT}
     DEPENDS ${GRADIENT_COMP_SPV} ${SHADER_EMBED_SCRIPT}
     COMMENT "Embedding gradient.comp.spv into C header"

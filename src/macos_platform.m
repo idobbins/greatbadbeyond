@@ -1,40 +1,41 @@
 #import <AppKit/AppKit.h>
 #import <QuartzCore/CAMetalLayer.h>
+#include <stdint.h>
 
 #include "platform.h"
 
-static NSWindow* g_win = nil;
-void *layer = NULL;
-static int g_exit = 0;
+static NSWindow* window_handle = nil;
+void *surface_layer = NULL;
+static uint32_t should_quit = 0u;
 
-int gbbInitWindow(uint32_t w, uint32_t h, const char* title)
+int gbbInitWindow(uint32_t width, uint32_t height, const char* title)
 {
     @autoreleasepool {
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
         [NSApp finishLaunching];
 
-        g_win = [[NSWindow alloc] initWithContentRect:NSMakeRect(0.0, 0.0, (CGFloat)w, (CGFloat)h)
+        window_handle = [[NSWindow alloc] initWithContentRect:NSMakeRect(0.0, 0.0, (CGFloat)width, (CGFloat)height)
                                              styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable)
                                                backing:NSBackingStoreBuffered
                                                  defer:NO];
-        [g_win center];
+        [window_handle center];
 
-        NSView* view = [g_win contentView];
-        layer = (void *)[CAMetalLayer layer];
-        if (!(g_win && view && layer)) return 1;
+        NSView* view = [window_handle contentView];
+        surface_layer = (void *)[CAMetalLayer layer];
+        if (!(window_handle && view && surface_layer)) return 1;
 
-        [g_win setReleasedWhenClosed:NO];
-        [g_win setTitle:title ? [NSString stringWithUTF8String:title] : @""];
+        [window_handle setReleasedWhenClosed:NO];
+        [window_handle setTitle:title ? [NSString stringWithUTF8String:title] : @""];
         [view setWantsLayer:YES];
-        [(CAMetalLayer*)layer setOpaque:YES];
-        const CGFloat scale = [g_win backingScaleFactor];
-        [(CAMetalLayer*)layer setContentsScale:scale];
-        [(CAMetalLayer*)layer setDrawableSize:CGSizeMake((CGFloat)w * scale, (CGFloat)h * scale)];
-        [view setLayer:(CAMetalLayer*)layer];
-        [g_win makeKeyAndOrderFront:nil];
+        [(CAMetalLayer*)surface_layer setOpaque:YES];
+        const CGFloat scale = [window_handle backingScaleFactor];
+        [(CAMetalLayer*)surface_layer setContentsScale:scale];
+        [(CAMetalLayer*)surface_layer setDrawableSize:CGSizeMake((CGFloat)width * scale, (CGFloat)height * scale)];
+        [view setLayer:(CAMetalLayer*)surface_layer];
+        [window_handle makeKeyAndOrderFront:nil];
         [NSApp activateIgnoringOtherApps:YES];
-        g_exit = 0;
+        should_quit = 0u;
     }
     return 0;
 }
@@ -42,29 +43,30 @@ int gbbInitWindow(uint32_t w, uint32_t h, const char* title)
 void gbbShutdownWindow(void)
 {
     @autoreleasepool {
-        [g_win close];
-        layer = NULL;
-        g_exit = 1;
+        [window_handle close];
+        window_handle = nil;
+        surface_layer = NULL;
+        should_quit = 1u;
     }
 }
 
 int gbbPumpEventsOnce(void)
 {
     @autoreleasepool {
-        if (!g_win) return 1;
-
         NSEvent* event = nil;
-        while (!g_exit &&
+        if (!window_handle) return 1;
+
+        while (!should_quit &&
                (event = [NSApp nextEventMatchingMask:NSEventMaskAny
                                            untilDate:[NSDate distantPast]
                                               inMode:NSDefaultRunLoopMode
                                              dequeue:YES]) != nil) {
-            const int isEscape = ([event type] == NSEventTypeKeyDown && [event keyCode] == 53);
-            g_exit |= isEscape;
-            if (!isEscape) [NSApp sendEvent:event];
+            const uint32_t is_escape = (uint32_t)([event type] == NSEventTypeKeyDown && [event keyCode] == 53);
+            should_quit |= is_escape;
+            if (!is_escape) [NSApp sendEvent:event];
         }
 
-        g_exit |= ![g_win isVisible];
+        should_quit |= (uint32_t)(![window_handle isVisible]);
     }
-    return g_exit;
+    return (int)should_quit;
 }

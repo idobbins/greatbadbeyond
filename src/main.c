@@ -127,12 +127,12 @@ int main(void)
     vkCreateWin32SurfaceKHR(instance, &(VkWin32SurfaceCreateInfoKHR){
         .sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR,
         .hinstance = GetModuleHandleA(NULL),
-        .hwnd = (HWND)hwnd,
+        .hwnd = (HWND)window_handle,
     }, NULL, &surface);
 #elif defined(__APPLE__)
     vkCreateMetalSurfaceEXT(instance, &(VkMetalSurfaceCreateInfoEXT){
         .sType = VK_STRUCTURE_TYPE_METAL_SURFACE_CREATE_INFO_EXT,
-        .pLayer = layer,
+        .pLayer = surface_layer,
     }, NULL, &surface);
 #endif
 
@@ -232,8 +232,8 @@ int main(void)
     VkShaderModule shaderModule = VK_NULL_HANDLE;
     vkCreateShaderModule(device, &(VkShaderModuleCreateInfo){
         .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-        .codeSize = kGradientCompSpv_size,
-        .pCode = kGradientCompSpv,
+        .codeSize = gradientCompSpv_size,
+        .pCode = gradientCompSpv,
      }, NULL, &shaderModule);
 
     vkCreateComputePipelines(device, VK_NULL_HANDLE, 1u, &(VkComputePipelineCreateInfo){
