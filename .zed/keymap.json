@@ -2,8 +2,10 @@
   {
     "context": "Workspace",
     "bindings": {
-      "f5": ["task::Spawn", { "task_name": "build and run (windows)", "reveal_target": "dock" }],
-      "f6": ["task::Spawn", { "task_name": "build and run release (windows)", "reveal_target": "dock" }]
-    }
-  }
+      "f5": [
+        "task::Spawn",
+        { "task_name": "build and run (windows)", "reveal_target": "dock" },
+      ],
+    },
+  },
 ]
