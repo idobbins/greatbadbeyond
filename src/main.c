@@ -11,7 +11,7 @@
 #include "gradient_comp_spv.h"
 #include "platform.h"
 
-#define SWAP_IMAGE_COUNT 2u
+#define MAX_SWAP_IMAGES 3u
 #define FRAMES_IN_FLIGHT 1u
 #define COMPUTE_TILE_SIZE 8u
 
@@ -48,11 +48,11 @@ static VkDevice device = VK_NULL_HANDLE;
 static VkQueue queue = VK_NULL_HANDLE;
 static VkSwapchainKHR swapchain = VK_NULL_HANDLE;
 static VkExtent2D swapExtent = {0u, 0u};
-static VkImage swapImages[SWAP_IMAGE_COUNT];
-static VkImageView swapImageViews[SWAP_IMAGE_COUNT];
+static VkImage swapImages[MAX_SWAP_IMAGES];
+static VkImageView swapImageViews[MAX_SWAP_IMAGES];
 static VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE;
 static VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
-static VkDescriptorSet descriptorSets[SWAP_IMAGE_COUNT];
+static VkDescriptorSet descriptorSets[MAX_SWAP_IMAGES];
 static VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
 static VkPipeline pipeline = VK_NULL_HANDLE;
 static VkCommandPool commandPool = VK_NULL_HANDLE;
@@ -115,11 +115,14 @@ int main(void)
     VkSurfaceCapabilitiesKHR caps;
     vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice, surface, &caps);
     swapExtent = caps.currentExtent;
+    uint32_t swapchainMinImageCount = MAX_SWAP_IMAGES;
+    if (swapchainMinImageCount < caps.minImageCount) swapchainMinImageCount = caps.minImageCount;
+    if ((caps.maxImageCount != 0u) && (swapchainMinImageCount > caps.maxImageCount)) swapchainMinImageCount = caps.maxImageCount;
 
     vkCreateSwapchainKHR(device, &(VkSwapchainCreateInfoKHR){
         .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
         .surface = surface,
-        .minImageCount = SWAP_IMAGE_COUNT,
+        .minImageCount = swapchainMinImageCount,
         .imageFormat = VK_FORMAT_B8G8R8A8_UNORM,
         .imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
         .imageExtent = swapExtent,
@@ -134,10 +137,9 @@ int main(void)
 
     uint32_t swapImageCount = 0u;
     vkGetSwapchainImagesKHR(device, swapchain, &swapImageCount, NULL);
-    if (swapImageCount != SWAP_IMAGE_COUNT)
-    {
-        return 1;
-    }
+
+    if ((swapImageCount < 2u) || (swapImageCount > MAX_SWAP_IMAGES)) return 1;
+
     vkGetSwapchainImagesKHR(device, swapchain, &swapImageCount, swapImages);
 
     vkCreateDescriptorSetLayout(device, &(VkDescriptorSetLayoutCreateInfo){
@@ -153,22 +155,23 @@ int main(void)
 
     vkCreateDescriptorPool(device, &(VkDescriptorPoolCreateInfo){
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-        .maxSets = SWAP_IMAGE_COUNT,
+        .maxSets = MAX_SWAP_IMAGES,
         .poolSizeCount = 1u,
         .pPoolSizes = &(VkDescriptorPoolSize){
             .type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-            .descriptorCount = SWAP_IMAGE_COUNT,
+            .descriptorCount = MAX_SWAP_IMAGES,
         },
     }, NULL, &descriptorPool);
 
-    VkDescriptorSetLayout setLayouts[SWAP_IMAGE_COUNT] = {
+    VkDescriptorSetLayout setLayouts[MAX_SWAP_IMAGES] = {
+        descriptorSetLayout,
         descriptorSetLayout,
         descriptorSetLayout,
     };
     vkAllocateDescriptorSets(device, &(VkDescriptorSetAllocateInfo){
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
         .descriptorPool = descriptorPool,
-        .descriptorSetCount = SWAP_IMAGE_COUNT,
+        .descriptorSetCount = MAX_SWAP_IMAGES,
         .pSetLayouts = setLayouts,
     }, descriptorSets);
 
@@ -218,7 +221,7 @@ int main(void)
         .layerCount = 1u
     };
 
-    for (uint32_t i = 0u; i < SWAP_IMAGE_COUNT; i++)
+    for (uint32_t i = 0u; i < swapImageCount; i++)
     {
         vkCreateImageView(device, &(VkImageViewCreateInfo){
             .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
