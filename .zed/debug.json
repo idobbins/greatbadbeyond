@@ -1,0 +1,11 @@
+[
+  {
+    "label": "greatbadbeyond",
+    "adapter": "CodeLLDB",
+    "request": "launch",
+    "build": "build",
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "program": "$ZED_WORKTREE_ROOT/build/greatbadbeyond",
+    "args": []
+  }
+]

@@ -1,6 +1,5 @@
 /.idea
 /.vscode
-/.zed
 
 /.cache*
 /.venv
@@ -8,8 +7,6 @@ __pycache__/
 *.pyc
 
 /build
-/cmake-build-debug
-/cmake-build-release
-/generated
+/compile_commands.json
 
 /resources/external

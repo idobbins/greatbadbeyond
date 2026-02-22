@@ -1,0 +1,8 @@
+[
+  {
+    "context": "Workspace",
+    "bindings": {
+      "f5": ["task::Spawn", { "task_name": "build and run", "reveal_target": "dock" }]
+    }
+  }
+]
