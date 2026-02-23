@@ -21,17 +21,10 @@ enum {
     GBB_KEY_A = 1u,
     GBB_KEY_S = 2u,
     GBB_KEY_D = 3u,
-    GBB_KEY_Q = 4u,
-    GBB_KEY_E = 5u,
-    GBB_KEY_LEFT = 6u,
-    GBB_KEY_RIGHT = 7u,
-    GBB_KEY_UP = 8u,
-    GBB_KEY_DOWN = 9u,
-    GBB_KEY_SHIFT = 10u,
-    GBB_KEY_COUNT = 11u,
+    GBB_KEY_COUNT = 4u,
 };
 int gbbIsKeyDown(uint32_t key);
-void gbbConsumeMouseDelta(float* delta_x, float* delta_y);
+void gbbConsumeMouseWheel(float* delta);
 uint64_t gbbGetTimeNs(void);
 
 #ifdef __cplusplus
