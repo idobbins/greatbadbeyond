@@ -6,6 +6,7 @@
 #endif
 #include <vulkan/vulkan.h>
 #include <stdint.h>
+#include <math.h>
 
 #include "gradient_comp_spv.h"
 #include "platform.h"
@@ -59,6 +60,11 @@ static VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
 static VkSemaphore imageAvailableSemaphore = VK_NULL_HANDLE;
 static VkSemaphore renderFinishedSemaphore = VK_NULL_HANDLE;
 static VkFence inFlightFence = VK_NULL_HANDLE;
+
+typedef struct CameraPushConstants {
+    float origin[4];
+    float forward_fov[4];
+} CameraPushConstants;
 
 int main(void)
 {
@@ -174,10 +180,17 @@ int main(void)
         .pSetLayouts = setLayouts,
     }, descriptorSets);
 
+    VkPushConstantRange pushConstantRange = {
+        .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+        .offset = 0u,
+        .size = sizeof(CameraPushConstants),
+    };
     vkCreatePipelineLayout(device, &(VkPipelineLayoutCreateInfo){
         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
         .setLayoutCount = 1u,
         .pSetLayouts = &descriptorSetLayout,
+        .pushConstantRangeCount = 1u,
+        .pPushConstantRanges = &pushConstantRange,
     }, NULL, &pipelineLayout);
 
     VkShaderModule shaderModule = VK_NULL_HANDLE;
@@ -259,14 +272,59 @@ int main(void)
         .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, .flags = VK_FENCE_CREATE_SIGNALED_BIT
     }, NULL, &inFlightFence);
 
+    float cameraPosition[3] = {0.0f, 0.0f, -2.0f};
+    float cameraYaw = 0.0f;
+    float cameraPitch = 0.0f;
+    const float cameraFov = 1.0471975512f;
+
     const VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    uint64_t last_time = gbbGetTimeNs();
     while (gbbPumpEventsOnce() == 0)
     {
+        uint64_t now_time = gbbGetTimeNs();
+        float delta_time = (float)(now_time - last_time) * 1e-9f;
+        last_time = now_time;
+
         vkWaitForFences(device, 1u, &inFlightFence, VK_TRUE, UINT64_MAX);
         vkResetFences(device, 1u, &inFlightFence);
 
         uint32_t imageIndex = 0u;
         vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, imageAvailableSemaphore, VK_NULL_HANDLE, &imageIndex);
+
+        float mouseDeltaX = 0.0f;
+        float mouseDeltaY = 0.0f;
+        gbbConsumeMouseDelta(&mouseDeltaX, &mouseDeltaY);
+        const float lookSensitivity = 0.0025f;
+        const float base_speed = 3.0f;
+        const float speed_multiplier = (float)gbbIsKeyDown(GBB_KEY_SHIFT) * 2.0f + 1.0f;
+        const float move_speed = base_speed * speed_multiplier;
+        cameraYaw += mouseDeltaX * lookSensitivity;
+        cameraPitch -= mouseDeltaY * lookSensitivity;
+        cameraPitch = fmaxf(-1.553343f, fminf(1.553343f, cameraPitch));
+
+        const float pitchCos = cosf(cameraPitch);
+        const float forwardX = sinf(cameraYaw) * pitchCos;
+        const float forwardY = sinf(cameraPitch);
+        const float forwardZ = cosf(cameraYaw) * pitchCos;
+
+        float rightX = forwardZ;
+        float rightZ = -forwardX;
+        const float rightLen = sqrtf(rightX * rightX + rightZ * rightZ);
+        const float inv_rightLen = 1.0f / fmaxf(rightLen, 1e-6f);
+        rightX *= inv_rightLen;
+        rightZ *= inv_rightLen;
+
+        const float moveForward = (float)gbbIsKeyDown(GBB_KEY_W) - (float)gbbIsKeyDown(GBB_KEY_S);
+        const float moveRight = (float)gbbIsKeyDown(GBB_KEY_D) - (float)gbbIsKeyDown(GBB_KEY_A);
+        const float moveUp = (float)gbbIsKeyDown(GBB_KEY_E) - (float)gbbIsKeyDown(GBB_KEY_Q);
+        cameraPosition[0] += (forwardX * moveForward + rightX * moveRight) * move_speed * delta_time;
+        cameraPosition[1] += (forwardY * moveForward + moveUp) * move_speed * delta_time;
+        cameraPosition[2] += (forwardZ * moveForward + rightZ * moveRight) * move_speed * delta_time;
+
+        CameraPushConstants cameraPush = {
+            .origin = {cameraPosition[0], cameraPosition[1], cameraPosition[2], 0.0f},
+            .forward_fov = {forwardX, forwardY, forwardZ, cameraFov},
+        };
 
         vkResetCommandBuffer(commandBuffer, 0u);
         vkBeginCommandBuffer(commandBuffer, &(VkCommandBufferBeginInfo){
@@ -287,6 +345,7 @@ int main(void)
 
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
         vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 0u, 1u, &descriptorSets[imageIndex], 0u, NULL);
+        vkCmdPushConstants(commandBuffer, pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0u, sizeof(cameraPush), &cameraPush);
         vkCmdDispatch(commandBuffer, (swapExtent.width + COMPUTE_TILE_SIZE - 1u) / COMPUTE_TILE_SIZE,
                       (swapExtent.height + COMPUTE_TILE_SIZE - 1u) / COMPUTE_TILE_SIZE, 1u);
 
