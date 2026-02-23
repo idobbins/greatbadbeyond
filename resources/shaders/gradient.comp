@@ -8,10 +8,14 @@ layout(push_constant) uniform Camera {
     vec4 params;
 } cam;
 
-struct Ray {
-    vec3 origin;
-    vec3 dir;
-};
+const uint MAX_SPHERES = 256u;
+const uint COARSE_DIM = 16u;
+const uint FINE_DIM = 4u;
+const uint FINE_CELLS_PER_COARSE = FINE_DIM * FINE_DIM;
+const uint FINE_CELL_COUNT = COARSE_DIM * COARSE_DIM * FINE_CELLS_PER_COARSE;
+const uint MAX_FINE_REFS_PER_CELL = 8u;
+const uint MAX_COARSE_STEPS = 128u;
+const uint MAX_FINE_STEPS = 32u;
 
 const float PI = 3.14159265359;
 const float CAMERA_YAW = PI * 0.25;
@@ -19,9 +23,45 @@ const float CAMERA_PITCH = -PI * 0.25;
 const vec3 WORLD_UP = vec3(0.0, 1.0, 0.0);
 const vec3 SUN_DIR = normalize(vec3(0.45, 0.85, 0.25));
 
-const int GRID_SIZE = 10;
-const float SPHERE_RADIUS = 0.45;
-const float SPHERE_SPACING = 1.6;
+struct SceneHeaderGpu {
+    uint sphere_count;
+    uint overflow_count;
+    uint coarse_dim;
+    uint fine_dim;
+    float world_min_x;
+    float world_min_z;
+    float world_max_x;
+    float world_max_z;
+    float coarse_cell_size_x;
+    float coarse_cell_size_z;
+    float fine_cell_size_x;
+    float fine_cell_size_z;
+};
+
+struct SphereGpu {
+    vec4 center_radius;
+    vec4 color;
+};
+
+struct FineCellGpu {
+    uint count;
+    uint base_index;
+    uint _pad0;
+    uint _pad1;
+};
+
+layout(std430, binding = 1) readonly buffer SceneBuffer {
+    SceneHeaderGpu header;
+    SphereGpu spheres[MAX_SPHERES];
+    FineCellGpu fine_cells[FINE_CELL_COUNT];
+    uint sphere_indices[FINE_CELL_COUNT * MAX_FINE_REFS_PER_CELL];
+    uint coarse_masks[COARSE_DIM * COARSE_DIM];
+} scene;
+
+struct Ray {
+    vec3 origin;
+    vec3 dir;
+};
 
 float hitSphere(vec3 center, float radius, Ray ray)
 {
@@ -37,6 +77,51 @@ float hitSphere(vec3 center, float radius, Ray ray)
     if (t0 > 0.001) return t0;
     if (t1 > 0.001) return t1;
     return -1.0;
+}
+
+bool intersectXZBounds(vec3 origin, vec3 dir, out float t_enter, out float t_exit)
+{
+    float tx0 = -1e30;
+    float tx1 = 1e30;
+    if (abs(dir.x) < 1e-6)
+    {
+        if ((origin.x < scene.header.world_min_x) || (origin.x > scene.header.world_max_x)) return false;
+    }
+    else
+    {
+        float inv_x = 1.0 / dir.x;
+        tx0 = (scene.header.world_min_x - origin.x) * inv_x;
+        tx1 = (scene.header.world_max_x - origin.x) * inv_x;
+        if (tx0 > tx1)
+        {
+            float temp = tx0;
+            tx0 = tx1;
+            tx1 = temp;
+        }
+    }
+
+    float tz0 = -1e30;
+    float tz1 = 1e30;
+    if (abs(dir.z) < 1e-6)
+    {
+        if ((origin.z < scene.header.world_min_z) || (origin.z > scene.header.world_max_z)) return false;
+    }
+    else
+    {
+        float inv_z = 1.0 / dir.z;
+        tz0 = (scene.header.world_min_z - origin.z) * inv_z;
+        tz1 = (scene.header.world_max_z - origin.z) * inv_z;
+        if (tz0 > tz1)
+        {
+            float temp = tz0;
+            tz0 = tz1;
+            tz1 = temp;
+        }
+    }
+
+    t_enter = max(tx0, tz0);
+    t_exit = min(tx1, tz1);
+    return t_exit >= max(t_enter, 0.0);
 }
 
 float hitGroundPlane(Ray ray)
@@ -72,10 +157,179 @@ vec3 groundChecker(vec3 p)
     return mix(base, vec3(0.09), edge * 0.35);
 }
 
-vec3 sphereColor(int x, int z)
+void testFineCell(uint fine_cell_index, Ray ray, inout float nearest_t, inout vec3 nearest_n, inout vec3 nearest_albedo, inout bool hit)
 {
-    float idx = float(x * GRID_SIZE + z);
-    return 0.55 + 0.45 * cos(6.2831853 * (vec3(0.10, 0.38, 0.63) + idx * vec3(0.071, 0.113, 0.173)));
+    FineCellGpu cell = scene.fine_cells[fine_cell_index];
+    for (uint i = 0u; i < cell.count; ++i)
+    {
+        uint sphere_index = scene.sphere_indices[cell.base_index + i];
+        if ((sphere_index >= scene.header.sphere_count) || (sphere_index >= MAX_SPHERES)) continue;
+
+        SphereGpu sphere = scene.spheres[sphere_index];
+        float t = hitSphere(sphere.center_radius.xyz, sphere.center_radius.w, ray);
+        if ((t > 0.0) && (t < nearest_t))
+        {
+            nearest_t = t;
+            vec3 hit_pos = ray.origin + ray.dir * t;
+            nearest_n = normalize(hit_pos - sphere.center_radius.xyz);
+            nearest_albedo = sphere.color.xyz;
+            hit = true;
+        }
+    }
+}
+
+void traverseFineCellsInCoarse(
+    Ray ray,
+    int coarse_x,
+    int coarse_z,
+    uint occupancy_mask,
+    float segment_start_t,
+    float segment_end_t,
+    inout float nearest_t,
+    inout vec3 nearest_n,
+    inout vec3 nearest_albedo,
+    inout bool hit)
+{
+    if ((segment_end_t < segment_start_t) || (segment_start_t > nearest_t)) return;
+
+    float coarse_min_x = scene.header.world_min_x + float(coarse_x) * scene.header.coarse_cell_size_x;
+    float coarse_min_z = scene.header.world_min_z + float(coarse_z) * scene.header.coarse_cell_size_z;
+
+    vec3 entry_pos = ray.origin + ray.dir * segment_start_t;
+    int fine_x = clamp(int(floor((entry_pos.x - coarse_min_x) / scene.header.fine_cell_size_x)), 0, int(FINE_DIM) - 1);
+    int fine_z = clamp(int(floor((entry_pos.z - coarse_min_z) / scene.header.fine_cell_size_z)), 0, int(FINE_DIM) - 1);
+
+    int step_x = 0;
+    int step_z = 0;
+    float t_max_x = 1e30;
+    float t_max_z = 1e30;
+    float t_delta_x = 1e30;
+    float t_delta_z = 1e30;
+
+    if (abs(ray.dir.x) > 1e-6)
+    {
+        step_x = (ray.dir.x > 0.0) ? 1 : -1;
+        float next_x = coarse_min_x + float((step_x > 0) ? (fine_x + 1) : fine_x) * scene.header.fine_cell_size_x;
+        t_max_x = (next_x - ray.origin.x) / ray.dir.x;
+        t_delta_x = scene.header.fine_cell_size_x / abs(ray.dir.x);
+    }
+    if (abs(ray.dir.z) > 1e-6)
+    {
+        step_z = (ray.dir.z > 0.0) ? 1 : -1;
+        float next_z = coarse_min_z + float((step_z > 0) ? (fine_z + 1) : fine_z) * scene.header.fine_cell_size_z;
+        t_max_z = (next_z - ray.origin.z) / ray.dir.z;
+        t_delta_z = scene.header.fine_cell_size_z / abs(ray.dir.z);
+    }
+
+    float t = segment_start_t;
+    for (uint iter = 0u; iter < MAX_FINE_STEPS; ++iter)
+    {
+        if ((t > segment_end_t) || (t > nearest_t)) break;
+        if ((fine_x < 0) || (fine_x >= int(FINE_DIM)) || (fine_z < 0) || (fine_z >= int(FINE_DIM))) break;
+
+        uint local_index = uint(fine_z) * FINE_DIM + uint(fine_x);
+        if ((occupancy_mask & (1u << local_index)) != 0u)
+        {
+            uint coarse_index = uint(coarse_z) * COARSE_DIM + uint(coarse_x);
+            uint fine_cell_index = coarse_index * FINE_CELLS_PER_COARSE + local_index;
+            testFineCell(fine_cell_index, ray, nearest_t, nearest_n, nearest_albedo, hit);
+        }
+
+        if ((t_max_x > segment_end_t) && (t_max_z > segment_end_t)) break;
+
+        if (t_max_x < t_max_z)
+        {
+            t = t_max_x;
+            t_max_x += t_delta_x;
+            fine_x += step_x;
+        }
+        else if (t_max_z < t_max_x)
+        {
+            t = t_max_z;
+            t_max_z += t_delta_z;
+            fine_z += step_z;
+        }
+        else
+        {
+            t = t_max_x;
+            t_max_x += t_delta_x;
+            t_max_z += t_delta_z;
+            fine_x += step_x;
+            fine_z += step_z;
+        }
+    }
+}
+
+void traverseHierarchicalGrid(Ray ray, inout float nearest_t, inout vec3 nearest_n, inout vec3 nearest_albedo, inout bool hit)
+{
+    float t_enter = 0.0;
+    float t_exit = 0.0;
+    if (!intersectXZBounds(ray.origin, ray.dir, t_enter, t_exit)) return;
+
+    float t = max(t_enter, 0.0);
+    if (t > nearest_t) return;
+
+    vec3 start_pos = ray.origin + ray.dir * t;
+    int coarse_x = clamp(int(floor((start_pos.x - scene.header.world_min_x) / scene.header.coarse_cell_size_x)), 0, int(COARSE_DIM) - 1);
+    int coarse_z = clamp(int(floor((start_pos.z - scene.header.world_min_z) / scene.header.coarse_cell_size_z)), 0, int(COARSE_DIM) - 1);
+
+    int step_x = 0;
+    int step_z = 0;
+    float t_max_x = 1e30;
+    float t_max_z = 1e30;
+    float t_delta_x = 1e30;
+    float t_delta_z = 1e30;
+
+    if (abs(ray.dir.x) > 1e-6)
+    {
+        step_x = (ray.dir.x > 0.0) ? 1 : -1;
+        float next_x = scene.header.world_min_x + float((step_x > 0) ? (coarse_x + 1) : coarse_x) * scene.header.coarse_cell_size_x;
+        t_max_x = (next_x - ray.origin.x) / ray.dir.x;
+        t_delta_x = scene.header.coarse_cell_size_x / abs(ray.dir.x);
+    }
+    if (abs(ray.dir.z) > 1e-6)
+    {
+        step_z = (ray.dir.z > 0.0) ? 1 : -1;
+        float next_z = scene.header.world_min_z + float((step_z > 0) ? (coarse_z + 1) : coarse_z) * scene.header.coarse_cell_size_z;
+        t_max_z = (next_z - ray.origin.z) / ray.dir.z;
+        t_delta_z = scene.header.coarse_cell_size_z / abs(ray.dir.z);
+    }
+
+    for (uint iter = 0u; iter < MAX_COARSE_STEPS; ++iter)
+    {
+        if ((t > t_exit) || (t > nearest_t)) break;
+        if ((coarse_x < 0) || (coarse_x >= int(COARSE_DIM)) || (coarse_z < 0) || (coarse_z >= int(COARSE_DIM))) break;
+
+        uint coarse_index = uint(coarse_z) * COARSE_DIM + uint(coarse_x);
+        uint occupancy_mask = scene.coarse_masks[coarse_index];
+        float cell_end_t = min(t_exit, min(t_max_x, t_max_z));
+        if ((occupancy_mask != 0u) && (cell_end_t >= t))
+        {
+            traverseFineCellsInCoarse(ray, coarse_x, coarse_z, occupancy_mask, t, cell_end_t, nearest_t, nearest_n, nearest_albedo, hit);
+        }
+        if (cell_end_t >= t_exit) break;
+
+        if (t_max_x < t_max_z)
+        {
+            t = t_max_x;
+            t_max_x += t_delta_x;
+            coarse_x += step_x;
+        }
+        else if (t_max_z < t_max_x)
+        {
+            t = t_max_z;
+            t_max_z += t_delta_z;
+            coarse_z += step_z;
+        }
+        else
+        {
+            t = t_max_x;
+            t_max_x += t_delta_x;
+            t_max_z += t_delta_z;
+            coarse_x += step_x;
+            coarse_z += step_z;
+        }
+    }
 }
 
 void main()
@@ -116,25 +370,7 @@ void main()
         hit = true;
     }
 
-    float halfGrid = 0.5 * float(GRID_SIZE - 1);
-    for (int z = 0; z < GRID_SIZE; ++z)
-    {
-        for (int x = 0; x < GRID_SIZE; ++x)
-        {
-            vec3 center = vec3((float(x) - halfGrid) * SPHERE_SPACING,
-                               SPHERE_RADIUS,
-                               (float(z) - halfGrid) * SPHERE_SPACING);
-            float t = hitSphere(center, SPHERE_RADIUS, ray);
-            if ((t > 0.0) && (t < nearestT))
-            {
-                nearestT = t;
-                vec3 hitPos = ray.origin + ray.dir * t;
-                nearestN = normalize(hitPos - center);
-                nearestAlbedo = sphereColor(x, z);
-                hit = true;
-            }
-        }
-    }
+    traverseHierarchicalGrid(ray, nearestT, nearestN, nearestAlbedo, hit);
 
     vec3 sky = skyColor(ray.dir);
     vec3 col = sky;

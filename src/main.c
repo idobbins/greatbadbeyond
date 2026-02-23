@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include <math.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "gradient_comp_spv.h"
 #include "platform.h"
@@ -15,6 +16,14 @@
 #define MAX_SWAP_IMAGES 3u
 #define FRAMES_IN_FLIGHT 1u
 #define COMPUTE_TILE_SIZE 8u
+
+#define SCENE_MAX_SPHERES 256u
+#define SCENE_COARSE_DIM 16u
+#define SCENE_FINE_DIM 4u
+#define SCENE_FINE_CELLS_PER_COARSE (SCENE_FINE_DIM * SCENE_FINE_DIM)
+#define SCENE_FINE_CELL_COUNT (SCENE_COARSE_DIM * SCENE_COARSE_DIM * SCENE_FINE_CELLS_PER_COARSE)
+#define SCENE_MAX_FINE_REFS_PER_CELL 8u
+#define SCENE_MAX_SPHERE_REFS (SCENE_FINE_CELL_COUNT * SCENE_MAX_FINE_REFS_PER_CELL)
 
 static const char* APPLICATION_NAME = "greatbadbeyond";
 
@@ -62,11 +71,172 @@ static VkQueryPool timestampQueryPool = VK_NULL_HANDLE;
 static VkSemaphore imageAvailableSemaphore = VK_NULL_HANDLE;
 static VkSemaphore renderFinishedSemaphore = VK_NULL_HANDLE;
 static VkFence inFlightFence = VK_NULL_HANDLE;
+static VkBuffer sceneBuffer = VK_NULL_HANDLE;
+static VkDeviceMemory sceneBufferMemory = VK_NULL_HANDLE;
 
 typedef struct CameraPushConstants {
     float focus_zoom[4];
     float params[4];
 } CameraPushConstants;
+
+typedef struct SceneHeaderGpu {
+    uint32_t sphere_count;
+    uint32_t overflow_count;
+    uint32_t coarse_dim;
+    uint32_t fine_dim;
+    float world_min_x;
+    float world_min_z;
+    float world_max_x;
+    float world_max_z;
+    float coarse_cell_size_x;
+    float coarse_cell_size_z;
+    float fine_cell_size_x;
+    float fine_cell_size_z;
+} SceneHeaderGpu;
+
+typedef struct SphereGpu {
+    float center_radius[4];
+    float color[4];
+} SphereGpu;
+
+typedef struct FineCellGpu {
+    uint32_t count;
+    uint32_t base_index;
+    uint32_t _pad0;
+    uint32_t _pad1;
+} FineCellGpu;
+
+typedef struct SceneBufferGpu {
+    SceneHeaderGpu header;
+    SphereGpu spheres[SCENE_MAX_SPHERES];
+    FineCellGpu fine_cells[SCENE_FINE_CELL_COUNT];
+    uint32_t sphere_indices[SCENE_MAX_SPHERE_REFS];
+    uint32_t coarse_masks[SCENE_COARSE_DIM * SCENE_COARSE_DIM];
+} SceneBufferGpu;
+
+static uint32_t gbbFindMemoryType(uint32_t type_mask, VkMemoryPropertyFlags required_flags)
+{
+    VkPhysicalDeviceMemoryProperties memory_props = {0};
+    vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memory_props);
+
+    for (uint32_t i = 0u; i < memory_props.memoryTypeCount; ++i)
+    {
+        const uint32_t type_supported = (type_mask & (1u << i)) != 0u;
+        const uint32_t flags_match = ((memory_props.memoryTypes[i].propertyFlags & required_flags) == required_flags);
+        if (type_supported && flags_match) return i;
+    }
+    return UINT32_MAX;
+}
+
+static int32_t gbbClampInt32(int32_t value, int32_t min_value, int32_t max_value)
+{
+    if (value < min_value) return min_value;
+    if (value > max_value) return max_value;
+    return value;
+}
+
+static void gbbBuildSceneBuffer(SceneBufferGpu* scene)
+{
+    if (!scene) return;
+
+    memset(scene, 0, sizeof(*scene));
+
+    scene->header.coarse_dim = SCENE_COARSE_DIM;
+    scene->header.fine_dim = SCENE_FINE_DIM;
+    scene->header.world_min_x = -24.0f;
+    scene->header.world_min_z = -24.0f;
+    scene->header.world_max_x = 24.0f;
+    scene->header.world_max_z = 24.0f;
+    scene->header.coarse_cell_size_x = (scene->header.world_max_x - scene->header.world_min_x) / (float)SCENE_COARSE_DIM;
+    scene->header.coarse_cell_size_z = (scene->header.world_max_z - scene->header.world_min_z) / (float)SCENE_COARSE_DIM;
+    scene->header.fine_cell_size_x = scene->header.coarse_cell_size_x / (float)SCENE_FINE_DIM;
+    scene->header.fine_cell_size_z = scene->header.coarse_cell_size_z / (float)SCENE_FINE_DIM;
+
+    for (uint32_t i = 0u; i < SCENE_FINE_CELL_COUNT; ++i)
+    {
+        scene->fine_cells[i].count = 0u;
+        scene->fine_cells[i].base_index = i * SCENE_MAX_FINE_REFS_PER_CELL;
+    }
+
+    const uint32_t sphere_grid_dim = 10u;
+    const float sphere_spacing = 1.6f;
+    const float sphere_radius = 0.45f;
+    const float sphere_half_grid = 0.5f * (float)(sphere_grid_dim - 1u);
+    uint32_t sphere_count = 0u;
+
+    for (uint32_t z = 0u; z < sphere_grid_dim; ++z)
+    {
+        for (uint32_t x = 0u; x < sphere_grid_dim; ++x)
+        {
+            if (sphere_count >= SCENE_MAX_SPHERES) break;
+
+            SphereGpu* sphere = &scene->spheres[sphere_count];
+            sphere->center_radius[0] = ((float)x - sphere_half_grid) * sphere_spacing;
+            sphere->center_radius[1] = sphere_radius;
+            sphere->center_radius[2] = ((float)z - sphere_half_grid) * sphere_spacing;
+            sphere->center_radius[3] = sphere_radius;
+
+            sphere->color[0] = 0.55f + 0.45f * cosf(6.28318530718f * (0.10f + (float)sphere_count * 0.071f));
+            sphere->color[1] = 0.55f + 0.45f * cosf(6.28318530718f * (0.38f + (float)sphere_count * 0.113f));
+            sphere->color[2] = 0.55f + 0.45f * cosf(6.28318530718f * (0.63f + (float)sphere_count * 0.173f));
+            sphere->color[3] = 1.0f;
+
+            sphere_count += 1u;
+        }
+    }
+    scene->header.sphere_count = sphere_count;
+
+    const uint32_t fine_grid_dim = SCENE_COARSE_DIM * SCENE_FINE_DIM;
+
+    for (uint32_t sphere_index = 0u; sphere_index < sphere_count; ++sphere_index)
+    {
+        const SphereGpu* sphere = &scene->spheres[sphere_index];
+        const float center_x = sphere->center_radius[0];
+        const float center_z = sphere->center_radius[2];
+        const float radius = sphere->center_radius[3];
+
+        int32_t min_fine_x = (int32_t)floorf((center_x - radius - scene->header.world_min_x) / scene->header.fine_cell_size_x);
+        int32_t max_fine_x = (int32_t)floorf((center_x + radius - scene->header.world_min_x) / scene->header.fine_cell_size_x);
+        int32_t min_fine_z = (int32_t)floorf((center_z - radius - scene->header.world_min_z) / scene->header.fine_cell_size_z);
+        int32_t max_fine_z = (int32_t)floorf((center_z + radius - scene->header.world_min_z) / scene->header.fine_cell_size_z);
+
+        if ((max_fine_x < 0) || (max_fine_z < 0)) continue;
+        if ((min_fine_x >= (int32_t)fine_grid_dim) || (min_fine_z >= (int32_t)fine_grid_dim)) continue;
+
+        min_fine_x = gbbClampInt32(min_fine_x, 0, (int32_t)fine_grid_dim - 1);
+        max_fine_x = gbbClampInt32(max_fine_x, 0, (int32_t)fine_grid_dim - 1);
+        min_fine_z = gbbClampInt32(min_fine_z, 0, (int32_t)fine_grid_dim - 1);
+        max_fine_z = gbbClampInt32(max_fine_z, 0, (int32_t)fine_grid_dim - 1);
+
+        for (int32_t fine_z = min_fine_z; fine_z <= max_fine_z; ++fine_z)
+        {
+            for (int32_t fine_x = min_fine_x; fine_x <= max_fine_x; ++fine_x)
+            {
+                const uint32_t coarse_x = (uint32_t)fine_x / SCENE_FINE_DIM;
+                const uint32_t coarse_z = (uint32_t)fine_z / SCENE_FINE_DIM;
+                const uint32_t local_x = (uint32_t)fine_x % SCENE_FINE_DIM;
+                const uint32_t local_z = (uint32_t)fine_z % SCENE_FINE_DIM;
+                const uint32_t local_cell = local_z * SCENE_FINE_DIM + local_x;
+                const uint32_t coarse_cell = coarse_z * SCENE_COARSE_DIM + coarse_x;
+                const uint32_t fine_cell = coarse_cell * SCENE_FINE_CELLS_PER_COARSE + local_cell;
+
+                scene->coarse_masks[coarse_cell] |= (1u << local_cell);
+
+                FineCellGpu* cell = &scene->fine_cells[fine_cell];
+                if (cell->count < SCENE_MAX_FINE_REFS_PER_CELL)
+                {
+                    const uint32_t write_index = cell->base_index + cell->count;
+                    scene->sphere_indices[write_index] = sphere_index;
+                    cell->count += 1u;
+                }
+                else
+                {
+                    scene->header.overflow_count += 1u;
+                }
+            }
+        }
+    }
+}
 
 int main(void)
 {
@@ -152,25 +322,76 @@ int main(void)
 
     vkGetSwapchainImagesKHR(device, swapchain, &swapImageCount, swapImages);
 
-    vkCreateDescriptorSetLayout(device, &(VkDescriptorSetLayoutCreateInfo){
-        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-        .bindingCount = 1u,
-        .pBindings = &(VkDescriptorSetLayoutBinding){
+    SceneBufferGpu scene_data = {0};
+    gbbBuildSceneBuffer(&scene_data);
+
+    vkCreateBuffer(device, &(VkBufferCreateInfo){
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size = sizeof(SceneBufferGpu),
+        .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+    }, NULL, &sceneBuffer);
+
+    VkMemoryRequirements scene_memory_reqs = {0};
+    vkGetBufferMemoryRequirements(device, sceneBuffer, &scene_memory_reqs);
+    const uint32_t scene_memory_type = gbbFindMemoryType(
+        scene_memory_reqs.memoryTypeBits,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (scene_memory_type == UINT32_MAX) return 1;
+
+    vkAllocateMemory(device, &(VkMemoryAllocateInfo){
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .allocationSize = scene_memory_reqs.size,
+        .memoryTypeIndex = scene_memory_type,
+    }, NULL, &sceneBufferMemory);
+    vkBindBufferMemory(device, sceneBuffer, sceneBufferMemory, 0u);
+
+    void* mapped_scene = NULL;
+    vkMapMemory(device, sceneBufferMemory, 0u, sizeof(SceneBufferGpu), 0u, &mapped_scene);
+    memcpy(mapped_scene, &scene_data, sizeof(SceneBufferGpu));
+    vkUnmapMemory(device, sceneBufferMemory);
+
+    if (scene_data.header.overflow_count != 0u)
+    {
+        printf("scene grid overflowed %u references (increase SCENE_MAX_FINE_REFS_PER_CELL)\n",
+               scene_data.header.overflow_count);
+    }
+
+    VkDescriptorSetLayoutBinding descriptor_bindings[2] = {
+        {
             .binding = 0u,
             .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
             .descriptorCount = 1u,
             .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
         },
+        {
+            .binding = 1u,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorCount = 1u,
+            .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+        }
+    };
+    vkCreateDescriptorSetLayout(device, &(VkDescriptorSetLayoutCreateInfo){
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .bindingCount = 2u,
+        .pBindings = descriptor_bindings,
     }, NULL, &descriptorSetLayout);
 
-    vkCreateDescriptorPool(device, &(VkDescriptorPoolCreateInfo){
-        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-        .maxSets = MAX_SWAP_IMAGES,
-        .poolSizeCount = 1u,
-        .pPoolSizes = &(VkDescriptorPoolSize){
+    VkDescriptorPoolSize descriptor_pool_sizes[2] = {
+        {
             .type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
             .descriptorCount = MAX_SWAP_IMAGES,
         },
+        {
+            .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorCount = MAX_SWAP_IMAGES,
+        }
+    };
+    vkCreateDescriptorPool(device, &(VkDescriptorPoolCreateInfo){
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .maxSets = MAX_SWAP_IMAGES,
+        .poolSizeCount = 2u,
+        .pPoolSizes = descriptor_pool_sizes,
     }, NULL, &descriptorPool);
 
     VkDescriptorSetLayout setLayouts[MAX_SWAP_IMAGES] = {
@@ -257,17 +478,34 @@ int main(void)
             },
         }, NULL, &swapImageViews[i]);
 
-        vkUpdateDescriptorSets(device, 1u, &(VkWriteDescriptorSet){
-            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .dstSet = descriptorSets[i],
-            .dstBinding = 0u,
-            .descriptorCount = 1u,
-            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-            .pImageInfo = &(VkDescriptorImageInfo){
-                .imageView = swapImageViews[i],
-                .imageLayout = VK_IMAGE_LAYOUT_GENERAL
+        VkDescriptorImageInfo image_info = {
+            .imageView = swapImageViews[i],
+            .imageLayout = VK_IMAGE_LAYOUT_GENERAL
+        };
+        VkDescriptorBufferInfo buffer_info = {
+            .buffer = sceneBuffer,
+            .offset = 0u,
+            .range = sizeof(SceneBufferGpu),
+        };
+        VkWriteDescriptorSet descriptor_writes[2] = {
+            {
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = descriptorSets[i],
+                .dstBinding = 0u,
+                .descriptorCount = 1u,
+                .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                .pImageInfo = &image_info,
             },
-        }, 0u, NULL);
+            {
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = descriptorSets[i],
+                .dstBinding = 1u,
+                .descriptorCount = 1u,
+                .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .pBufferInfo = &buffer_info,
+            }
+        };
+        vkUpdateDescriptorSets(device, 2u, descriptor_writes, 0u, NULL);
     }
 
     vkCreateSemaphore(device, &(VkSemaphoreCreateInfo){
