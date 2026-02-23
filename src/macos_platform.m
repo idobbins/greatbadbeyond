@@ -57,6 +57,7 @@ int gbbInitWindow(uint32_t width, uint32_t height, const char* title)
     [window_handle setTitle:title ? [NSString stringWithUTF8String:title] : @""];
     [view setWantsLayer:YES];
     [(CAMetalLayer*)surface_layer setOpaque:YES];
+    [(CAMetalLayer*)surface_layer setDisplaySyncEnabled:YES];
     const CGFloat scale = [window_handle backingScaleFactor];
     [(CAMetalLayer*)surface_layer setContentsScale:scale];
     [(CAMetalLayer*)surface_layer setDrawableSize:CGSizeMake((CGFloat)width * scale, (CGFloat)height * scale)];

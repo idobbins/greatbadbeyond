@@ -125,7 +125,7 @@ int main(void)
     VkSurfaceCapabilitiesKHR caps;
     vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice, surface, &caps);
     swapExtent = caps.currentExtent;
-    uint32_t swapchainMinImageCount = 2u;
+    uint32_t swapchainMinImageCount = 3u;
     if (swapchainMinImageCount < caps.minImageCount) swapchainMinImageCount = caps.minImageCount;
     if ((caps.maxImageCount != 0u) && (swapchainMinImageCount > caps.maxImageCount)) swapchainMinImageCount = caps.maxImageCount;
 
