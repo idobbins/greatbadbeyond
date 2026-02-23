@@ -8,11 +8,44 @@ layout(push_constant) uniform Camera {
     vec4 forward_fov;
 } cam;
 
+struct Ray {
+    vec3 origin;
+    vec3 dir;
+};
+
+// SoA for spheres (static, hardcoded for determinism/DOD)
+const int NUM_SPHERES = 3;  // Fixed size for flat execution
+const vec3 sphere_centers[NUM_SPHERES] = vec3[](
+vec3(0.0, 0.0, -1.0),
+vec3(-1.0, 0.0, -1.0),
+vec3(1.0, 0.0, -1.0)
+);
+const float sphere_radii[NUM_SPHERES] = float[](
+0.5, 0.3, 0.4
+);
+const vec3 sphere_colors[NUM_SPHERES] = vec3[](
+vec3(1.0, 0.0, 0.0),  // Red
+vec3(0.0, 1.0, 0.0),  // Green
+vec3(0.0, 0.0, 1.0)   // Blue
+);
+
+float hitSphere(vec3 center, float radius, Ray r) {
+    vec3 oc = r.origin - center;
+    float a = dot(r.dir, r.dir);
+    float h = dot(oc, r.dir);
+    float c = dot(oc, oc) - radius * radius;
+    float disc = h * h - a * c;
+    float root_disc = sqrt(max(disc, 0.0));
+    float t = (-h - root_disc) / a;
+    float hit = step(0.0, disc) * step(0.0, t);
+    return mix(-1.0, t, hit);
+}
+
 void main()
 {
-    ivec2 p  = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
     ivec2 sz = imageSize(outImage);
-    float valid = float(all(lessThan(p, sz)));
+    if (any(greaterThanEqual(p, sz))) return;
 
     vec2 uv = ((vec2(p) + 0.5) / vec2(sz)) * 2.0 - 1.0;
     uv.y = -uv.y;
@@ -27,6 +60,25 @@ void main()
     float half_width = half_fov_tan * aspect;
     vec3 dir = normalize(forward + uv.x * right * half_width + uv.y * up * half_height);
 
-    vec3 col = 0.5 * (dir + 1.0);
-    imageStore(outImage, p, vec4(col, 1.0) * valid);
+    Ray r = Ray(cam.origin.xyz, dir);
+
+    // Intersect all spheres (fixed loop unrolled implicitly, flat time)
+    float min_t = 1e30;  // Large positive
+    vec3 hit_color = vec3(0.0);  // Default no hit
+    for (int i = 0; i < NUM_SPHERES; ++i) {
+        float t = hitSphere(sphere_centers[i], sphere_radii[i], r);
+        float is_closer = step(t, min_t) * step(0.0, t);  // 1 if valid & closer
+        min_t = mix(min_t, t, is_closer);
+        hit_color = mix(hit_color, sphere_colors[i], is_closer);  // Accum closest color
+    }
+
+    // Background gradient
+    float bg_t = 0.5 * (dir.y + 1.0);
+    vec3 bg_color = (1.0 - bg_t) * vec3(1.0) + bg_t * vec3(0.5, 0.7, 1.0);
+
+    // Final color: mix bg/hit branchlessly
+    float hit_mask = step(0.0, min_t);  // 1 if any hit
+    vec3 col = mix(bg_color, hit_color, hit_mask);
+
+    imageStore(outImage, p, vec4(col, 1.0));
 }

@@ -7,6 +7,7 @@
 #include <vulkan/vulkan.h>
 #include <stdint.h>
 #include <math.h>
+#include <stdio.h>
 
 #include "gradient_comp_spv.h"
 #include "platform.h"
@@ -57,6 +58,7 @@ static VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
 static VkPipeline pipeline = VK_NULL_HANDLE;
 static VkCommandPool commandPool = VK_NULL_HANDLE;
 static VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+static VkQueryPool timestampQueryPool = VK_NULL_HANDLE;
 static VkSemaphore imageAvailableSemaphore = VK_NULL_HANDLE;
 static VkSemaphore renderFinishedSemaphore = VK_NULL_HANDLE;
 static VkFence inFlightFence = VK_NULL_HANDLE;
@@ -116,6 +118,9 @@ int main(void)
     }, NULL, &device);
 
     vkGetDeviceQueue(device, 0u, 0u, &queue);
+    VkPhysicalDeviceProperties deviceProps;
+    vkGetPhysicalDeviceProperties(physicalDevice, &deviceProps);
+    const float timestampPeriodNs = deviceProps.limits.timestampPeriod;
 
     VkSurfaceCapabilitiesKHR caps;
     vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice, surface, &caps);
@@ -226,6 +231,11 @@ int main(void)
         .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
         .commandBufferCount = 1u,
     }, &commandBuffer);
+    vkCreateQueryPool(device, &(VkQueryPoolCreateInfo){
+        .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+        .queryType = VK_QUERY_TYPE_TIMESTAMP,
+        .queryCount = 2u,
+    }, NULL, &timestampQueryPool);
 
     VkImageSubresourceRange imageRange = {
         .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
@@ -272,21 +282,48 @@ int main(void)
         .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, .flags = VK_FENCE_CREATE_SIGNALED_BIT
     }, NULL, &inFlightFence);
 
-    float cameraPosition[3] = {0.0f, 0.0f, -2.0f};
-    float cameraYaw = 0.0f;
+    float cameraPosition[3] = {0.0f, 0.0f, 0.0f};
+    float cameraYaw = 3.1415926536f;
     float cameraPitch = 0.0f;
-    const float cameraFov = 1.0471975512f;
+    const float cameraFov = 1.5707963268f;
 
     const VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
     uint64_t last_time = gbbGetTimeNs();
+    float frame_time_accum_ms = 0.0f;
+    uint32_t frame_time_count = 0u;
+    float gpu_time_accum_ms = 0.0f;
+    uint32_t gpu_time_count = 0u;
+    uint32_t has_gpu_timestamps = 0u;
     while (gbbPumpEventsOnce() == 0)
     {
         uint64_t now_time = gbbGetTimeNs();
         float delta_time = (float)(now_time - last_time) * 1e-9f;
         last_time = now_time;
+        float delta_ms = delta_time * 1000.0f;
+        frame_time_accum_ms += delta_ms;
+        frame_time_count += 1u;
+        if (frame_time_accum_ms >= 1000.0f)
+        {
+            float avg_ms = frame_time_accum_ms / (float)frame_time_count;
+            float fps = 1000.0f / avg_ms;
+            float avg_gpu_ms = (gpu_time_count > 0u) ? (gpu_time_accum_ms / (float)gpu_time_count) : 0.0f;
+            printf("frame %.2f ms (%.1f FPS), gpu %.3f ms\n", avg_ms, fps, avg_gpu_ms);
+            frame_time_accum_ms = 0.0f;
+            frame_time_count = 0u;
+            gpu_time_accum_ms = 0.0f;
+            gpu_time_count = 0u;
+        }
 
         vkWaitForFences(device, 1u, &inFlightFence, VK_TRUE, UINT64_MAX);
         vkResetFences(device, 1u, &inFlightFence);
+        if (has_gpu_timestamps != 0u)
+        {
+            uint64_t timestamps[2] = {0u, 0u};
+            vkGetQueryPoolResults(device, timestampQueryPool, 0u, 2u, sizeof(timestamps), timestamps, sizeof(uint64_t),
+                                  VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+            gpu_time_accum_ms += (float)(timestamps[1] - timestamps[0]) * timestampPeriodNs * 1e-6f;
+            gpu_time_count += 1u;
+        }
 
         uint32_t imageIndex = 0u;
         vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, imageAvailableSemaphore, VK_NULL_HANDLE, &imageIndex);
@@ -330,6 +367,8 @@ int main(void)
         vkBeginCommandBuffer(commandBuffer, &(VkCommandBufferBeginInfo){
             .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO
         });
+        vkCmdResetQueryPool(commandBuffer, timestampQueryPool, 0u, 2u);
+        vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, timestampQueryPool, 0u);
 
         vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0u,
                              0u, NULL, 0u, NULL, 1u, &(VkImageMemoryBarrier){
@@ -348,6 +387,7 @@ int main(void)
         vkCmdPushConstants(commandBuffer, pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0u, sizeof(cameraPush), &cameraPush);
         vkCmdDispatch(commandBuffer, (swapExtent.width + COMPUTE_TILE_SIZE - 1u) / COMPUTE_TILE_SIZE,
                       (swapExtent.height + COMPUTE_TILE_SIZE - 1u) / COMPUTE_TILE_SIZE, 1u);
+        vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, timestampQueryPool, 1u);
 
         vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0u,
                              0u, NULL, 0u, NULL, 1u, &(VkImageMemoryBarrier){
@@ -373,6 +413,7 @@ int main(void)
             .signalSemaphoreCount = 1u,
             .pSignalSemaphores = &renderFinishedSemaphore,
         }, inFlightFence);
+        has_gpu_timestamps = 1u;
 
         vkQueuePresentKHR(queue, &(VkPresentInfoKHR){
             .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
