@@ -335,8 +335,8 @@ int main(void)
         const float base_speed = 3.0f;
         const float speed_multiplier = (float)gbbIsKeyDown(GBB_KEY_SHIFT) * 2.0f + 1.0f;
         const float move_speed = base_speed * speed_multiplier;
-        cameraYaw += mouseDeltaX * lookSensitivity;
-        cameraPitch -= mouseDeltaY * lookSensitivity;
+        cameraYaw -= mouseDeltaX * lookSensitivity;
+        cameraPitch += mouseDeltaY * lookSensitivity;
         cameraPitch = fmaxf(-1.553343f, fminf(1.553343f, cameraPitch));
 
         const float pitchCos = cosf(cameraPitch);
@@ -344,8 +344,8 @@ int main(void)
         const float forwardY = sinf(cameraPitch);
         const float forwardZ = cosf(cameraYaw) * pitchCos;
 
-        float rightX = forwardZ;
-        float rightZ = -forwardX;
+        float rightX = -forwardZ;
+        float rightZ = forwardX;
         const float rightLen = sqrtf(rightX * rightX + rightZ * rightZ);
         const float inv_rightLen = 1.0f / fmaxf(rightLen, 1e-6f);
         rightX *= inv_rightLen;
@@ -353,7 +353,7 @@ int main(void)
 
         const float moveForward = (float)gbbIsKeyDown(GBB_KEY_W) - (float)gbbIsKeyDown(GBB_KEY_S);
         const float moveRight = (float)gbbIsKeyDown(GBB_KEY_D) - (float)gbbIsKeyDown(GBB_KEY_A);
-        const float moveUp = (float)gbbIsKeyDown(GBB_KEY_E) - (float)gbbIsKeyDown(GBB_KEY_Q);
+        const float moveUp = (float)gbbIsKeyDown(GBB_KEY_Q) - (float)gbbIsKeyDown(GBB_KEY_E);
         cameraPosition[0] += (forwardX * moveForward + rightX * moveRight) * move_speed * delta_time;
         cameraPosition[1] += (forwardY * moveForward + moveUp) * move_speed * delta_time;
         cameraPosition[2] += (forwardZ * moveForward + rightZ * moveRight) * move_speed * delta_time;
