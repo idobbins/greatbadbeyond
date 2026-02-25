@@ -9,8 +9,7 @@ static NSWindow* window_handle = nil;
 void *surface_layer = NULL;
 static uint32_t should_quit = 0u;
 static uint8_t key_states[GBB_KEY_COUNT] = {0u};
-static float mouse_delta_x = 0.0f;
-static float mouse_delta_y = 0.0f;
+static float mouse_wheel_delta = 0.0f;
 
 static int gbbMapMacKeyCode(unsigned short keyCode, uint32_t* key)
 {
@@ -20,16 +19,6 @@ static int gbbMapMacKeyCode(unsigned short keyCode, uint32_t* key)
         case 0: *key = GBB_KEY_A; return 1;       // A
         case 1: *key = GBB_KEY_S; return 1;       // S
         case 2: *key = GBB_KEY_D; return 1;       // D
-        case 12: *key = GBB_KEY_Q; return 1;      // Q
-        case 14: *key = GBB_KEY_E; return 1;      // E
-        case 123: *key = GBB_KEY_LEFT; return 1;  // Left Arrow
-        case 124: *key = GBB_KEY_RIGHT; return 1; // Right Arrow
-        case 126: *key = GBB_KEY_UP; return 1;    // Up Arrow
-        case 125: *key = GBB_KEY_DOWN; return 1;  // Down Arrow
-        case 56:
-        case 60:
-            *key = GBB_KEY_SHIFT;
-            return 1;
         default:
             break;
     }
@@ -65,6 +54,7 @@ int gbbInitWindow(uint32_t width, uint32_t height, const char* title)
     [window_handle makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];
     should_quit = 0u;
+    mouse_wheel_delta = 0.0f;
     return 0;
 }
 
@@ -95,14 +85,9 @@ int gbbPumpEventsOnce(void)
             should_quit |= is_escape;
             if (!is_escape) [NSApp sendEvent:event];
 
-            const NSEventType type = [event type];
-            if ((type == NSEventTypeMouseMoved) ||
-                (type == NSEventTypeLeftMouseDragged) ||
-                (type == NSEventTypeRightMouseDragged) ||
-                (type == NSEventTypeOtherMouseDragged))
+            if ([event type] == NSEventTypeScrollWheel)
             {
-                mouse_delta_x += (float)[event deltaX];
-                mouse_delta_y += (float)(-[event deltaY]);
+                mouse_wheel_delta += (float)[event scrollingDeltaY];
             }
         }
 
@@ -117,12 +102,10 @@ int gbbIsKeyDown(uint32_t key)
     return (int)key_states[key];
 }
 
-void gbbConsumeMouseDelta(float* delta_x, float* delta_y)
+void gbbConsumeMouseWheel(float* delta)
 {
-    if (delta_x) *delta_x = mouse_delta_x;
-    if (delta_y) *delta_y = mouse_delta_y;
-    mouse_delta_x = 0.0f;
-    mouse_delta_y = 0.0f;
+    if (delta) *delta = mouse_wheel_delta;
+    mouse_wheel_delta = 0.0f;
 }
 
 uint64_t gbbGetTimeNs(void)

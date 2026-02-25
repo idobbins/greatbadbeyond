@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <windowsx.h>
 #include "platform.h"
 
 static const char* const WINDOW_CLASS_NAME = "greatbadbeyond_window_class";
@@ -8,12 +9,7 @@ static HINSTANCE instance_handle = NULL;
 void *window_handle = NULL;
 static uint32_t should_quit = 0u;
 static uint8_t key_states[GBB_KEY_COUNT] = {0u};
-static float mouse_delta_x = 0.0f;
-static float mouse_delta_y = 0.0f;
-static int32_t mouse_last_x = 0;
-static int32_t mouse_last_y = 0;
-static uint32_t mouse_has_last = 0u;
-static uint32_t mouse_tracking = 0u;
+static float mouse_wheel_delta = 0.0f;
 
 static int gbbMapVirtualKey(WPARAM wParam, uint32_t* key)
 {
@@ -23,17 +19,6 @@ static int gbbMapVirtualKey(WPARAM wParam, uint32_t* key)
         case 'A': *key = GBB_KEY_A; return 1;
         case 'S': *key = GBB_KEY_S; return 1;
         case 'D': *key = GBB_KEY_D; return 1;
-        case 'Q': *key = GBB_KEY_Q; return 1;
-        case 'E': *key = GBB_KEY_E; return 1;
-        case VK_LEFT: *key = GBB_KEY_LEFT; return 1;
-        case VK_RIGHT: *key = GBB_KEY_RIGHT; return 1;
-        case VK_UP: *key = GBB_KEY_UP; return 1;
-        case VK_DOWN: *key = GBB_KEY_DOWN; return 1;
-        case VK_SHIFT:
-        case VK_LSHIFT:
-        case VK_RSHIFT:
-            *key = GBB_KEY_SHIFT;
-            return 1;
         default:
             break;
     }
@@ -75,36 +60,9 @@ static LRESULT CALLBACK gbbWindowProc(HWND window, UINT message, WPARAM wParam, 
             if (gbbMapVirtualKey(wParam, &key) != 0) key_states[key] = 0u;
             break;
         }
-        case WM_MOUSEMOVE:
+        case WM_MOUSEWHEEL:
         {
-            const int32_t x = GET_X_LPARAM(lParam);
-            const int32_t y = GET_Y_LPARAM(lParam);
-            if (mouse_has_last != 0u)
-            {
-                mouse_delta_x += (float)(x - mouse_last_x);
-                mouse_delta_y += (float)(y - mouse_last_y);
-            }
-            mouse_last_x = x;
-            mouse_last_y = y;
-            mouse_has_last = 1u;
-
-            if (mouse_tracking == 0u)
-            {
-                TRACKMOUSEEVENT track = {
-                    .cbSize = sizeof(TRACKMOUSEEVENT),
-                    .dwFlags = TME_LEAVE,
-                    .hwndTrack = window,
-                    .dwHoverTime = HOVER_DEFAULT
-                };
-                TrackMouseEvent(&track);
-                mouse_tracking = 1u;
-            }
-            break;
-        }
-        case WM_MOUSELEAVE:
-        {
-            mouse_tracking = 0u;
-            mouse_has_last = 0u;
+            mouse_wheel_delta += (float)GET_WHEEL_DELTA_WPARAM(wParam) / (float)WHEEL_DELTA;
             break;
         }
         default:
@@ -141,10 +99,7 @@ int gbbInitWindow(uint32_t width, uint32_t height, const char* title)
     UpdateWindow((HWND)window_handle);
 
     should_quit = 0u;
-    mouse_delta_x = 0.0f;
-    mouse_delta_y = 0.0f;
-    mouse_has_last = 0u;
-    mouse_tracking = 0u;
+    mouse_wheel_delta = 0.0f;
     return 0;
 }
 
@@ -184,12 +139,10 @@ int gbbIsKeyDown(uint32_t key)
     return (int)key_states[key];
 }
 
-void gbbConsumeMouseDelta(float* delta_x, float* delta_y)
+void gbbConsumeMouseWheel(float* delta)
 {
-    if (delta_x) *delta_x = mouse_delta_x;
-    if (delta_y) *delta_y = mouse_delta_y;
-    mouse_delta_x = 0.0f;
-    mouse_delta_y = 0.0f;
+    if (delta) *delta = mouse_wheel_delta;
+    mouse_wheel_delta = 0.0f;
 }
 
 uint64_t gbbGetTimeNs(void)
