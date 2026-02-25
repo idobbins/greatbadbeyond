@@ -163,12 +163,10 @@ static void buildPackedSpheres(void)
             float maxX = SCENE_MIN[0] + SCENE_EXTENT[0] - radius;
             float minZ = SCENE_MIN[2] + radius;
             float maxZ = SCENE_MIN[2] + SCENE_EXTENT[2] - radius;
-            float minY = SCENE_MIN[1] + radius;
-            float maxY = fminf(SCENE_MIN[1] + SCENE_EXTENT[1] - radius, 3.6f);
-            if ((maxX <= minX) || (maxY <= minY) || (maxZ <= minZ)) continue;
+            if ((maxX <= minX) || (maxZ <= minZ)) continue;
 
             float centerX = minX + (maxX - minX) * random01(&rng);
-            float centerY = minY + (maxY - minY) * random01(&rng);
+            float centerY = SCENE_MIN[1] + radius;
             float centerZ = minZ + (maxZ - minZ) * random01(&rng);
             uint32_t materialId = nextRandom(&rng) % 3u;
 
@@ -494,10 +492,19 @@ int main(void)
         .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, .flags = VK_FENCE_CREATE_SIGNALED_BIT
     }, NULL, &inFlightFence);
 
-    float cameraPosition[3] = {0.0f, 0.0f, 0.0f};
-    float cameraYaw = 3.1415926536f;
-    float cameraPitch = 0.0f;
-    const float cameraFov = 1.5707963268f;
+    float cameraFocus[3] = {0.0f, 0.0f, 0.0f};
+    float cameraZoom = 26.0f;
+    const float cameraYaw = 0.7853981634f;
+    const float cameraPitch = -0.7853981634f;
+    const float cameraFov = 0.2967059728f;
+    const float cameraForwardX = sinf(cameraYaw) * cosf(cameraPitch);
+    const float cameraForwardY = sinf(cameraPitch);
+    const float cameraForwardZ = cosf(cameraYaw) * cosf(cameraPitch);
+    const float forwardLenXZ = sqrtf(cameraForwardX * cameraForwardX + cameraForwardZ * cameraForwardZ);
+    const float moveForwardX = cameraForwardX / fmaxf(forwardLenXZ, 1e-6f);
+    const float moveForwardZ = cameraForwardZ / fmaxf(forwardLenXZ, 1e-6f);
+    const float moveRightX = -moveForwardZ;
+    const float moveRightZ = moveForwardX;
 
     const VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
     uint64_t last_time = gbbGetTimeNs();
@@ -540,39 +547,33 @@ int main(void)
         uint32_t imageIndex = 0u;
         vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, imageAvailableSemaphore, VK_NULL_HANDLE, &imageIndex);
 
-        float mouseDeltaX = 0.0f;
-        float mouseDeltaY = 0.0f;
-        gbbConsumeMouseDelta(&mouseDeltaX, &mouseDeltaY);
-        const float lookSensitivity = 0.0025f;
-        const float base_speed = 3.0f;
-        const float speed_multiplier = (float)gbbIsKeyDown(GBB_KEY_SHIFT) * 2.0f + 1.0f;
-        const float move_speed = base_speed * speed_multiplier;
-        cameraYaw -= mouseDeltaX * lookSensitivity;
-        cameraPitch += mouseDeltaY * lookSensitivity;
-        cameraPitch = fmaxf(-1.553343f, fminf(1.553343f, cameraPitch));
+        float wheelDelta = 0.0f;
+        gbbConsumeMouseWheel(&wheelDelta);
+        cameraZoom *= expf(-wheelDelta * 0.12f);
+        cameraZoom = fmaxf(6.0f, fminf(80.0f, cameraZoom));
 
-        const float pitchCos = cosf(cameraPitch);
-        const float forwardX = sinf(cameraYaw) * pitchCos;
-        const float forwardY = sinf(cameraPitch);
-        const float forwardZ = cosf(cameraYaw) * pitchCos;
-
-        float rightX = -forwardZ;
-        float rightZ = forwardX;
-        const float rightLen = sqrtf(rightX * rightX + rightZ * rightZ);
-        const float inv_rightLen = 1.0f / fmaxf(rightLen, 1e-6f);
-        rightX *= inv_rightLen;
-        rightZ *= inv_rightLen;
+        const float move_speed = 8.0f + cameraZoom * 0.35f;
 
         const float moveForward = (float)gbbIsKeyDown(GBB_KEY_W) - (float)gbbIsKeyDown(GBB_KEY_S);
         const float moveRight = (float)gbbIsKeyDown(GBB_KEY_D) - (float)gbbIsKeyDown(GBB_KEY_A);
-        const float moveUp = (float)gbbIsKeyDown(GBB_KEY_Q) - (float)gbbIsKeyDown(GBB_KEY_E);
-        cameraPosition[0] += (forwardX * moveForward + rightX * moveRight) * move_speed * delta_time;
-        cameraPosition[1] += (forwardY * moveForward + moveUp) * move_speed * delta_time;
-        cameraPosition[2] += (forwardZ * moveForward + rightZ * moveRight) * move_speed * delta_time;
+        float moveNorm = sqrtf(moveForward * moveForward + moveRight * moveRight);
+        float moveForwardUnit = moveForward;
+        float moveRightUnit = moveRight;
+        if (moveNorm > 1e-6f)
+        {
+            moveForwardUnit /= moveNorm;
+            moveRightUnit /= moveNorm;
+        }
+        cameraFocus[0] += (moveForwardX * moveForwardUnit + moveRightX * moveRightUnit) * move_speed * delta_time;
+        cameraFocus[2] += (moveForwardZ * moveForwardUnit + moveRightZ * moveRightUnit) * move_speed * delta_time;
+
+        float cameraPositionX = cameraFocus[0] - cameraForwardX * cameraZoom;
+        float cameraPositionY = cameraFocus[1] - cameraForwardY * cameraZoom;
+        float cameraPositionZ = cameraFocus[2] - cameraForwardZ * cameraZoom;
 
         ScenePushConstants scenePush = {
-            .origin = {cameraPosition[0], cameraPosition[1], cameraPosition[2], 0.0f},
-            .forward_fov = {forwardX, forwardY, forwardZ, cameraFov},
+            .origin = {cameraPositionX, cameraPositionY, cameraPositionZ, 0.0f},
+            .forward_fov = {cameraForwardX, cameraForwardY, cameraForwardZ, cameraFov},
             .scene_min = {SCENE_MIN[0], SCENE_MIN[1], SCENE_MIN[2], 0.0f},
             .scene_extent = {SCENE_EXTENT[0], SCENE_EXTENT[1], SCENE_EXTENT[2], 0.0f},
             .radius_min_max = {SPHERE_RADIUS_MIN, SPHERE_RADIUS_MAX, 0.0f, 0.0f},
