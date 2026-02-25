@@ -17,6 +17,11 @@
 #define FRAMES_IN_FLIGHT 1u
 #define COMPUTE_TILE_SIZE 8u
 #define MAX_PACKED_SPHERES 128u
+#define GRID_RES_X 24u
+#define GRID_RES_Y 8u
+#define GRID_RES_Z 24u
+#define GRID_CELL_COUNT (GRID_RES_X * GRID_RES_Y * GRID_RES_Z)
+#define MAX_GRID_INDICES 32768u
 
 static const char* APPLICATION_NAME = "greatbadbeyond";
 
@@ -67,8 +72,18 @@ static VkFence inFlightFence = VK_NULL_HANDLE;
 static VkBuffer sphereBuffer = VK_NULL_HANDLE;
 static VkDeviceMemory sphereBufferMemory = VK_NULL_HANDLE;
 static VkDeviceSize sphereBufferSize = 0u;
+static VkBuffer gridCellBuffer = VK_NULL_HANDLE;
+static VkDeviceMemory gridCellBufferMemory = VK_NULL_HANDLE;
+static VkDeviceSize gridCellBufferSize = 0u;
+static VkBuffer gridIndexBuffer = VK_NULL_HANDLE;
+static VkDeviceMemory gridIndexBufferMemory = VK_NULL_HANDLE;
+static VkDeviceSize gridIndexBufferSize = 0u;
 static uint32_t packedSphereWords[MAX_PACKED_SPHERES * 2u];
 static uint32_t packedSphereCount = 0u;
+static uint32_t gridCellWords[GRID_CELL_COUNT * 2u];
+static uint32_t gridIndexWords[MAX_GRID_INDICES];
+static uint32_t gridCellCount = 0u;
+static uint32_t gridIndexCount = 0u;
 
 static const float SCENE_MIN[3] = {-18.0f, 0.0f, -18.0f};
 static const float SCENE_EXTENT[3] = {36.0f, 8.0f, 36.0f};
@@ -82,6 +97,7 @@ typedef struct ScenePushConstants {
     float scene_extent[4];
     float radius_min_max[4];
     uint32_t counts[4];
+    uint32_t grid_dims[4];
 } ScenePushConstants;
 
 static float clampf01(float v)
@@ -140,6 +156,53 @@ static uint32_t findMemoryTypeIndex(uint32_t typeBits, VkMemoryPropertyFlags req
         }
     }
     return 0u;
+}
+
+static void createStorageBuffer(const void *data, VkDeviceSize size, VkBuffer *buffer, VkDeviceMemory *memory)
+{
+    vkCreateBuffer(device, &(VkBufferCreateInfo){
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size = size,
+        .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+    }, NULL, buffer);
+
+    VkMemoryRequirements requirements = {0};
+    vkGetBufferMemoryRequirements(device, *buffer, &requirements);
+    vkAllocateMemory(device, &(VkMemoryAllocateInfo){
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .allocationSize = requirements.size,
+        .memoryTypeIndex = findMemoryTypeIndex(
+            requirements.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT),
+    }, NULL, memory);
+    vkBindBufferMemory(device, *buffer, *memory, 0u);
+
+    void *mapped = NULL;
+    vkMapMemory(device, *memory, 0u, size, 0u, &mapped);
+    memcpy(mapped, data, (size_t)size);
+    vkUnmapMemory(device, *memory);
+}
+
+static void decodePackedSphereCpu(uint32_t sphereIndex, float *centerX, float *centerY, float *centerZ, float *radius)
+{
+    uint32_t w0 = packedSphereWords[sphereIndex * 2u + 0u];
+    uint32_t w1 = packedSphereWords[sphereIndex * 2u + 1u];
+    uint32_t qx = w0 & 0xffffu;
+    uint32_t qy = (w0 >> 16u) & 0xffffu;
+    uint32_t qz = w1 & 0xffffu;
+    uint32_t qRadius = (w1 >> 16u) & 0x0fffu;
+    *centerX = SCENE_MIN[0] + dequantizeUnorm16(qx) * SCENE_EXTENT[0];
+    *centerY = SCENE_MIN[1] + dequantizeUnorm16(qy) * SCENE_EXTENT[1];
+    *centerZ = SCENE_MIN[2] + dequantizeUnorm16(qz) * SCENE_EXTENT[2];
+    *radius = dequantizeRadius12(qRadius);
+}
+
+static uint32_t clampGridCoord(int32_t value, uint32_t maxValue)
+{
+    if (value < 0) return 0u;
+    if ((uint32_t)value >= maxValue) return maxValue - 1u;
+    return (uint32_t)value;
 }
 
 static void buildPackedSpheres(void)
@@ -219,6 +282,125 @@ static void buildPackedSpheres(void)
         packedSphereWords[0] = (qx & 0xffffu) | ((qy & 0xffffu) << 16u);
         packedSphereWords[1] = (qz & 0xffffu) | ((qRadius & 0x0fffu) << 16u);
         packedSphereCount = 1u;
+    }
+}
+
+static void buildUniformGrid(void)
+{
+    uint32_t cellHistogram[GRID_CELL_COUNT];
+    uint32_t cellCursor[GRID_CELL_COUNT];
+    memset(cellHistogram, 0, sizeof(cellHistogram));
+    memset(cellCursor, 0, sizeof(cellCursor));
+    memset(gridCellWords, 0, sizeof(gridCellWords));
+    memset(gridIndexWords, 0, sizeof(gridIndexWords));
+
+    const float cellSizeX = SCENE_EXTENT[0] / (float)GRID_RES_X;
+    const float cellSizeY = SCENE_EXTENT[1] / (float)GRID_RES_Y;
+    const float cellSizeZ = SCENE_EXTENT[2] / (float)GRID_RES_Z;
+
+    for (uint32_t sphereIndex = 0u; sphereIndex < packedSphereCount; ++sphereIndex)
+    {
+        float cx = 0.0f;
+        float cy = 0.0f;
+        float cz = 0.0f;
+        float radius = 0.0f;
+        decodePackedSphereCpu(sphereIndex, &cx, &cy, &cz, &radius);
+
+        int32_t minX = (int32_t)floorf((cx - radius - SCENE_MIN[0]) / cellSizeX);
+        int32_t minY = (int32_t)floorf((cy - radius - SCENE_MIN[1]) / cellSizeY);
+        int32_t minZ = (int32_t)floorf((cz - radius - SCENE_MIN[2]) / cellSizeZ);
+        int32_t maxX = (int32_t)floorf((cx + radius - SCENE_MIN[0]) / cellSizeX);
+        int32_t maxY = (int32_t)floorf((cy + radius - SCENE_MIN[1]) / cellSizeY);
+        int32_t maxZ = (int32_t)floorf((cz + radius - SCENE_MIN[2]) / cellSizeZ);
+
+        uint32_t clampedMinX = clampGridCoord(minX, GRID_RES_X);
+        uint32_t clampedMinY = clampGridCoord(minY, GRID_RES_Y);
+        uint32_t clampedMinZ = clampGridCoord(minZ, GRID_RES_Z);
+        uint32_t clampedMaxX = clampGridCoord(maxX, GRID_RES_X);
+        uint32_t clampedMaxY = clampGridCoord(maxY, GRID_RES_Y);
+        uint32_t clampedMaxZ = clampGridCoord(maxZ, GRID_RES_Z);
+
+        for (uint32_t z = clampedMinZ; z <= clampedMaxZ; ++z)
+        {
+            for (uint32_t y = clampedMinY; y <= clampedMaxY; ++y)
+            {
+                for (uint32_t x = clampedMinX; x <= clampedMaxX; ++x)
+                {
+                    uint32_t cellIndex = x + y * GRID_RES_X + z * GRID_RES_X * GRID_RES_Y;
+                    cellHistogram[cellIndex] += 1u;
+                }
+            }
+        }
+    }
+
+    uint32_t runningOffset = 0u;
+    uint32_t nonEmptyCellCount = 0u;
+    uint32_t maxCellCount = 0u;
+    for (uint32_t cell = 0u; cell < GRID_CELL_COUNT; ++cell)
+    {
+        uint32_t count = cellHistogram[cell];
+        if (count > 0u)
+        {
+            nonEmptyCellCount += 1u;
+            if (count > maxCellCount) maxCellCount = count;
+        }
+        if (runningOffset >= MAX_GRID_INDICES)
+        {
+            count = 0u;
+        }
+        else if ((runningOffset + count) > MAX_GRID_INDICES)
+        {
+            count = MAX_GRID_INDICES - runningOffset;
+        }
+        gridCellWords[cell * 2u + 0u] = runningOffset;
+        gridCellWords[cell * 2u + 1u] = count;
+        runningOffset += count;
+    }
+    gridCellCount = GRID_CELL_COUNT;
+    gridIndexCount = runningOffset;
+    printf("grid cells %u non-empty %u max-cell %u refs %u spheres %u\n",
+           gridCellCount, nonEmptyCellCount, maxCellCount, gridIndexCount, packedSphereCount);
+
+    for (uint32_t sphereIndex = 0u; sphereIndex < packedSphereCount; ++sphereIndex)
+    {
+        float cx = 0.0f;
+        float cy = 0.0f;
+        float cz = 0.0f;
+        float radius = 0.0f;
+        decodePackedSphereCpu(sphereIndex, &cx, &cy, &cz, &radius);
+
+        int32_t minX = (int32_t)floorf((cx - radius - SCENE_MIN[0]) / cellSizeX);
+        int32_t minY = (int32_t)floorf((cy - radius - SCENE_MIN[1]) / cellSizeY);
+        int32_t minZ = (int32_t)floorf((cz - radius - SCENE_MIN[2]) / cellSizeZ);
+        int32_t maxX = (int32_t)floorf((cx + radius - SCENE_MIN[0]) / cellSizeX);
+        int32_t maxY = (int32_t)floorf((cy + radius - SCENE_MIN[1]) / cellSizeY);
+        int32_t maxZ = (int32_t)floorf((cz + radius - SCENE_MIN[2]) / cellSizeZ);
+
+        uint32_t clampedMinX = clampGridCoord(minX, GRID_RES_X);
+        uint32_t clampedMinY = clampGridCoord(minY, GRID_RES_Y);
+        uint32_t clampedMinZ = clampGridCoord(minZ, GRID_RES_Z);
+        uint32_t clampedMaxX = clampGridCoord(maxX, GRID_RES_X);
+        uint32_t clampedMaxY = clampGridCoord(maxY, GRID_RES_Y);
+        uint32_t clampedMaxZ = clampGridCoord(maxZ, GRID_RES_Z);
+
+        for (uint32_t z = clampedMinZ; z <= clampedMaxZ; ++z)
+        {
+            for (uint32_t y = clampedMinY; y <= clampedMaxY; ++y)
+            {
+                for (uint32_t x = clampedMinX; x <= clampedMaxX; ++x)
+                {
+                    uint32_t cellIndex = x + y * GRID_RES_X + z * GRID_RES_X * GRID_RES_Y;
+                    uint32_t cellOffset = gridCellWords[cellIndex * 2u + 0u];
+                    uint32_t cellCount = gridCellWords[cellIndex * 2u + 1u];
+                    uint32_t cursor = cellCursor[cellIndex];
+                    if (cursor < cellCount)
+                    {
+                        gridIndexWords[cellOffset + cursor] = sphereIndex;
+                        cellCursor[cellIndex] = cursor + 1u;
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -307,29 +489,17 @@ int main(void)
     vkGetSwapchainImagesKHR(device, swapchain, &swapImageCount, swapImages);
 
     buildPackedSpheres();
+    buildUniformGrid();
     sphereBufferSize = (VkDeviceSize)(packedSphereCount * 2u * sizeof(uint32_t));
-    vkCreateBuffer(device, &(VkBufferCreateInfo){
-        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-        .size = sphereBufferSize,
-        .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-    }, NULL, &sphereBuffer);
-    VkMemoryRequirements sphereMemoryRequirements = {0};
-    vkGetBufferMemoryRequirements(device, sphereBuffer, &sphereMemoryRequirements);
-    vkAllocateMemory(device, &(VkMemoryAllocateInfo){
-        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-        .allocationSize = sphereMemoryRequirements.size,
-        .memoryTypeIndex = findMemoryTypeIndex(
-            sphereMemoryRequirements.memoryTypeBits,
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT),
-    }, NULL, &sphereBufferMemory);
-    vkBindBufferMemory(device, sphereBuffer, sphereBufferMemory, 0u);
-    void *mappedSphereWords = NULL;
-    vkMapMemory(device, sphereBufferMemory, 0u, sphereBufferSize, 0u, &mappedSphereWords);
-    memcpy(mappedSphereWords, packedSphereWords, (size_t)sphereBufferSize);
-    vkUnmapMemory(device, sphereBufferMemory);
+    if (sphereBufferSize == 0u) sphereBufferSize = sizeof(uint32_t) * 2u;
+    gridCellBufferSize = (VkDeviceSize)(gridCellCount * 2u * sizeof(uint32_t));
+    if (gridCellBufferSize == 0u) gridCellBufferSize = sizeof(uint32_t) * 2u;
+    gridIndexBufferSize = (VkDeviceSize)(((gridIndexCount > 0u) ? gridIndexCount : 1u) * sizeof(uint32_t));
+    createStorageBuffer(packedSphereWords, sphereBufferSize, &sphereBuffer, &sphereBufferMemory);
+    createStorageBuffer(gridCellWords, gridCellBufferSize, &gridCellBuffer, &gridCellBufferMemory);
+    createStorageBuffer(gridIndexWords, gridIndexBufferSize, &gridIndexBuffer, &gridIndexBufferMemory);
 
-    VkDescriptorSetLayoutBinding descriptorBindings[2] = {
+    VkDescriptorSetLayoutBinding descriptorBindings[4] = {
         {
             .binding = 0u,
             .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
@@ -342,10 +512,22 @@ int main(void)
             .descriptorCount = 1u,
             .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
         },
+        {
+            .binding = 2u,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorCount = 1u,
+            .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+        },
+        {
+            .binding = 3u,
+            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .descriptorCount = 1u,
+            .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+        },
     };
     vkCreateDescriptorSetLayout(device, &(VkDescriptorSetLayoutCreateInfo){
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-        .bindingCount = 2u,
+        .bindingCount = 4u,
         .pBindings = descriptorBindings,
     }, NULL, &descriptorSetLayout);
 
@@ -356,7 +538,7 @@ int main(void)
         },
         {
             .type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-            .descriptorCount = MAX_SWAP_IMAGES,
+            .descriptorCount = MAX_SWAP_IMAGES * 3u,
         },
     };
     vkCreateDescriptorPool(device, &(VkDescriptorPoolCreateInfo){
@@ -459,7 +641,17 @@ int main(void)
             .offset = 0u,
             .range = sphereBufferSize,
         };
-        VkWriteDescriptorSet writes[2] = {
+        VkDescriptorBufferInfo gridCellBufferInfo = {
+            .buffer = gridCellBuffer,
+            .offset = 0u,
+            .range = gridCellBufferSize,
+        };
+        VkDescriptorBufferInfo gridIndexBufferInfo = {
+            .buffer = gridIndexBuffer,
+            .offset = 0u,
+            .range = gridIndexBufferSize,
+        };
+        VkWriteDescriptorSet writes[4] = {
             {
                 .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
                 .dstSet = descriptorSets[i],
@@ -476,8 +668,24 @@ int main(void)
                 .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                 .pBufferInfo = &sphereBufferInfo,
             },
+            {
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = descriptorSets[i],
+                .dstBinding = 2u,
+                .descriptorCount = 1u,
+                .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .pBufferInfo = &gridCellBufferInfo,
+            },
+            {
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = descriptorSets[i],
+                .dstBinding = 3u,
+                .descriptorCount = 1u,
+                .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                .pBufferInfo = &gridIndexBufferInfo,
+            },
         };
-        vkUpdateDescriptorSets(device, 2u, writes, 0u, NULL);
+        vkUpdateDescriptorSets(device, 4u, writes, 0u, NULL);
     }
 
     vkCreateSemaphore(device, &(VkSemaphoreCreateInfo){
@@ -577,7 +785,8 @@ int main(void)
             .scene_min = {SCENE_MIN[0], SCENE_MIN[1], SCENE_MIN[2], 0.0f},
             .scene_extent = {SCENE_EXTENT[0], SCENE_EXTENT[1], SCENE_EXTENT[2], 0.0f},
             .radius_min_max = {SPHERE_RADIUS_MIN, SPHERE_RADIUS_MAX, 0.0f, 0.0f},
-            .counts = {packedSphereCount, 0u, 0u, 0u},
+            .counts = {packedSphereCount, gridCellCount, gridIndexCount, 0u},
+            .grid_dims = {GRID_RES_X, GRID_RES_Y, GRID_RES_Z, 0u},
         };
 
         vkResetCommandBuffer(commandBuffer, 0u);
