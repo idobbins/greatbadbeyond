@@ -3,42 +3,85 @@
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 layout(binding = 0, rgba8) uniform writeonly image2D outImage;
-layout(push_constant) uniform Camera {
+layout(std430, binding = 1) readonly buffer PackedSpheres {
+    uint words[];
+} spheres;
+layout(push_constant) uniform Scene {
     vec4 origin;
     vec4 forward_fov;
-} cam;
+    vec4 scene_min;
+    vec4 scene_extent;
+    vec4 radius_min_max;
+    uvec4 counts;
+} pc;
 
 struct Ray {
     vec3 origin;
     vec3 dir;
 };
 
-// SoA for spheres (static, hardcoded for determinism/DOD)
-const int NUM_SPHERES = 3;  // Fixed size for flat execution
-const vec3 sphere_centers[NUM_SPHERES] = vec3[](
-vec3(0.0, 0.0, -1.0),
-vec3(-1.0, 0.0, -1.0),
-vec3(1.0, 0.0, -1.0)
-);
-const float sphere_radii[NUM_SPHERES] = float[](
-0.5, 0.3, 0.4
-);
-const vec3 sphere_colors[NUM_SPHERES] = vec3[](
-vec3(1.0, 0.0, 0.0),  // Red
-vec3(0.0, 1.0, 0.0),  // Green
-vec3(0.0, 0.0, 1.0)   // Blue
-);
+vec3 skyColor(vec3 dir)
+{
+    float t = 0.5 * (dir.y + 1.0);
+    return mix(vec3(1.0), vec3(0.5, 0.7, 1.0), clamp(t, 0.0, 1.0));
+}
 
-float hitSphere(vec3 center, float radius, Ray r) {
+bool hitSphere(vec3 center, float radius, Ray r, out float t)
+{
     vec3 oc = r.origin - center;
     float a = dot(r.dir, r.dir);
     float h = dot(oc, r.dir);
     float c = dot(oc, oc) - radius * radius;
     float disc = h * h - a * c;
-    float root_disc = sqrt(max(disc, 0.0));
-    float t = (-h - root_disc) / a;
-    float hit = step(0.0, disc) * step(0.0, t);
-    return mix(-1.0, t, hit);
+    if (disc <= 0.0) return false;
+    float root = sqrt(disc);
+    float t0 = (-h - root) / a;
+    if (t0 > 0.001) { t = t0; return true; }
+    float t1 = (-h + root) / a;
+    if (t1 > 0.001) { t = t1; return true; }
+    return false;
+}
+
+void decodeSphere(uint sphereIndex, out vec3 center, out float radius, out uint materialId)
+{
+    uint w0 = spheres.words[sphereIndex * 2u + 0u];
+    uint w1 = spheres.words[sphereIndex * 2u + 1u];
+
+    uint qx = w0 & 0xffffu;
+    uint qy = (w0 >> 16u) & 0xffffu;
+    uint qz = w1 & 0xffffu;
+    uint qRadius = (w1 >> 16u) & 0x0fffu;
+    materialId = min((w1 >> 28u) & 0x0fu, 2u);
+
+    vec3 q = vec3(float(qx), float(qy), float(qz)) * (1.0 / 65535.0);
+    center = pc.scene_min.xyz + q * pc.scene_extent.xyz;
+
+    float encoded = float(qRadius) * (1.0 / 4095.0);
+    float radiusNorm = encoded * encoded;
+    radius = mix(pc.radius_min_max.x, pc.radius_min_max.y, radiusNorm);
+}
+
+vec3 shadeSphere(uint materialId, vec3 n, vec3 rayDir)
+{
+    vec3 sunDir = normalize(vec3(0.55, 0.85, 0.25));
+    float ndl = max(dot(n, sunDir), 0.0);
+
+    if (materialId == 0u)
+    {
+        return vec3(0.78, 0.44, 0.22) * (0.22 + 0.78 * ndl);
+    }
+    if (materialId == 1u)
+    {
+        vec3 refl = skyColor(reflect(rayDir, n));
+        vec3 base = vec3(0.56, 0.58, 0.62) * (0.2 + 0.8 * ndl);
+        return mix(base, refl, 0.75);
+    }
+
+    vec3 refl = skyColor(reflect(rayDir, n));
+    vec3 refrDir = refract(rayDir, n, 1.0 / 1.45);
+    vec3 refr = skyColor(refrDir) * vec3(0.82, 0.93, 1.0);
+    float fresnel = pow(1.0 - max(dot(-rayDir, n), 0.0), 5.0);
+    return mix(refr, refl, fresnel);
 }
 
 void main()
@@ -50,35 +93,66 @@ void main()
     vec2 uv = ((vec2(p) + 0.5) / vec2(sz)) * 2.0 - 1.0;
     uv.y = -uv.y;
 
-    vec3 forward = normalize(cam.forward_fov.xyz);
-    vec3 world_up = vec3(0.0, 1.0, 0.0);
-    vec3 right = normalize(cross(forward, world_up));
+    vec3 forward = normalize(pc.forward_fov.xyz);
+    vec3 worldUp = vec3(0.0, 1.0, 0.0);
+    vec3 right = normalize(cross(forward, worldUp));
     vec3 up = cross(right, forward);
     float aspect = float(sz.x) / float(sz.y);
-    float half_fov_tan = tan(cam.forward_fov.w * 0.5);
-    float half_height = half_fov_tan;
-    float half_width = half_fov_tan * aspect;
-    vec3 dir = normalize(forward + uv.x * right * half_width + uv.y * up * half_height);
+    float halfFovTan = tan(pc.forward_fov.w * 0.5);
+    vec3 dir = normalize(forward + uv.x * right * (halfFovTan * aspect) + uv.y * up * halfFovTan);
+    Ray r = Ray(pc.origin.xyz, dir);
 
-    Ray r = Ray(cam.origin.xyz, dir);
+    float minT = 1e30;
+    int hitType = 0;
+    vec3 hitCenter = vec3(0.0);
+    uint hitMaterial = 0u;
 
-    // Intersect all spheres (fixed loop unrolled implicitly, flat time)
-    float min_t = 1e30;  // Large positive
-    vec3 hit_color = vec3(0.0);  // Default no hit
-    for (int i = 0; i < NUM_SPHERES; ++i) {
-        float t = hitSphere(sphere_centers[i], sphere_radii[i], r);
-        float is_closer = step(t, min_t) * step(0.0, t);  // 1 if valid & closer
-        min_t = mix(min_t, t, is_closer);
-        hit_color = mix(hit_color, sphere_colors[i], is_closer);  // Accum closest color
+    uint sphereCount = pc.counts.x;
+    for (uint i = 0u; i < sphereCount; ++i)
+    {
+        vec3 center;
+        float radius;
+        uint materialId;
+        decodeSphere(i, center, radius, materialId);
+
+        float t = 0.0;
+        if (hitSphere(center, radius, r, t) && (t < minT))
+        {
+            minT = t;
+            hitType = 1;
+            hitCenter = center;
+            hitMaterial = materialId;
+        }
     }
 
-    // Background gradient
-    float bg_t = 0.5 * (dir.y + 1.0);
-    vec3 bg_color = (1.0 - bg_t) * vec3(1.0) + bg_t * vec3(0.5, 0.7, 1.0);
+    if (abs(r.dir.y) > 1e-5)
+    {
+        float planeT = -r.origin.y / r.dir.y;
+        if ((planeT > 0.001) && (planeT < minT))
+        {
+            minT = planeT;
+            hitType = 2;
+        }
+    }
 
-    // Final color: mix bg/hit branchlessly
-    float hit_mask = step(0.0, min_t);  // 1 if any hit
-    vec3 col = mix(bg_color, hit_color, hit_mask);
+    vec3 col = skyColor(dir);
+    if (hitType == 1)
+    {
+        vec3 hitPos = r.origin + r.dir * minT;
+        vec3 n = normalize(hitPos - hitCenter);
+        col = shadeSphere(hitMaterial, n, r.dir);
+    }
+    else if (hitType == 2)
+    {
+        vec3 hitPos = r.origin + r.dir * minT;
+        vec2 checkerCoord = floor(hitPos.xz);
+        float checker = abs(mod(checkerCoord.x + checkerCoord.y, 2.0));
+        vec3 floorA = vec3(0.11, 0.12, 0.13);
+        vec3 floorB = vec3(0.18, 0.19, 0.20);
+        vec3 floorBase = mix(floorA, floorB, checker);
+        float ndl = max(dot(vec3(0.0, 1.0, 0.0), normalize(vec3(0.55, 0.85, 0.25))), 0.0);
+        col = floorBase * (0.25 + 0.75 * ndl);
+    }
 
     imageStore(outImage, p, vec4(col, 1.0));
 }
